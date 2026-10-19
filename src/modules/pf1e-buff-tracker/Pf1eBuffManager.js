@@ -2,7 +2,7 @@ import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 
 /**
  * Pf1eBuffManager.js
- * 负责扫描并管理 PF1e 角色卡上的原生 repeating_buff2 重复列表
+ * 负责扫描、添加、修改与关停 PF1e 角色卡上的原生 repeating_buff2 重复列表
  */
 export class Pf1eBuffManager {
     /**
@@ -27,7 +27,6 @@ export class Pf1eBuffManager {
 
         for (const toggle of toggles) {
             const toggleName = toggle.get("name");
-            // 提取前缀，形如 "repeating_buff2_-P4JOasf4oi-30Rh78tV"
             const prefix = toggleName.substring(0, toggleName.lastIndexOf("_enable_toggle"));
             const rowId = prefix.replace("repeating_buff2_", "");
 
@@ -46,12 +45,69 @@ export class Pf1eBuffManager {
                 rounds: (rounds !== null && !isNaN(rounds)) ? rounds : null,
                 buffType,
                 toggleAttr: toggle,
-                roundsAttr: roundsAttr || null,
-                icon: buffType === "spell" ? "✨" : "🛡️"
+                roundsAttr: roundsAttr || null
             });
         }
 
         return activeBuffs;
+    }
+
+    /**
+     * 为角色卡新增一个原生 Buff 行并激活
+     * @param {object} character Character 模型
+     * @param {string} buffName Buff 名称
+     * @param {number|null} rounds 持续轮数 (null 表示常驻)
+     */
+    static async addBuff(character, buffName, rounds = null) {
+        if (!character) return null;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+
+        const cleanName = (buffName || "新Buff").trim();
+        // 生成 Roll20 风格随机 rowId
+        const rowId = "-p" + Math.random().toString(36).substring(2, 12);
+        const prefix = `repeating_buff2_${rowId}`;
+
+        // 创建行基础属性
+        const nameAttr = character.attribs.create({ name: `${prefix}_name`, current: cleanName });
+        const toggleAttr = character.attribs.create({ name: `${prefix}_enable_toggle`, current: 1 });
+        const typeAttr = character.attribs.create({ name: `${prefix}_bufftype`, current: "spell" });
+
+        let roundsAttr = null;
+        if (rounds !== null && !isNaN(rounds) && rounds > 0) {
+            roundsAttr = character.attribs.create({
+                name: `${prefix}_rounds`,
+                current: Number(rounds),
+                max: Number(rounds)
+            });
+        }
+
+        console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增 Buff [${cleanName}], 轮数: ${rounds}`);
+        return { rowId, prefix, name: cleanName, rounds, toggleAttr, roundsAttr };
+    }
+
+    /**
+     * 关停/解除指定角色身上的某个 Buff
+     * @param {object} character Character 模型
+     * @param {string} rowId Buff 行ID
+     */
+    static async removeBuff(character, rowId) {
+        if (!character) return false;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+
+        const prefix = `repeating_buff2_${rowId}`;
+        const toggleAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_enable_toggle`);
+        const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+
+        if (toggleAttr) {
+            // 将开关置 0，PF1e 自带的 Sheet Worker 会自动撤销该 Buff 的全部数值加值
+            toggleAttr.save({ current: 0 });
+        }
+        if (roundsAttr) {
+            roundsAttr.save({ current: 0 });
+        }
+
+        console.log(`[Pf1eBuffManager] 已解除 ${character.get("name")} 的 Buff (${rowId})`);
+        return true;
     }
 
     /**
@@ -95,26 +151,22 @@ export class Pf1eBuffManager {
         const processed = [];
 
         for (const buff of activeBuffs) {
-            // 如果玩家未给此 Buff 设置轮数（rounds 为 null），视为常驻 Buff，不扣减
+            // 如果未设置轮数（常驻 Buff），不扣减
             if (buff.rounds === null) continue;
 
             const newRounds = buff.rounds - 1;
 
             if (newRounds <= 0) {
-                // 1. 轮数归零：自动关闭 PF1e 卡上的 enable_toggle 开关
-                buff.toggleAttr.save({ current: 0 });
-                if (buff.roundsAttr) {
-                    buff.roundsAttr.save({ current: 0 });
-                }
+                // 轮数归零：自动关闭 PF1e 卡上的开关
+                await this.removeBuff(character, buff.rowId);
 
-                // 2. 聊天栏播报法术效果结束
-                const msg = `&{template:default} {{name=Buff 持续时间结束}} {{角色=${charName}}} {{效果=${buff.name}}} {{提示=持续时间已耗尽，已自动取消勾选生效。}}`;
+                // 聊天栏播报法术效果结束
+                const msg = `&{template:default} {{name=Buff 持续时间结束}} {{角色=${charName}}} {{效果=${buff.name}}} {{提示=持续时间归零，已自动取消生效。}}`;
                 Roll20Bridge.sendChatMessage(msg);
 
                 processed.push({ name: buff.name, status: "expired", remaining: 0 });
-                console.log(`[Pf1eBuffManager] ${charName} 的 Buff [${buff.name}] 持续时间归零，已自动关闭`);
             } else {
-                // 2. 轮数递减：更新卡片上的 rounds 字段
+                // 轮数递减
                 if (buff.roundsAttr) {
                     buff.roundsAttr.save({ current: newRounds });
                 } else {
@@ -122,7 +174,6 @@ export class Pf1eBuffManager {
                 }
 
                 processed.push({ name: buff.name, status: "decremented", remaining: newRounds });
-                console.log(`[Pf1eBuffManager] ${charName} 的 Buff [${buff.name}] 扣减 1 轮，剩余 ${newRounds} 轮`);
             }
         }
 
