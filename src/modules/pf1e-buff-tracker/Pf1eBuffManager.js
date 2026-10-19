@@ -59,8 +59,9 @@ export class Pf1eBuffManager {
      * @param {object} character Character 模型
      * @param {string} buffName Buff 名称
      * @param {number|null} rounds 持续轮数
+     * @param {object|null} extraAttrs 额外的细目加值字典（如 b1_bonus, b1_val 等）
      */
-    static async applyOrRefreshBuff(character, buffName, rounds = null) {
+    static async applyOrRefreshBuff(character, buffName, rounds = null, extraAttrs = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -98,11 +99,25 @@ export class Pf1eBuffManager {
                 roundsAttr.save({ current: "" });
             }
 
+            // 更新细目属性
+            if (extraAttrs && typeof extraAttrs === "object") {
+                for (const [k, v] of Object.entries(extraAttrs)) {
+                    if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "row_id") continue;
+                    const attrFullName = `${prefix}_${k}`;
+                    let subAttr = character.attribs.models.find(a => a.get("name") === attrFullName);
+                    if (!subAttr) {
+                        character.attribs.create({ name: attrFullName, current: v });
+                    } else {
+                        subAttr.save({ current: v });
+                    }
+                }
+            }
+
             console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 激活并刷新已有同名 Buff [${cleanName}], 轮数: ${rounds}`);
             return { rowId, prefix, name: cleanName, rounds, isRefreshed: true };
         } else {
             // 不存在同名 Buff，新增一行
-            const newBuff = await this.addBuff(character, cleanName, rounds);
+            const newBuff = await this.addBuff(character, cleanName, rounds, extraAttrs);
             return { ...newBuff, isRefreshed: false };
         }
     }
@@ -110,7 +125,7 @@ export class Pf1eBuffManager {
     /**
      * 为角色卡新增一个原生 Buff 行并激活
      */
-    static async addBuff(character, buffName, rounds = null) {
+    static async addBuff(character, buffName, rounds = null, extraAttrs = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -129,6 +144,14 @@ export class Pf1eBuffManager {
                 current: Number(rounds),
                 max: Number(rounds)
             });
+        }
+
+        // 写入细目属性
+        if (extraAttrs && typeof extraAttrs === "object") {
+            for (const [k, v] of Object.entries(extraAttrs)) {
+                if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "bufftype" || k === "row_id") continue;
+                character.attribs.create({ name: `${prefix}_${k}`, current: v });
+            }
         }
 
         console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增原生 Buff [${cleanName}], 轮数: ${rounds}`);

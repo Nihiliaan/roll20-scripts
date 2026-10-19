@@ -83,8 +83,9 @@ export class TokenBuffManager {
      * @param {object} token Graphic 模型
      * @param {string} buffName Buff 名称
      * @param {number|null} rounds 持续轮数
+     * @param {object|null} extraAttrs 细目属性字典
      */
-    static applyOrRefreshBuff(token, buffName, rounds = null) {
+    static applyOrRefreshBuff(token, buffName, rounds = null, extraAttrs = null) {
         if (!token) return false;
         const cleanName = (buffName || "").trim();
         if (!cleanName) return false;
@@ -94,11 +95,13 @@ export class TokenBuffManager {
 
         if (existing) {
             existing.rounds = (rounds !== null && !isNaN(rounds)) ? Number(rounds) : null;
+            if (extraAttrs) existing.extraAttrs = extraAttrs;
             console.log(`[TokenBuffManager] Token [${token.get("name")}] 刷新同名 Buff [${cleanName}], 剩余: ${rounds}轮`);
         } else {
             buffs.push({
                 name: cleanName,
-                rounds: (rounds !== null && !isNaN(rounds)) ? Number(rounds) : null
+                rounds: (rounds !== null && !isNaN(rounds)) ? Number(rounds) : null,
+                extraAttrs: extraAttrs || null
             });
             console.log(`[TokenBuffManager] Token [${token.get("name")}] 新增 Buff [${cleanName}], 轮数: ${rounds}`);
         }
