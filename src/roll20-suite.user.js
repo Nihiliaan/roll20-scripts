@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.5.0
-// @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成响应式三态高亮直接交互、云端配置角色卡持久化、JSON细目编辑、选区联动与纯Token智能适配
+// @version      0.6.0
+// @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成双栏自适应延伸、图钉感应折叠、三态直接高亮交互、跨窗格复制拖拽与云端配置持久化
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
 // @grant        none
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.5.0...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.6.0...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -1199,24 +1199,31 @@ class Pf1eBuffUI {
     // 7. BuffFloatingPanel (三态高亮响应式悬浮面板)
     // ==========================================
 /**
- * BuffFloatingPanel.js (v0.5.0)
- * 核心悬浮窗组件：
- * 1. 响应式三态高亮联动：未高亮 / 半高亮 / 完全高亮；
- * 2. 直接操作范式：点击即施加 / 即取消，彻底移除复选框与一键施加确认按钮；
- * 3. 常驻顶置不可删除文件夹：【🎯 当前选中单位生效Buff】；
- * 4. 文件夹级联三态高亮与一键全组开启/关闭；
- * 5. 编辑模式门槛：只有画布无选中棋子时显示编辑按钮，编辑模式下支持多选高亮批量删除与拖拽重排；
- * 6. 支持云端配置卡存储与玩家身份降级自动提取。
+ * BuffFloatingPanel.js (v0.6.0)
+ * 极致人机工程学悬浮面板：
+ * 1. 单窗口内部分上下双窗格（模板库栏 + 当前单位Buff栏），各自独立滚动与折叠，内容增多自然向外延伸；
+ * 2. 屏幕边缘自适应与重心反转：上半区向下呈现（模板在上，单位在下），下半区向上呈现（单位在上，模板在下）；
+ * 3. 图钉按钮 📌 与鼠标移出自动感应折叠（400ms 防抖）；
+ * 4. 编辑模式全面放开：选中 Token 也可随时进入，进入后清除 Buff 开关高亮，转为编辑/多选删除目标；
+ * 5. 跨窗格拖拽“复制”逻辑：栏内拖拽为移动，跨栏拖拽为复制（另存为模板 / 施加Buff）；
+ * 6. 原生 PF1e 属性 100% 规范支持，杜绝任何报错。
  */
 class BuffFloatingPanel {
-    static POS_KEY = "r20_buff_panel_pos";
+    static POS_KEY = "r20_buff_panel_pos_v6";
+    static PIN_KEY = "r20_buff_panel_pinned";
 
     static isEditMode = false;
-    static isCollapsed = false;
+    static isPinned = false; // 是否开启图钉固定
+    static isHoverCollapsed = false; // 鼠标移出自动折叠态
+    static isUnitPaneCollapsed = false; // 当前单位分栏收折态
+    static isTemplatePaneCollapsed = false; // 模板库分栏收折态
+
     static panelEl = null;
     static templates = [];
-    static editSelectedIds = new Set(); // 编辑模式下被选中的待删 ID 集合
+    static editSelectedIds = new Set();
     static lastSelectedTokenIds = [];
+    static _leaveTimer = null;
+    static _draggedData = null; // { node, parentList, index, sourcePane: 'template' | 'unit' }
 
     /**
      * 默认预设模板树（多级目录）
@@ -1311,7 +1318,7 @@ class BuffFloatingPanel {
                         b1_bonustype: "dodge",
                         b1_val: 1,
                         "b2-show": 1,
-                        b2_bonus: "AC",
+                        b2_bonus: "ac",
                         b2_bonustype: "dodge",
                         b2_val: 1
                     }
@@ -1324,7 +1331,7 @@ class BuffFloatingPanel {
                     extraAttrs: {
                         bufftype: "spell",
                         "b1-show": 1,
-                        b1_bonus: "AC",
+                        b1_bonus: "armor",
                         b1_bonustype: "shield",
                         b1_val: 4
                     }
@@ -1350,12 +1357,15 @@ class BuffFloatingPanel {
      */
     static async init() {
         this.templates = await SuiteConfigStore.loadTemplates(this.defaultTemplates);
+        this.isPinned = localStorage.getItem(this.PIN_KEY) === "true";
+
         this.injectStyles();
         this.createPanelDOM();
-        this.renderTree();
+        await this.renderAllPanes();
         this.initDragWindow();
+        this.initHoverCollapse();
         this.startSelectionObserver();
-        console.log("[BuffFloatingPanel] 悬浮面板 v0.5.0 已成功加载");
+        console.log("[BuffFloatingPanel] 悬浮面板 v0.6.0 已成功加载");
     }
 
     /**
@@ -1388,7 +1398,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 获取画布上当前选中的所有可用棋子
+     * 获取画布上当前选中的所有 Token
      */
     static getSelectedTokens() {
         if (!window.Campaign.engine || typeof window.Campaign.engine.getSelection !== "function") return [];
@@ -1417,7 +1427,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 启动画布选中变化监听器（每 200ms 检测一次选中的变化）
+     * 启动选中状态轮询监听（每 200ms）
      */
     static startSelectionObserver() {
         setInterval(async () => {
@@ -1427,49 +1437,30 @@ class BuffFloatingPanel {
 
             if (currentIds !== lastIds) {
                 this.lastSelectedTokenIds = currentSelected.map(t => t.id);
-                // 更新编辑按钮显隐：无选中时显示编辑按钮，有选中时隐藏
-                this.updateEditButtonVisibility(currentSelected.length === 0);
-                if (currentSelected.length > 0 && this.isEditMode) {
-                    // 若进入编辑模式后用户在画布选中了棋子，自动退出编辑模式
-                    this.isEditMode = false;
-                    this.updateToolbarVisibility();
-                }
-                await this.renderTree();
+                await this.renderAllPanes();
+                this.updateLayoutDirection();
             }
         }, 200);
     }
 
     /**
-     * 更新编辑按钮显示状态
+     * 计算并调整上下双窗格的重心布局反转
      */
-    static updateEditButtonVisibility(show) {
+    static updateLayoutDirection() {
         if (!this.panelEl) return;
-        const btnEdit = this.panelEl.querySelector(".btn-toggle-edit");
-        if (btnEdit) {
-            btnEdit.style.display = show ? "inline-block" : "none";
-        }
-    }
+        const rect = this.panelEl.getBoundingClientRect();
+        const middleY = window.innerHeight / 2;
+        const bodyEl = this.panelEl.querySelector(".r20-panel-body");
 
-    /**
-     * 更新工具栏显示状态
-     */
-    static updateToolbarVisibility() {
-        if (!this.panelEl) return;
-        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
-        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
-        if (this.isEditMode) {
-            if (editBtn) {
-                editBtn.classList.add("active");
-                editBtn.textContent = "🔒 完成";
-            }
-            if (toolbar) toolbar.style.display = "flex";
+        // 若面板重心在屏幕下半区，则向上展开（反转顺序：单位栏在上，模板栏在下）
+        if (rect.top > middleY) {
+            this.panelEl.classList.add("direction-up");
+            this.panelEl.classList.remove("direction-down");
+            if (bodyEl) bodyEl.style.flexDirection = "column-reverse";
         } else {
-            if (editBtn) {
-                editBtn.classList.remove("active");
-                editBtn.textContent = "✏️ 编辑";
-            }
-            if (toolbar) toolbar.style.display = "none";
-            this.editSelectedIds.clear();
+            this.panelEl.classList.add("direction-down");
+            this.panelEl.classList.remove("direction-up");
+            if (bodyEl) bodyEl.style.flexDirection = "column";
         }
     }
 
@@ -1483,35 +1474,34 @@ class BuffFloatingPanel {
         style.textContent = `
             #r20-buff-panel {
                 position: fixed;
-                top: 80px;
-                right: 320px;
-                width: 310px;
+                width: 320px;
                 background: #1a1e24;
                 border: 1px solid #323d47;
                 border-radius: 8px;
-                box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+                box-shadow: 0 10px 30px rgba(0,0,0,0.65);
                 color: #eceff1;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                 z-index: 99999;
                 display: flex;
                 flex-direction: column;
                 user-select: none;
-                transition: height 0.2s ease, width 0.2s ease;
+                transition: opacity 0.2s ease, width 0.2s ease;
             }
-            #r20-buff-panel.collapsed {
-                width: auto;
-                height: 36px;
-                overflow: hidden;
+            #r20-buff-panel.hover-collapsed {
+                opacity: 0.25;
+            }
+            #r20-buff-panel.hover-collapsed:hover {
+                opacity: 1;
             }
             .r20-panel-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 8px 12px;
+                padding: 7px 10px;
                 background: #232b34;
                 border-bottom: 1px solid #323d47;
                 cursor: grab;
-                border-radius: 8px 8px 0 0;
+                border-radius: 7px 7px 0 0;
             }
             .r20-panel-title {
                 font-size: 12px;
@@ -1524,7 +1514,7 @@ class BuffFloatingPanel {
             .r20-panel-controls {
                 display: flex;
                 align-items: center;
-                gap: 6px;
+                gap: 4px;
             }
             .r20-btn-icon {
                 background: none;
@@ -1532,7 +1522,7 @@ class BuffFloatingPanel {
                 color: #90a4ae;
                 font-size: 12px;
                 cursor: pointer;
-                padding: 3px 6px;
+                padding: 2px 6px;
                 border-radius: 3px;
                 transition: background 0.15s, color 0.15s;
             }
@@ -1544,30 +1534,70 @@ class BuffFloatingPanel {
                 background: #1565c0;
                 color: #ffffff;
             }
-            .r20-btn-icon.danger {
-                color: #ef5350;
+            .r20-btn-icon.pinned {
+                color: #ffd54f !important;
+                background: rgba(255, 213, 79, 0.15);
             }
-            .r20-btn-icon.danger:hover {
-                background: #c62828;
-                color: #ffffff;
+            .r20-btn-icon.danger { color: #ef5350; }
+            .r20-btn-icon.danger:hover { background: #c62828; color: #ffffff; }
+
+            .r20-panel-body {
+                display: flex;
+                flex-direction: column;
+                gap: 0px;
+                max-height: 80vh;
+                overflow: visible;
             }
-            .r20-panel-toolbar {
+
+            /* 分立窗格通用样式 */
+            .r20-split-pane {
+                display: flex;
+                flex-direction: column;
+                background: #1a1e24;
+                border-bottom: 1px solid #2a3440;
+            }
+            .r20-pane-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
                 padding: 6px 10px;
-                background: #161b20;
-                border-bottom: 1px solid #263238;
+                background: #1e242c;
                 font-size: 11px;
+                font-weight: 600;
+                color: #90caf9;
+                cursor: pointer;
+                border-top: 1px solid #2c3642;
+                border-bottom: 1px solid #2c3642;
             }
-            .r20-panel-tree {
-                max-height: 420px;
+            .r20-pane-header:hover {
+                background: #252d37;
+            }
+            .r20-pane-title {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+            }
+            .r20-pane-content {
+                max-height: 260px;
                 overflow-y: auto;
                 padding: 6px 8px;
                 display: flex;
                 flex-direction: column;
                 gap: 2px;
             }
+
+            /* 工具栏 */
+            .r20-panel-toolbar {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 5px 8px;
+                background: #161b20;
+                border-bottom: 1px solid #263238;
+                font-size: 11px;
+            }
+
+            /* 根目录放置区 */
             .r20-drop-zone-root {
                 padding: 4px;
                 border: 1px dashed #37474f;
@@ -1579,24 +1609,20 @@ class BuffFloatingPanel {
                 display: none;
                 transition: background 0.2s, border-color 0.2s;
             }
-            .r20-drop-zone-root.active-zone {
-                display: block;
-            }
+            .r20-drop-zone-root.active-zone { display: block; }
             .r20-drop-zone-root.r20-drag-into {
                 background: rgba(33, 150, 243, 0.2);
                 border-color: #64b5f6;
                 color: #ffffff;
             }
-            .r20-tree-folder {
-                display: flex;
-                flex-direction: column;
-                margin-bottom: 2px;
-            }
+
+            /* 树状文件夹与项目 */
+            .r20-tree-folder { display: flex; flex-direction: column; margin-bottom: 2px; }
             .r20-folder-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 5px 8px;
+                padding: 4px 6px;
                 background: #202730;
                 border-radius: 4px;
                 font-size: 11px;
@@ -1606,11 +1632,7 @@ class BuffFloatingPanel {
                 border: 1px solid transparent;
                 transition: all 0.2s ease;
             }
-            .r20-folder-header:hover {
-                background: #2a3440;
-                color: #ffffff;
-            }
-            /* 文件夹三态高亮 */
+            .r20-folder-header:hover { background: #2a3440; color: #ffffff; }
             .r20-folder-header.full-active {
                 background: #1b4931 !important;
                 border-color: #4caf50 !important;
@@ -1621,12 +1643,7 @@ class BuffFloatingPanel {
                 border-color: #fbc02d !important;
                 color: #fffde7 !important;
             }
-            .r20-folder-title {
-                display: flex;
-                align-items: center;
-                gap: 5px;
-                overflow: hidden;
-            }
+            .r20-folder-title { display: flex; align-items: center; gap: 5px; overflow: hidden; }
             .r20-folder-children {
                 margin-left: 12px;
                 border-left: 1px dashed #37474f;
@@ -1636,11 +1653,12 @@ class BuffFloatingPanel {
                 gap: 2px;
                 margin-top: 2px;
             }
+
             .r20-tree-item {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 5px 8px;
+                padding: 4px 8px;
                 background: #242c37;
                 border-radius: 4px;
                 font-size: 11px;
@@ -1654,7 +1672,6 @@ class BuffFloatingPanel {
                 border-color: #64b5f6;
                 color: #ffffff;
             }
-            /* 条目三态高亮 */
             .r20-tree-item.full-active {
                 background: #1e3d59 !important;
                 border-color: #42a5f5 !important;
@@ -1667,23 +1684,13 @@ class BuffFloatingPanel {
                 color: #fff8e1 !important;
                 border-style: dashed !important;
             }
-            /* 编辑模式下的选中态 */
             .r20-tree-item.edit-selected, .r20-tree-folder.edit-selected > .r20-folder-header {
                 background: #4a148c !important;
                 border-color: #ba68c8 !important;
                 color: #f3e5f5 !important;
             }
-            .r20-item-left {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                overflow: hidden;
-            }
-            .r20-item-name {
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
+            .r20-item-left { display: flex; align-items: center; gap: 6px; overflow: hidden; }
+            .r20-item-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .r20-item-rounds {
                 font-size: 10px;
                 color: #90caf9;
@@ -1691,21 +1698,12 @@ class BuffFloatingPanel {
                 padding: 1px 4px;
                 border-radius: 3px;
             }
-            .r20-item-actions {
-                display: flex;
-                align-items: center;
-                gap: 4px;
-            }
+            .r20-item-actions { display: flex; align-items: center; gap: 4px; }
 
-            /* 拖拽态高亮 */
-            .r20-drag-over {
-                border-top: 2px solid #64b5f6 !important;
-            }
-            .r20-drag-into {
-                background: rgba(25, 118, 210, 0.3) !important;
-            }
+            .r20-drag-over { border-top: 2px solid #64b5f6 !important; }
+            .r20-drag-into { background: rgba(25, 118, 210, 0.3) !important; }
 
-            /* Toast 提示 */
+            /* Toast */
             .r20-toast {
                 position: fixed;
                 bottom: 30px;
@@ -1817,7 +1815,7 @@ class BuffFloatingPanel {
         const panel = document.createElement("div");
         panel.id = "r20-buff-panel";
 
-        // 读取持久化位置并做安全边界校验，防止超出当前窗口可视范围
+        // 读取持久化位置并做安全边界校验
         const savedPos = localStorage.getItem(this.POS_KEY);
         let safeLeft = null;
         let safeTop = null;
@@ -1826,12 +1824,8 @@ class BuffFloatingPanel {
                 const pos = JSON.parse(savedPos);
                 const maxLeft = Math.max(10, window.innerWidth - 330);
                 const maxTop = Math.max(10, window.innerHeight - 100);
-                if (pos.left !== undefined && pos.left < maxLeft && pos.left >= 0) {
-                    safeLeft = Math.max(10, pos.left);
-                }
-                if (pos.top !== undefined && pos.top < maxTop && pos.top >= 0) {
-                    safeTop = Math.max(10, pos.top);
-                }
+                if (pos.left !== undefined && pos.left < maxLeft && pos.left >= 0) safeLeft = Math.max(10, pos.left);
+                if (pos.top !== undefined && pos.top < maxTop && pos.top >= 0) safeTop = Math.max(10, pos.top);
             } catch (e) {}
         }
 
@@ -1840,7 +1834,6 @@ class BuffFloatingPanel {
             panel.style.left = `${safeLeft}px`;
             panel.style.right = "auto";
         } else {
-            // 默认停靠在右上角安全区域
             panel.style.top = "80px";
             panel.style.right = "320px";
             panel.style.left = "auto";
@@ -1850,78 +1843,162 @@ class BuffFloatingPanel {
             <div class="r20-panel-header">
                 <div class="r20-panel-title">
                     <span>🛡️</span>
-                    <span>状态Buff库</span>
+                    <span>状态Buff工作台</span>
                 </div>
                 <div class="r20-panel-controls">
-                    <button class="r20-btn-icon btn-toggle-edit" title="进入编辑与排序模式" style="display:inline-block;">✏️ 编辑</button>
+                    <button class="r20-btn-icon btn-toggle-pin ${this.isPinned ? "pinned" : ""}" title="${this.isPinned ? "取消固定(移出自动折叠)" : "固定常驻显示"}">📌</button>
+                    <button class="r20-btn-icon btn-toggle-edit" title="进入/退出编辑模式">✏️ 编辑</button>
                     <button class="r20-btn-icon btn-minimize" title="最小化收起">─</button>
                 </div>
             </div>
             <div class="r20-panel-body">
-                <div class="r20-panel-toolbar" style="display: none;">
-                    <div style="display:flex; gap:4px;">
-                        <button class="r20-btn-icon btn-new-buff" title="新建 Buff 模板">+ Buff</button>
-                        <button class="r20-btn-icon btn-new-folder" title="新建文件夹">+ 目录</button>
-                        <button class="r20-btn-icon btn-import-buffs" title="从战役角色卡导入Buff">📥 导入卡上Buff</button>
+                <!-- 模板库栏 -->
+                <div class="r20-split-pane r20-template-pane">
+                    <div class="r20-pane-header">
+                        <div class="r20-pane-title">
+                            <span class="toggle-icon">${this.isTemplatePaneCollapsed ? "▶" : "▼"}</span>
+                            <span>📚 Buff 模板库</span>
+                        </div>
                     </div>
-                    <button class="r20-btn-icon danger btn-batch-delete" title="批量删除选中的高亮项">🗑️ 批量删除</button>
+                    <div class="r20-panel-toolbar" style="display: none;">
+                        <div style="display:flex; gap:4px;">
+                            <button class="r20-btn-icon btn-new-buff" title="新建 Buff 模板">+ Buff</button>
+                            <button class="r20-btn-icon btn-new-folder" title="新建文件夹">+ 目录</button>
+                            <button class="r20-btn-icon btn-import-buffs" title="从战役角色卡导入Buff">📥 导入卡上Buff</button>
+                        </div>
+                        <button class="r20-btn-icon danger btn-batch-delete" title="批量删除选中的高亮项">🗑️ 批量删除</button>
+                    </div>
+                    <div class="r20-pane-content r20-template-tree" style="display: ${this.isTemplatePaneCollapsed ? 'none' : 'flex'};"></div>
                 </div>
-                <div class="r20-panel-tree"></div>
+
+                <!-- 当前单位生效 Buff 栏 -->
+                <div class="r20-split-pane r20-unit-pane">
+                    <div class="r20-pane-header">
+                        <div class="r20-pane-title">
+                            <span class="toggle-icon">${this.isUnitPaneCollapsed ? "▶" : "▼"}</span>
+                            <span>🎯 当前单位 Buff</span>
+                        </div>
+                        <span class="unit-pane-summary" style="font-size:10px; color:#90caf9;">未选择棋子</span>
+                    </div>
+                    <div class="r20-pane-content r20-unit-tree" style="display: ${this.isUnitPaneCollapsed ? 'none' : 'flex'};"></div>
+                </div>
             </div>
         `;
 
         document.body.appendChild(panel);
         this.panelEl = panel;
 
-        panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
+        // 图钉与编辑
+        panel.querySelector(".btn-toggle-pin").addEventListener("click", () => this.togglePin());
         panel.querySelector(".btn-toggle-edit").addEventListener("click", () => this.toggleEditMode());
+        panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
 
+        // 双栏收折监听
+        panel.querySelector(".r20-template-pane .r20-pane-header").addEventListener("click", (e) => {
+            if (e.target.tagName === "BUTTON") return;
+            this.isTemplatePaneCollapsed = !this.isTemplatePaneCollapsed;
+            panel.querySelector(".r20-template-pane .toggle-icon").textContent = this.isTemplatePaneCollapsed ? "▶" : "▼";
+            panel.querySelector(".r20-template-tree").style.display = this.isTemplatePaneCollapsed ? "none" : "flex";
+            this.updateLayoutDirection();
+        });
+
+        panel.querySelector(".r20-unit-pane .r20-pane-header").addEventListener("click", (e) => {
+            if (e.target.tagName === "BUTTON") return;
+            this.isUnitPaneCollapsed = !this.isUnitPaneCollapsed;
+            panel.querySelector(".r20-unit-pane .toggle-icon").textContent = this.isUnitPaneCollapsed ? "▶" : "▼";
+            panel.querySelector(".r20-unit-tree").style.display = this.isUnitPaneCollapsed ? "none" : "flex";
+            this.updateLayoutDirection();
+        });
+
+        // 工具栏
         panel.querySelector(".btn-new-buff").addEventListener("click", () => this.showBuffEditorDialog());
         panel.querySelector(".btn-new-folder").addEventListener("click", () => this.showNewFolderDialog());
         panel.querySelector(".btn-import-buffs").addEventListener("click", () => this.showImportFromCharacterDialog());
         panel.querySelector(".btn-batch-delete").addEventListener("click", () => this.deleteSelectedBuffs());
+
+        this.updateLayoutDirection();
     }
 
     /**
-     * 最小化折叠切换
+     * 图钉固定切换
      */
-    static toggleCollapse() {
-        this.isCollapsed = !this.isCollapsed;
-        const body = this.panelEl.querySelector(".r20-panel-body");
-        const minBtn = this.panelEl.querySelector(".btn-minimize");
-        if (this.isCollapsed) {
-            body.style.display = "none";
-            this.panelEl.classList.add("collapsed");
-            minBtn.textContent = "▢";
+    static togglePin() {
+        this.isPinned = !this.isPinned;
+        localStorage.setItem(this.PIN_KEY, String(this.isPinned));
+        const btnPin = this.panelEl.querySelector(".btn-toggle-pin");
+        if (this.isPinned) {
+            btnPin.classList.add("pinned");
+            btnPin.title = "取消固定(移出自动折叠)";
+            this.panelEl.classList.remove("hover-collapsed");
+            this.showToast("📌 已固定悬浮窗显示", "info");
         } else {
-            body.style.display = "block";
-            this.panelEl.classList.remove("collapsed");
-            minBtn.textContent = "─";
+            btnPin.classList.remove("pinned");
+            btnPin.title = "固定常驻显示";
+            this.showToast("📌 已开启鼠标移出自动折叠", "info");
         }
     }
 
     /**
-     * 编辑模式切换（只有无选中棋子时允许触发）
+     * 鼠标移入展开、移出折叠（带 400ms 防抖）
      */
-    static toggleEditMode() {
-        const selected = this.getSelectedTokens();
-        if (selected.length > 0) {
-            this.showToast("⚠️ 只有在未选中任何棋子时才可以进入编辑模式", "warn");
-            return;
-        }
+    static initHoverCollapse() {
+        this.panelEl.addEventListener("mouseenter", () => {
+            if (this._leaveTimer) clearTimeout(this._leaveTimer);
+            if (!this.isPinned) {
+                this.panelEl.classList.remove("hover-collapsed");
+            }
+        });
 
-        this.isEditMode = !this.isEditMode;
-        this.updateToolbarVisibility();
-        this.renderTree();
+        this.panelEl.addEventListener("mouseleave", () => {
+            if (this.isPinned) return;
+            if (this._leaveTimer) clearTimeout(this._leaveTimer);
+            this._leaveTimer = setTimeout(() => {
+                if (!this.isPinned) {
+                    this.panelEl.classList.add("hover-collapsed");
+                }
+            }, 400);
+        });
     }
 
     /**
-     * 收集当前所有选中棋子身上的所有 Buff（包括生效中与未启动的）
-     * @returns {Promise<{activeStats: Map<string, {count: number, total: number}>, allBuffRows: Array}>}
+     * 编辑模式切换（允许在选中 Token 时直接进入）
+     */
+    static async toggleEditMode() {
+        this.isEditMode = !this.isEditMode;
+        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
+        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
+
+        if (this.isEditMode) {
+            editBtn.classList.add("active");
+            editBtn.textContent = "🔒 完成";
+            toolbar.style.display = "flex";
+            this.editSelectedIds.clear(); // 清除之前的选择
+            this.showToast("✏️ 已进入编辑模式：点击项目可多选待删，支持跨栏拖拽复制", "info");
+        } else {
+            editBtn.classList.remove("active");
+            editBtn.textContent = "✏️ 编辑";
+            toolbar.style.display = "none";
+            this.editSelectedIds.clear();
+        }
+
+        await this.renderAllPanes();
+    }
+
+    /**
+     * 渲染全部窗格
+     */
+    static async renderAllPanes() {
+        await this.renderTemplatePane();
+        await this.renderUnitPane();
+        this.updateLayoutDirection();
+    }
+
+    /**
+     * 收集选中单位的 Buff 详情
      */
     static async getBuffStatsForSelected(selectedTokens) {
         const activeStats = new Map();
-        const allBuffRows = []; // 包含 enabled 与 disabled 的全部条目详情
+        const allBuffRows = [];
         if (selectedTokens.length === 0) return { activeStats, allBuffRows };
 
         for (const item of selectedTokens) {
@@ -1932,12 +2009,11 @@ class BuffFloatingPanel {
                 const tokenBuffs = TokenBuffManager.getTokenBuffs(item.token);
                 itemBuffs = tokenBuffs.map(b => ({
                     name: b.name,
-                    enabled: true, // 纯 Token 默认均为生效
+                    enabled: true,
                     rounds: b.rounds
                 }));
             }
 
-            // 统计生效中的 Buff
             const activeNames = itemBuffs.filter(b => b.enabled).map(b => b.name);
             const uniqueActiveNames = new Set(activeNames);
             for (const name of uniqueActiveNames) {
@@ -1948,7 +2024,6 @@ class BuffFloatingPanel {
                 }
             }
 
-            // 收集所有条目（包含未启动）
             for (const b of itemBuffs) {
                 let existing = allBuffRows.find(x => x.name === b.name);
                 if (!existing) {
@@ -1970,9 +2045,10 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 计算 Buff 状态高亮类名：'full-active' | 'partial-active' | ''
+     * 计算三态类名
      */
     static getHighlightClass(name, activeStats, isSelectedCount) {
+        if (this.isEditMode) return ""; // 编辑模式下不渲染开关状态
         if (isSelectedCount === 0 || !activeStats.has(name)) return "";
         const stat = activeStats.get(name);
         if (stat.count === isSelectedCount) return "full-active";
@@ -1981,32 +2057,25 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 递归渲染目录树
+     * 1. 渲染【模板库栏】
      */
-    static async renderTree() {
-        const treeContainer = this.panelEl.querySelector(".r20-panel-tree");
-        if (!treeContainer) return;
-        treeContainer.innerHTML = "";
+    static async renderTemplatePane() {
+        const container = this.panelEl.querySelector(".r20-template-tree");
+        if (!container) return;
+        container.innerHTML = "";
 
         const selectedTokens = this.getSelectedTokens();
-        const { activeStats, allBuffRows } = await this.getBuffStatsForSelected(selectedTokens);
+        const { activeStats } = await this.getBuffStatsForSelected(selectedTokens);
         const selCount = selectedTokens.length;
 
-        // 1. 如果选中了棋子，顶置常驻【🎯 当前选中单位生效Buff】文件夹（不可删除/拖拽，包含已启用与未启用）
-        if (selCount > 0) {
-            const activeFolderEl = this.createCurrentActiveFolderDOM(selectedTokens, activeStats, allBuffRows);
-            treeContainer.appendChild(activeFolderEl);
-        }
-
-        // 2. 根放置区（仅编辑模式展示）
+        // 顶部根放置区
         const topDropZone = document.createElement("div");
         topDropZone.className = `r20-drop-zone-root ${this.isEditMode ? "active-zone" : ""}`;
-        topDropZone.textContent = "⬆️ 拖到此处：移出到根目录最上方";
-        this.setupRootDropZone(topDropZone, 0);
-        treeContainer.appendChild(topDropZone);
+        topDropZone.textContent = "⬆️ 拖到此处：放入模板库根目录";
+        this.setupTemplateDropZone(topDropZone, 0);
+        container.appendChild(topDropZone);
 
-        // 3. 递归渲染主模板树
-        const renderNodes = (nodes, container) => {
+        const renderNodes = (nodes, targetEl) => {
             nodes.forEach((node, index) => {
                 if (node.type === "folder") {
                     const folderEl = document.createElement("div");
@@ -2014,7 +2083,7 @@ class BuffFloatingPanel {
                     folderEl.dataset.id = node.id;
                     if (this.isEditMode) folderEl.draggable = true;
 
-                    // 计算该文件夹下所有 Buff 的统计状态以决定文件夹头部的高亮
+                    // 计算文件夹高亮
                     const folderBuffs = [];
                     const collectLeafs = (fn) => {
                         if (fn.children) {
@@ -2027,7 +2096,7 @@ class BuffFloatingPanel {
                     collectLeafs(node);
 
                     let folderActiveState = "";
-                    if (selCount > 0 && folderBuffs.length > 0) {
+                    if (!this.isEditMode && selCount > 0 && folderBuffs.length > 0) {
                         const states = folderBuffs.map(b => this.getHighlightClass(b.name, activeStats, selCount));
                         const allFull = states.every(s => s === "full-active");
                         const anyActive = states.some(s => s === "full-active" || s === "partial-active");
@@ -2052,51 +2121,38 @@ class BuffFloatingPanel {
                         <div class="r20-folder-children" style="display: ${isClosed ? 'none' : 'flex'};"></div>
                     `;
 
-                    // 点击折叠箭头
                     folderEl.querySelector(".arrow-toggle").addEventListener("click", (e) => {
                         e.stopPropagation();
                         node.collapsed = !node.collapsed;
                         this.saveTemplates(false);
-                        this.renderTree();
+                        this.renderTemplatePane();
                     });
 
-                    // 点击文件夹头部：非编辑模式下一键全加/全解；编辑模式下切换待选
                     folderEl.querySelector(".r20-folder-header").addEventListener("click", async (e) => {
                         if (e.target.tagName === "BUTTON") return;
                         if (this.isEditMode) {
-                            // 编辑模式：标记选中待删
-                            if (this.editSelectedIds.has(node.id)) {
-                                this.editSelectedIds.delete(node.id);
-                            } else {
-                                this.editSelectedIds.add(node.id);
-                            }
-                            this.renderTree();
+                            if (this.editSelectedIds.has(node.id)) this.editSelectedIds.delete(node.id);
+                            else this.editSelectedIds.add(node.id);
+                            this.renderTemplatePane();
                             return;
                         }
 
-                        // 正常模式：文件夹三态点击行为
                         if (selCount === 0) {
                             node.collapsed = !node.collapsed;
                             this.saveTemplates(false);
-                            this.renderTree();
+                            this.renderTemplatePane();
                             return;
                         }
 
                         if (folderActiveState === "full-active" || folderActiveState === "partial-active") {
-                            // 一键全部取消
-                            for (const b of folderBuffs) {
-                                await this.toggleBuffAction(b.name, null, null, false);
-                            }
+                            for (const b of folderBuffs) await this.toggleBuffAction(b.name, null, null, false);
                             this.showToast(`✨ 已批量清除 [${node.name}] 内所有状态`, "info");
                         } else {
-                            // 一键全部施加
-                            for (const b of folderBuffs) {
-                                await this.toggleBuffAction(b.name, b.rounds, b.extraAttrs, true);
-                            }
+                            for (const b of folderBuffs) await this.toggleBuffAction(b.name, b.rounds, b.extraAttrs, true);
                             this.showToast(`🚀 已批量施加 [${node.name}] 内所有 Buff`, "success");
                         }
                         await Pf1eBuffUI.refreshAllBadges();
-                        await this.renderTree();
+                        await this.renderAllPanes();
                     });
 
                     if (this.isEditMode) {
@@ -2106,11 +2162,11 @@ class BuffFloatingPanel {
                             if (newName && newName.trim()) {
                                 node.name = newName.trim();
                                 this.saveTemplates(true);
-                                this.renderTree();
+                                this.renderTemplatePane();
                             }
                         });
 
-                        this.setupDragEvents(folderEl, node, nodes, index);
+                        this.setupDragEvents(folderEl, node, nodes, index, "template");
                     }
 
                     const childrenContainer = folderEl.querySelector(".r20-folder-children");
@@ -2118,14 +2174,13 @@ class BuffFloatingPanel {
                         renderNodes(node.children, childrenContainer);
                     }
 
-                    container.appendChild(folderEl);
+                    targetEl.appendChild(folderEl);
                 } else if (node.type === "buff") {
                     const itemEl = document.createElement("div");
                     itemEl.className = "r20-tree-item";
                     itemEl.dataset.id = node.id;
                     if (this.isEditMode) itemEl.draggable = true;
 
-                    // 计算高亮状态
                     const highlightClass = this.getHighlightClass(node.name, activeStats, selCount);
                     if (highlightClass) itemEl.classList.add(highlightClass);
 
@@ -2149,7 +2204,6 @@ class BuffFloatingPanel {
                     `;
 
                     if (!this.isEditMode) {
-                        // 正常模式：点击即施加 / 即取消
                         itemEl.addEventListener("click", async () => {
                             if (selCount === 0) {
                                 this.showToast("⚠️ 请先在画布上选择要施加或关闭 Buff 的棋子", "warn");
@@ -2158,18 +2212,14 @@ class BuffFloatingPanel {
                             const shouldRemove = (highlightClass === "full-active" || highlightClass === "partial-active");
                             await this.toggleBuffAction(node.name, node.rounds, node.extraAttrs, !shouldRemove);
                             await Pf1eBuffUI.refreshAllBadges();
-                            await this.renderTree();
+                            await this.renderAllPanes();
                         });
                     } else {
-                        // 编辑模式：点击条目切换勾选高亮（用于批量删除）
                         itemEl.addEventListener("click", (e) => {
                             if (e.target.tagName === "BUTTON") return;
-                            if (this.editSelectedIds.has(node.id)) {
-                                this.editSelectedIds.delete(node.id);
-                            } else {
-                                this.editSelectedIds.add(node.id);
-                            }
-                            this.renderTree();
+                            if (this.editSelectedIds.has(node.id)) this.editSelectedIds.delete(node.id);
+                            else this.editSelectedIds.add(node.id);
+                            this.renderTemplatePane();
                         });
 
                         itemEl.querySelector(".btn-edit-buff").addEventListener("click", (e) => {
@@ -2181,119 +2231,259 @@ class BuffFloatingPanel {
                             this.cloneBuff(node, nodes, index);
                         });
 
-                        this.setupDragEvents(itemEl, node, nodes, index);
+                        this.setupDragEvents(itemEl, node, nodes, index, "template");
                     }
 
-                    container.appendChild(itemEl);
+                    targetEl.appendChild(itemEl);
                 }
             });
         };
 
-        renderNodes(this.templates, treeContainer);
+        renderNodes(this.templates, container);
 
-        // 4. 底部根放置区（仅编辑模式展示）
+        // 底部根放置区
         const bottomDropZone = document.createElement("div");
         bottomDropZone.className = `r20-drop-zone-root ${this.isEditMode ? "active-zone" : ""}`;
-        bottomDropZone.textContent = "⬇️ 拖到此处：移出到根目录最下方";
-        this.setupRootDropZone(bottomDropZone, this.templates.length);
-        treeContainer.appendChild(bottomDropZone);
+        bottomDropZone.textContent = "⬇️ 拖到此处：放入模板库根目录";
+        this.setupTemplateDropZone(bottomDropZone, this.templates.length);
+        container.appendChild(bottomDropZone);
     }
 
     /**
-     * 生成【🎯 当前选中单位生效Buff】常驻顶置文件夹 DOM（包含生效中与未启动条目）
+     * 2. 渲染【当前单位 Buff 栏】
      */
-    static createCurrentActiveFolderDOM(selectedTokens, activeStats, allBuffRows) {
-        const folderEl = document.createElement("div");
-        folderEl.className = "r20-tree-folder";
+    static async renderUnitPane() {
+        const container = this.panelEl.querySelector(".r20-unit-tree");
+        const summaryEl = this.panelEl.querySelector(".unit-pane-summary");
+        if (!container) return;
+        container.innerHTML = "";
 
-        const count = allBuffRows.length;
-        const activeCount = activeStats.size;
+        const selectedTokens = this.getSelectedTokens();
+        const { activeStats, allBuffRows } = await this.getBuffStatsForSelected(selectedTokens);
 
-        folderEl.innerHTML = `
-            <div class="r20-folder-header full-active" style="border-left: 3px solid #64b5f6 !important;">
-                <div class="r20-folder-title">
-                    <span>🎯</span>
-                    <span>当前单位Buff (${activeCount}生效 / ${count}总数)</span>
-                </div>
-                <span style="font-size:10px; color:#90caf9;">点击一键清除生效</span>
-            </div>
-            <div class="r20-folder-children" style="display: flex;"></div>
-        `;
-
-        const childrenContainer = folderEl.querySelector(".r20-folder-children");
-
-        if (count === 0) {
-            const emptyEl = document.createElement("div");
-            emptyEl.style.cssText = "font-size:11px; color:#78909c; padding:4px 8px;";
-            emptyEl.textContent = "当前选中的棋子身上暂无任何 Buff 记录";
-            childrenContainer.appendChild(emptyEl);
-        } else {
-            for (const item of allBuffRows) {
-                const itemEl = document.createElement("div");
-                const isFullActive = item.enabledCount === selectedTokens.length;
-                const isPartialActive = item.enabledCount > 0 && !isFullActive;
-                const isInactive = item.enabledCount === 0;
-
-                let itemClass = "";
-                if (isFullActive) itemClass = "full-active";
-                else if (isPartialActive) itemClass = "partial-active";
-
-                itemEl.className = `r20-tree-item ${itemClass}`;
-                itemEl.style.cursor = "pointer";
-
-                let statusBadge = "";
-                let actionText = "";
-                if (isInactive) {
-                    statusBadge = `<span style="font-size:10px; color:#90a4ae; background:rgba(255,255,255,0.06); padding:1px 4px; border-radius:3px;">○ 未启用</span>`;
-                    actionText = `<span style="font-size:10px; color:#81c784;">＋ 启用</span>`;
-                } else if (isFullActive) {
-                    statusBadge = `<span class="r20-item-rounds">${item.rounds !== null ? item.rounds + '轮' : '永久'}</span>`;
-                    actionText = `<span style="font-size:10px; color:#ef5350;">✕ 解除</span>`;
-                } else {
-                    statusBadge = `<span style="font-size:10px; color:#ffd54f;">部分(${item.enabledCount}/${selectedTokens.length})</span>`;
-                    actionText = `<span style="font-size:10px; color:#ef5350;">✕ 全部解除</span>`;
-                }
-
-                itemEl.innerHTML = `
-                    <div class="r20-item-left">
-                        <span class="r20-item-name">${item.name}</span>
-                        ${statusBadge}
-                    </div>
-                    ${actionText}
-                `;
-
-                // 点击：若未启用则立即激活启用；若已启用则关闭解除
-                itemEl.addEventListener("click", async () => {
-                    const shouldApply = isInactive;
-                    await this.toggleBuffAction(item.name, item.rounds, item.extraAttrs, shouldApply);
-                    await Pf1eBuffUI.refreshAllBadges();
-                    await this.renderTree();
-                });
-
-                childrenContainer.appendChild(itemEl);
-            }
+        if (selectedTokens.length === 0) {
+            summaryEl.textContent = "未选择棋子";
+            summaryEl.style.color = "#90a4ae";
+            container.innerHTML = `<div style="font-size:11px; color:#78909c; padding:8px; text-align:center;">请在画布上选中棋子以查看实态 Buff</div>`;
+            return;
         }
 
-        // 点击常驻文件夹头部：一键解除当前生效的全部 Buff
-        folderEl.querySelector(".r20-folder-header").addEventListener("click", async () => {
+        const activeCount = activeStats.size;
+        const totalCount = allBuffRows.length;
+        summaryEl.textContent = `${activeCount}生效 / ${totalCount}总数 (点此全清)`;
+        summaryEl.style.color = "#64b5f6";
+        summaryEl.style.cursor = "pointer";
+
+        summaryEl.onclick = async (e) => {
+            e.stopPropagation();
             if (activeCount === 0) return;
             for (const name of activeStats.keys()) {
                 await this.toggleBuffAction(name, null, null, false);
             }
-            this.showToast("🧹 已解除当前选中棋子身上的所有生效 Buff！", "info");
+            this.showToast("🧹 已清除当前选中单位身上的所有生效 Buff！", "info");
             await Pf1eBuffUI.refreshAllBadges();
-            await this.renderTree();
-        });
+            await this.renderAllPanes();
+        };
 
-        return folderEl;
+        if (totalCount === 0) {
+            container.innerHTML = `<div style="font-size:11px; color:#78909c; padding:8px; text-align:center;">选中单位当前未配置任何 Buff 条目</div>`;
+            return;
+        }
+
+        for (const item of allBuffRows) {
+            const itemEl = document.createElement("div");
+            const isFullActive = item.enabledCount === selectedTokens.length;
+            const isPartialActive = item.enabledCount > 0 && !isFullActive;
+            const isInactive = item.enabledCount === 0;
+
+            let itemClass = "";
+            if (!this.isEditMode) {
+                if (isFullActive) itemClass = "full-active";
+                else if (isPartialActive) itemClass = "partial-active";
+            } else if (this.editSelectedIds.has(`unit_${item.name}`)) {
+                itemClass = "edit-selected";
+            }
+
+            itemEl.className = `r20-tree-item ${itemClass}`;
+            if (this.isEditMode) itemEl.draggable = true;
+
+            let statusBadge = "";
+            let actionText = "";
+            if (isInactive) {
+                statusBadge = `<span style="font-size:10px; color:#90a4ae; background:rgba(255,255,255,0.06); padding:1px 4px; border-radius:3px;">○ 未启用</span>`;
+                actionText = `<span style="font-size:10px; color:#81c784;">＋ 启用</span>`;
+            } else if (isFullActive) {
+                statusBadge = `<span class="r20-item-rounds">${item.rounds !== null ? item.rounds + '轮' : '永久'}</span>`;
+                actionText = `<span style="font-size:10px; color:#ef5350;">✕ 解除</span>`;
+            } else {
+                statusBadge = `<span style="font-size:10px; color:#ffd54f;">部分(${item.enabledCount}/${selectedTokens.length})</span>`;
+                actionText = `<span style="font-size:10px; color:#ef5350;">✕ 解除</span>`;
+            }
+
+            itemEl.innerHTML = `
+                <div class="r20-item-left">
+                    <span class="r20-item-name">${item.name}</span>
+                    ${statusBadge}
+                </div>
+                ${this.isEditMode ? `<span style="font-size:10px; color:#ba68c8;">可拖至模板库复制</span>` : actionText}
+            `;
+
+            if (!this.isEditMode) {
+                itemEl.addEventListener("click", async () => {
+                    const shouldApply = isInactive;
+                    await this.toggleBuffAction(item.name, item.rounds, item.extraAttrs, shouldApply);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    await this.renderAllPanes();
+                });
+            } else {
+                itemEl.addEventListener("click", () => {
+                    const idKey = `unit_${item.name}`;
+                    if (this.editSelectedIds.has(idKey)) this.editSelectedIds.delete(idKey);
+                    else this.editSelectedIds.add(idKey);
+                    this.renderUnitPane();
+                });
+
+                // 单位栏条目拖拽（跨栏放入模板库即另存为模板）
+                this.setupDragEvents(itemEl, {
+                    id: "b_" + Date.now(),
+                    type: "buff",
+                    name: item.name,
+                    rounds: item.rounds,
+                    extraAttrs: item.extraAttrs
+                }, null, null, "unit");
+            }
+
+            container.appendChild(itemEl);
+        }
     }
 
     /**
-     * 触发对当前所有选中棋子的 Buff 增加或移除
-     * @param {string} buffName Buff 名称
-     * @param {number|null} rounds 持续轮数
-     * @param {object|null} extraAttrs 细目字典
-     * @param {boolean} apply 是否施加（true 施加/刷新，false 移除）
+     * 拖拽事件监听：跨栏拖拽为“复制”，栏内拖拽为“移动”
+     */
+    static setupDragEvents(el, node, parentList, index, sourcePane) {
+        el.addEventListener("dragstart", (e) => {
+            e.stopPropagation();
+            this._draggedData = { node, parentList, index, sourcePane };
+            e.dataTransfer.setData("text/plain", node.name);
+        });
+
+        el.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (node.type === "folder") el.classList.add("r20-drag-into");
+            else el.classList.add("r20-drag-over");
+        });
+
+        el.addEventListener("dragleave", (e) => {
+            e.stopPropagation();
+            el.classList.remove("r20-drag-over", "r20-drag-into");
+        });
+
+        el.addEventListener("drop", async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            el.classList.remove("r20-drag-over", "r20-drag-into");
+
+            if (!this._draggedData) return;
+            const { node: draggedNode, parentList: sourceList, index: sourceIdx, sourcePane: fromPane } = this._draggedData;
+
+            // 1. 跨栏拖拽：从“当前单位栏”拖入“模板库栏” -> 复制为模板
+            if (fromPane === "unit" && sourcePane === "template") {
+                const copyNode = {
+                    id: "b_" + Date.now() + "_" + Math.random().toString(36).substr(2, 4),
+                    type: "buff",
+                    name: draggedNode.name,
+                    rounds: draggedNode.rounds,
+                    extraAttrs: draggedNode.extraAttrs ? JSON.parse(JSON.stringify(draggedNode.extraAttrs)) : null
+                };
+
+                if (node.type === "folder") {
+                    node.children = node.children || [];
+                    node.children.push(copyNode);
+                    node.collapsed = false;
+                } else if (parentList) {
+                    parentList.splice(index, 0, copyNode);
+                }
+
+                this._draggedData = null;
+                await this.saveTemplates(true);
+                await this.renderAllPanes();
+                this.showToast(`📋 已将 [${copyNode.name}] 作为新模板复制到模板库`, "success");
+                return;
+            }
+
+            // 2. 模板库栏内部拖拽 -> 移动排序
+            if (fromPane === "template" && sourcePane === "template" && sourceList) {
+                if (draggedNode.id === node.id) return;
+                sourceList.splice(sourceIdx, 1);
+
+                if (node.type === "folder") {
+                    node.children = node.children || [];
+                    node.children.push(draggedNode);
+                    node.collapsed = false;
+                } else if (parentList) {
+                    parentList.splice(index, 0, draggedNode);
+                }
+
+                this._draggedData = null;
+                await this.saveTemplates(true);
+                await this.renderTemplatePane();
+            }
+        });
+    }
+
+    /**
+     * 模板库根目录放置区
+     */
+    static setupTemplateDropZone(el, targetIndex) {
+        el.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            el.classList.add("r20-drag-into");
+        });
+
+        el.addEventListener("dragleave", (e) => {
+            e.stopPropagation();
+            el.classList.remove("r20-drag-into");
+        });
+
+        el.addEventListener("drop", async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            el.classList.remove("r20-drag-into");
+
+            if (!this._draggedData) return;
+            const { node: draggedNode, parentList: sourceList, index: sourceIdx, sourcePane: fromPane } = this._draggedData;
+
+            if (fromPane === "unit") {
+                // 跨栏复制进根目录
+                const copyNode = {
+                    id: "b_" + Date.now() + "_" + Math.random().toString(36).substr(2, 4),
+                    type: "buff",
+                    name: draggedNode.name,
+                    rounds: draggedNode.rounds,
+                    extraAttrs: draggedNode.extraAttrs ? JSON.parse(JSON.stringify(draggedNode.extraAttrs)) : null
+                };
+                this.templates.splice(Math.min(targetIndex, this.templates.length), 0, copyNode);
+                this._draggedData = null;
+                await this.saveTemplates(true);
+                await this.renderAllPanes();
+                this.showToast(`📋 已复制 [${copyNode.name}] 到模板库根目录`, "success");
+                return;
+            }
+
+            if (fromPane === "template" && sourceList) {
+                sourceList.splice(sourceIdx, 1);
+                this.templates.splice(Math.min(targetIndex, this.templates.length), 0, draggedNode);
+                this._draggedData = null;
+                await this.saveTemplates(true);
+                await this.renderTemplatePane();
+            }
+        });
+    }
+
+    /**
+     * 施加或解除指定 Buff
      */
     static async toggleBuffAction(buffName, rounds, extraAttrs, apply) {
         const selected = this.getSelectedTokens();
@@ -2301,17 +2491,15 @@ class BuffFloatingPanel {
 
         for (const item of selected) {
             if (apply) {
-                // 施加/激活
                 if (item.type === "character" && item.char) {
                     await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs);
                 } else if (item.token) {
                     TokenBuffManager.applyOrRefreshBuff(item.token, buffName, rounds, extraAttrs);
                 }
             } else {
-                // 移除/解除
                 if (item.type === "character" && item.char) {
-                    const activeBuffs = await Pf1eBuffManager.getActiveBuffs(item.char);
-                    const target = activeBuffs.find(b => b.name === buffName);
+                    const allBuffs = await Pf1eBuffManager.getAllBuffs(item.char);
+                    const target = allBuffs.find(b => b.name === buffName);
                     if (target && target.rowId) {
                         await Pf1eBuffManager.removeBuff(item.char, target.rowId);
                     }
@@ -2323,7 +2511,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 批量删除选中的项目（编辑模式下被点击高亮的项目）
+     * 批量删除选中的项目
      */
     static async deleteSelectedBuffs() {
         if (this.editSelectedIds.size === 0) {
@@ -2346,92 +2534,8 @@ class BuffFloatingPanel {
         removeRecursive(this.templates);
         this.editSelectedIds.clear();
         await this.saveTemplates(true);
-        this.renderTree();
+        await this.renderAllPanes();
         this.showToast("🗑️ 批量删除成功", "success");
-    }
-
-    /**
-     * 根层级拖拽放置区（用于将子文件夹内部节点拖出）
-     */
-    static setupRootDropZone(el, targetIndex) {
-        el.addEventListener("dragover", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            el.classList.add("r20-drag-into");
-        });
-
-        el.addEventListener("dragleave", (e) => {
-            e.stopPropagation();
-            el.classList.remove("r20-drag-into");
-        });
-
-        el.addEventListener("drop", async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            el.classList.remove("r20-drag-into");
-
-            if (!this._draggedData) return;
-            const { node: draggedNode, parentList: sourceList, index: sourceIdx } = this._draggedData;
-
-            sourceList.splice(sourceIdx, 1);
-            const realIdx = Math.min(targetIndex, this.templates.length);
-            this.templates.splice(realIdx, 0, draggedNode);
-
-            this._draggedData = null;
-            await this.saveTemplates(true);
-            this.renderTree();
-            this.showToast(`✨ 已成功将 [${draggedNode.name}] 移至根目录`, "success");
-        });
-    }
-
-    /**
-     * HTML5 拖拽事件监听（支持排序与放入文件夹）
-     */
-    static setupDragEvents(el, node, parentList, index) {
-        el.addEventListener("dragstart", (e) => {
-            e.stopPropagation();
-            this._draggedData = { node, parentList, index };
-            e.dataTransfer.setData("text/plain", node.id);
-        });
-
-        el.addEventListener("dragover", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (node.type === "folder") {
-                el.classList.add("r20-drag-into");
-            } else {
-                el.classList.add("r20-drag-over");
-            }
-        });
-
-        el.addEventListener("dragleave", (e) => {
-            e.stopPropagation();
-            el.classList.remove("r20-drag-over", "r20-drag-into");
-        });
-
-        el.addEventListener("drop", async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            el.classList.remove("r20-drag-over", "r20-drag-into");
-
-            if (!this._draggedData || this._draggedData.node.id === node.id) return;
-
-            const { node: draggedNode, parentList: sourceList, index: sourceIdx } = this._draggedData;
-
-            sourceList.splice(sourceIdx, 1);
-
-            if (node.type === "folder") {
-                node.children = node.children || [];
-                node.children.push(draggedNode);
-                node.collapsed = false;
-            } else {
-                parentList.splice(index, 0, draggedNode);
-            }
-
-            this._draggedData = null;
-            await this.saveTemplates(true);
-            this.renderTree();
-        });
     }
 
     /**
@@ -2447,11 +2551,11 @@ class BuffFloatingPanel {
         };
         list.splice(index + 1, 0, clone);
         await this.saveTemplates(true);
-        this.renderTree();
+        await this.renderTemplatePane();
     }
 
     /**
-     * 新建文件夹弹窗
+     * 新建文件夹
      */
     static async showNewFolderDialog() {
         const name = prompt("请输入新文件夹名称:");
@@ -2465,11 +2569,11 @@ class BuffFloatingPanel {
             children: []
         });
         await this.saveTemplates(true);
-        this.renderTree();
+        await this.renderTemplatePane();
     }
 
     /**
-     * 新建/编辑 Buff 弹窗（带简易 JSON 细目编辑器与永久选项）
+     * 新建/编辑 Buff 弹窗
      */
     static showBuffEditorDialog(existingNode = null) {
         const isEditing = !!existingNode;
@@ -2499,7 +2603,7 @@ class BuffFloatingPanel {
 
                     <label style="font-size:11px; color:#b0bec5;">PF1e 细目加值字典 (JSON 格式):</label>
                     <textarea class="r20-textarea-json input-buff-json">${currentJson}</textarea>
-                    <span style="font-size:10px; color:#78909c;">提示: 可配置 b1_bonus, b1_bonustype, b1_val, b1_macro-text 等人物卡原生字段。</span>
+                    <span style="font-size:10px; color:#78909c;">提示: 可配置 b1_bonus, b1_bonustype, b1_val, b1_macro-text 等原生字段。</span>
                 </div>
                 <div class="r20-dialog-footer">
                     <button class="r20-btn-icon btn-cancel" style="padding:6px 12px;">取消</button>
@@ -2509,14 +2613,10 @@ class BuffFloatingPanel {
         `;
 
         document.body.appendChild(mask);
-
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
         mask.querySelector(".btn-save").addEventListener("click", async () => {
             const name = mask.querySelector(".input-buff-name").value.trim();
-            if (!name) {
-                alert("请输入 Buff 名称");
-                return;
-            }
+            if (!name) { alert("请输入 Buff 名称"); return; }
 
             const roundsVal = mask.querySelector(".input-buff-rounds").value.trim();
             const rounds = roundsVal === "" ? null : parseInt(roundsVal, 10);
@@ -2524,12 +2624,8 @@ class BuffFloatingPanel {
             let extraAttrs = null;
             const jsonText = mask.querySelector(".input-buff-json").value.trim();
             if (jsonText) {
-                try {
-                    extraAttrs = JSON.parse(jsonText);
-                } catch (err) {
-                    alert("JSON 细目格式错误，请检查语法:\n" + err.message);
-                    return;
-                }
+                try { extraAttrs = JSON.parse(jsonText); }
+                catch (err) { alert("JSON 细目格式错误:\n" + err.message); return; }
             }
 
             if (isEditing) {
@@ -2546,16 +2642,15 @@ class BuffFloatingPanel {
                 });
             }
 
-            // 用户创建或修改首个 Buff 时，若未找到配置卡会主动提示是否新建
             await this.saveTemplates(true);
-            this.renderTree();
+            await this.renderTemplatePane();
             mask.remove();
             this.showToast(`✅ 已成功保存 Buff [${name}]`, "success");
         });
     }
 
     /**
-     * 从角色卡导入 Buff 弹窗（可复选导入项，并可指定目标文件夹）
+     * 从角色卡导入 Buff 弹窗
      */
     static async showImportFromCharacterDialog() {
         const selected = this.getSelectedTokens();
@@ -2566,7 +2661,6 @@ class BuffFloatingPanel {
             if (charItem) character = charItem.char;
         }
 
-        // 若无选中棋子，允许从战役全量角色列表中下拉选择角色卡
         if (!character) {
             if (!window.Campaign || !window.Campaign.characters || window.Campaign.characters.length === 0) {
                 this.showToast("⚠️ 战役中暂无可用的角色卡", "warn");
@@ -2584,7 +2678,6 @@ class BuffFloatingPanel {
                 if (attrName.startsWith("repeating_buff2_") && attrName.endsWith("_name")) {
                     const prefix = attrName.substring(0, attrName.lastIndexOf("_name"));
                     const name = a.get("current") || "未命名Buff";
-
                     const roundsAttr = character.attribs.models.find(x => x.get("name") === `${prefix}_rounds`);
                     const rounds = roundsAttr && roundsAttr.get("current") !== "" ? Number(roundsAttr.get("current")) : null;
 
@@ -2593,7 +2686,7 @@ class BuffFloatingPanel {
                         const mName = m.get("name") || "";
                         if (mName.startsWith(`${prefix}_`)) {
                             const subKey = mName.substring(prefix.length + 1);
-                            if (subKey !== "name" && subKey !== "enable_toggle" && subKey !== "rounds") {
+                            if (subKey !== "name" && subKey !== "enable_toggle" && subKey !== "rounds" && subKey !== "tabcat" && subKey !== "tabcat2" && subKey !== "row_id") {
                                 extraAttrs[subKey] = m.get("current");
                             }
                         }
@@ -2659,20 +2752,15 @@ class BuffFloatingPanel {
         `;
 
         document.body.appendChild(mask);
-
         mask.querySelector(".cb-import-select-all").addEventListener("change", (e) => {
             const checked = e.target.checked;
             mask.querySelectorAll(".cb-import-item").forEach(cb => cb.checked = checked);
         });
 
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
-
         mask.querySelector(".btn-confirm-import").addEventListener("click", async () => {
             const checkedBoxes = Array.from(mask.querySelectorAll(".cb-import-item:checked"));
-            if (checkedBoxes.length === 0) {
-                alert("请先勾选至少一个要导入的 Buff 条目");
-                return;
-            }
+            if (checkedBoxes.length === 0) { alert("请先勾选至少一个要导入的 Buff 条目"); return; }
 
             const targetFolderId = mask.querySelector(".select-target-folder").value;
             let targetList = this.templates;
@@ -2698,7 +2786,7 @@ class BuffFloatingPanel {
             });
 
             await this.saveTemplates(true);
-            this.renderTree();
+            await this.renderTemplatePane();
             mask.remove();
             this.showToast(`🎉 已成功导入 ${checkedBoxes.length} 项 Buff！`, "success");
         });
@@ -2725,12 +2813,13 @@ class BuffFloatingPanel {
                 if (!isDragging) return;
                 const dx = moveEvent.clientX - startX;
                 const dy = moveEvent.clientY - startY;
-                const newLeft = Math.max(10, Math.min(window.innerWidth - 320, initialX + dx));
+                const newLeft = Math.max(10, Math.min(window.innerWidth - 340, initialX + dx));
                 const newTop = Math.max(10, Math.min(window.innerHeight - 80, initialY + dy));
 
                 this.panelEl.style.left = `${newLeft}px`;
                 this.panelEl.style.top = `${newTop}px`;
                 this.panelEl.style.right = "auto";
+                this.updateLayoutDirection();
             };
 
             const onMouseUp = () => {
@@ -2741,6 +2830,7 @@ class BuffFloatingPanel {
                         left: this.panelEl.offsetLeft,
                         top: this.panelEl.offsetTop
                     }));
+                    this.updateLayoutDirection();
                 }
                 document.removeEventListener("mousemove", onMouseMove);
                 document.removeEventListener("mouseup", onMouseUp);
@@ -2749,6 +2839,24 @@ class BuffFloatingPanel {
             document.addEventListener("mousemove", onMouseMove);
             document.addEventListener("mouseup", onMouseUp);
         });
+    }
+
+    /**
+     * 最小化折叠切换
+     */
+    static toggleCollapse() {
+        const body = this.panelEl.querySelector(".r20-panel-body");
+        const minBtn = this.panelEl.querySelector(".btn-minimize");
+        const isHidden = body.style.display === "none";
+
+        if (isHidden) {
+            body.style.display = "flex";
+            minBtn.textContent = "─";
+            this.updateLayoutDirection();
+        } else {
+            body.style.display = "none";
+            minBtn.textContent = "▢";
+        }
     }
 }
 
@@ -2792,7 +2900,7 @@ class BuffFloatingPanel {
             await Pf1eBuffUI.refreshAllBadges();
         }, 800);
 
-        console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.5.0 全部就绪！");
+        console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.6.0 全部就绪！");
     }
 
     main();
