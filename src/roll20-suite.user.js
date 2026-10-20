@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.7.0
+// @version      0.7.1
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成双栏自适应延伸、物理折叠、图钉感应、三态直接高亮交互与云端原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.7.0...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.7.1...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -46,6 +46,13 @@ class Roll20Bridge {
             };
             check();
         });
+    }
+
+    /**
+     * 等待战役就绪 (别名兼容)
+     */
+    static waitForCampaign(timeoutMs = 30000) {
+        return this.waitForReady(timeoutMs);
     }
 
     /**
@@ -3095,38 +3102,70 @@ class BuffFloatingPanel {
     // 11. 引擎主入口启动流程
     // ==========================================
     async function main() {
-        const ready = await Roll20Bridge.waitForCampaign();
-        if (!ready) {
-            console.error("[Roll20Suite] Roll20 Jumpgate 环境未就绪，停止初始化");
-            return;
-        }
-
-        console.log("[Roll20Suite] Roll20 Jumpgate 环境就绪，正在启动模块...");
-
-        // 启动先攻追踪器
-        const observer = new TurnOrderObserver(async (charOrToken, currentRound) => {
-            console.log(`[Roll20Suite] 轮到单位行动: ${charOrToken.name || "未知"}, 轮次: ${currentRound}`);
-            if (charOrToken.type === "character" && charOrToken.char) {
-                await Pf1eBuffManager.decrementBuffs(charOrToken.char);
-            } else if (charOrToken.type === "token" && charOrToken.token) {
-                TokenBuffManager.decrementBuffs(charOrToken.token);
+        try {
+            console.log("[Roll20Suite] 正在等待 Roll20 Jumpgate 战役环境就绪...");
+            const ready = await Roll20Bridge.waitForReady(30000);
+            if (!ready) {
+                console.error("[Roll20Suite] Roll20 Jumpgate 环境未就绪，停止初始化");
+                return;
             }
+
+            console.log("[Roll20Suite] Roll20 Jumpgate 环境就绪，开始挂载子系统...");
+
+            // 1. 初始化并挂载先攻追踪器
+            try {
+                const observer = new TurnOrderObserver();
+                observer.on("turnEnded", async ({ endedTokenId, startedTokenId }) => {
+                    try {
+                        const tokenGraphic = Roll20Bridge.getTokenGraphic(endedTokenId);
+                        if (tokenGraphic) {
+                            const character = Roll20Bridge.getCharacterByToken(tokenGraphic);
+                            if (character) {
+                                await Pf1eBuffManager.decrementBuffs(character);
+                            } else {
+                                TokenBuffManager.decrementBuffs(tokenGraphic);
+                            }
+                        }
+                    } catch (err) {
+                        console.error("[Roll20Suite] 先攻回合结束扣减异常:", err);
+                    }
+                    setTimeout(async () => {
+                        await Pf1eBuffUI.refreshAllBadges();
+                    }, 60);
+                });
+
+                observer.on("orderChanged", async () => {
+                    await Pf1eBuffUI.refreshAllBadges();
+                });
+
+                observer.start();
+                console.log("[Roll20Suite] TurnOrderObserver 先攻监听器挂载成功");
+            } catch (obsErr) {
+                console.error("[Roll20Suite] 先攻追踪器初始化失败:", obsErr);
+            }
+
+            // 2. 初始化三态悬浮工作台
+            try {
+                await BuffFloatingPanel.init();
+                console.log("[Roll20Suite] BuffFloatingPanel 状态工作台挂载成功");
+            } catch (panelErr) {
+                console.error("[Roll20Suite] 悬浮工作台初始化失败:", panelErr);
+            }
+
+            // 3. 首次全量刷新先攻条徽章
             setTimeout(async () => {
-                await Pf1eBuffUI.refreshAllBadges();
-            }, 60);
-        });
+                try {
+                    await Pf1eBuffUI.refreshAllBadges();
+                } catch (uiErr) {
+                    console.error("[Roll20Suite] 先攻条徽章初次刷新失败:", uiErr);
+                }
+            }, 800);
 
-        observer.start();
-
-        // 初始化三态悬浮窗
-        await BuffFloatingPanel.init();
-
-        setTimeout(async () => {
-            await Pf1eBuffUI.refreshAllBadges();
-        }, 800);
-
-        console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.7.0 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.7.1 全部就绪！");
+        } catch (fatalErr) {
+            console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
+        }
     }
 
-    main();
+    main().catch(e => console.error("[Roll20Suite] main 未捕获 Promise 异常:", e));
 })();

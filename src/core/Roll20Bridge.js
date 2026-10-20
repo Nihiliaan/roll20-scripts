@@ -30,6 +30,13 @@ export class Roll20Bridge {
     }
 
     /**
+     * 等待战役就绪 (别名兼容)
+     */
+    static waitForCampaign(timeoutMs = 30000) {
+        return this.waitForReady(timeoutMs);
+    }
+
+    /**
      * 获取当前主战役模型
      */
     static getCampaign() {
