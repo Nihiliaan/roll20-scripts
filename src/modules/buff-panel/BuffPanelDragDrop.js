@@ -1,50 +1,63 @@
 /**
  * BuffPanelDragDrop.js
- * 状态Buff工作台拖拽手势与交互处理器（窗口拖拽、栏内排序、跨栏复制）
+ * 状态Buff工作台拖拽手势与交互处理器（极简标题栏拖拽、栏内排序、跨栏复制）
  */
 export class BuffPanelDragDrop {
     /**
-     * 初始化窗口标题栏拖拽移动
+     * 初始化窗口标题栏拖拽移动（拖动主体纯粹为标题栏，绝不跳变）
      */
     static initWindowDrag(panelEl, onDragEnd, onDragging) {
         const header = panelEl.querySelector(".r20-panel-header");
         let isDragging = false;
-        let startX, startY, initialX, initialY;
+        let startX, startY, initialLeft, initialTop;
 
         header.addEventListener("mousedown", (e) => {
             if (e.target.tagName === "BUTTON") return;
+            e.stopPropagation();
+            e.preventDefault();
+
             isDragging = true;
             header.style.cursor = "grabbing";
             startX = e.clientX;
             startY = e.clientY;
-            initialX = panelEl.offsetLeft;
-            initialY = panelEl.offsetTop;
+            initialLeft = panelEl.offsetLeft;
+            initialTop = panelEl.offsetTop;
 
             const onMouseMove = (moveEvent) => {
                 if (!isDragging) return;
+                moveEvent.stopPropagation();
+                moveEvent.preventDefault();
+
                 const dx = moveEvent.clientX - startX;
                 const dy = moveEvent.clientY - startY;
-                const newLeft = Math.max(10, Math.min(window.innerWidth - 340, initialX + dx));
-                const newTop = Math.max(10, Math.min(window.innerHeight - 60, initialY + dy));
+                const newLeft = Math.max(10, Math.min(window.innerWidth - 330, initialLeft + dx));
+                const newTop = Math.max(10, Math.min(window.innerHeight - 40, initialTop + dy));
 
                 panelEl.style.left = `${newLeft}px`;
                 panelEl.style.top = `${newTop}px`;
+                panelEl.style.bottom = "auto";
                 panelEl.style.right = "auto";
+
                 if (onDragging) onDragging(newLeft, newTop);
             };
 
-            const onMouseUp = () => {
+            const onMouseUp = (upEvent) => {
                 if (isDragging) {
                     isDragging = false;
                     header.style.cursor = "grab";
-                    if (onDragEnd) onDragEnd(panelEl.offsetLeft, panelEl.offsetTop);
+                    upEvent.stopPropagation();
+                    upEvent.preventDefault();
+
+                    const finalLeft = panelEl.offsetLeft;
+                    const finalTop = panelEl.offsetTop;
+                    if (onDragEnd) onDragEnd(finalLeft, finalTop);
                 }
-                document.removeEventListener("mousemove", onMouseMove);
-                document.removeEventListener("mouseup", onMouseUp);
+                document.removeEventListener("mousemove", onMouseMove, true);
+                document.removeEventListener("mouseup", onMouseUp, true);
             };
 
-            document.addEventListener("mousemove", onMouseMove);
-            document.addEventListener("mouseup", onMouseUp);
+            document.addEventListener("mousemove", onMouseMove, true);
+            document.addEventListener("mouseup", onMouseUp, true);
         });
     }
 

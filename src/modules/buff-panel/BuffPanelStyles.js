@@ -1,56 +1,48 @@
 /**
  * BuffPanelStyles.js
- * 状态Buff工作台样式定义与注入器
+ * 状态Buff工作台样式定义：极简基准定位模型
+ * 拖动仅作用于标题栏，内容栏以标题栏为基准向上（bottom:100%）或向下展示
  */
 export class BuffPanelStyles {
     static STYLESHEET_ID = "r20-floating-panel-styles";
 
     static getCss() {
         return `
-            /* 主悬浮窗容器 */
+            /* 主悬浮窗容器（以标题栏为主体定位） */
             #r20-buff-panel {
                 position: fixed;
                 width: 320px;
-                background: #1a1e24;
-                border: 1px solid #323d47;
-                border-radius: 8px;
-                box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+                z-index: 99999;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 color: #eceff1;
-                z-index: 99999;
-                display: flex;
-                flex-direction: column;
                 user-select: none;
                 box-sizing: border-box;
             }
 
-            /* 向上展开时的布局翻转：标题栏在底，内容在顶 */
-            #r20-buff-panel.direction-up {
-                flex-direction: column-reverse;
-            }
-
-            /* 标题栏 */
+            /* 标题栏（拖拽句柄） */
             .r20-panel-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
                 padding: 7px 10px;
                 background: #232b34;
+                border: 1px solid #323d47;
                 cursor: grab;
                 box-sizing: border-box;
-                border-radius: 7px 7px 0 0;
-                border-bottom: 1px solid #323d47;
-            }
-            #r20-buff-panel.direction-up .r20-panel-header {
-                border-radius: 0 0 7px 7px;
-                border-top: 1px solid #323d47;
-                border-bottom: none;
-            }
-            /* 折叠为纯标题时，四周完整圆角 */
-            #r20-buff-panel.is-collapsed .r20-panel-header {
                 border-radius: 7px;
-                border-top: none;
+                box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+            }
+
+            /* 向下展开时：标题栏底角方正以贴合内容栏 */
+            #r20-buff-panel.direction-down:not(.is-collapsed) .r20-panel-header {
+                border-radius: 7px 7px 0 0;
                 border-bottom: none;
+            }
+
+            /* 向上展开时：标题栏顶角方正以贴合上方内容栏 */
+            #r20-buff-panel.direction-up:not(.is-collapsed) .r20-panel-header {
+                border-radius: 0 0 7px 7px;
+                border-top: none;
             }
 
             .r20-panel-title {
@@ -60,6 +52,7 @@ export class BuffPanelStyles {
                 display: flex;
                 align-items: center;
                 gap: 6px;
+                pointer-events: none;
             }
             .r20-panel-controls {
                 display: flex;
@@ -92,20 +85,37 @@ export class BuffPanelStyles {
             .r20-btn-icon.danger { color: #ef5350; }
             .r20-btn-icon.danger:hover { background: #c62828; color: #ffffff; }
 
-            /* 面板主体 */
+            /* 内容区容器 */
             .r20-panel-body {
-                display: flex;
-                flex-direction: column;
-                gap: 0px;
-                max-height: 80vh;
-                overflow: visible;
+                background: #1a1e24;
+                border: 1px solid #323d47;
                 box-sizing: border-box;
+                display: flex;
+                max-height: 75vh;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.6);
             }
+
+            /* 折叠时直接隐藏内容栏 */
             #r20-buff-panel.is-collapsed .r20-panel-body {
                 display: none !important;
             }
+
+            /* 向下展示：挂在标题栏下方，顺序为模板栏在上、单位栏在下 */
+            #r20-buff-panel.direction-down .r20-panel-body {
+                flex-direction: column;
+                border-radius: 0 0 7px 7px;
+                border-top: none;
+            }
+
+            /* 向上展示：以标题栏为基准，绝对定位在标题栏头顶向上生长 */
             #r20-buff-panel.direction-up .r20-panel-body {
+                position: absolute;
+                bottom: 100%;
+                left: 0;
+                right: 0;
                 flex-direction: column-reverse;
+                border-radius: 7px 7px 0 0;
+                border-bottom: none;
             }
 
             /* 分立窗格通用样式 */
@@ -113,12 +123,10 @@ export class BuffPanelStyles {
                 display: flex;
                 flex-direction: column;
                 background: #1a1e24;
-                border-bottom: 1px solid #2a3440;
                 box-sizing: border-box;
             }
-            #r20-buff-panel.direction-up .r20-split-pane:first-child {
-                border-bottom: none;
-                border-top: 1px solid #2a3440;
+            .r20-split-pane:not(:last-child) {
+                border-bottom: 1px solid #2a3440;
             }
             .r20-pane-header {
                 display: flex;
@@ -142,7 +150,7 @@ export class BuffPanelStyles {
                 gap: 5px;
             }
             .r20-pane-content {
-                max-height: 260px;
+                max-height: 250px;
                 overflow-y: auto;
                 padding: 6px 8px;
                 display: flex;

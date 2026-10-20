@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.7.1
-// @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成双栏自适应延伸、物理折叠、图钉感应、三态直接高亮交互与云端原生角色卡完全同步
+// @version      0.8.0
+// @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
 // @grant        none
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.7.1...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.8.0...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -1065,9 +1065,13 @@ class TokenBuffManager {
 /**
  * Pf1eBuffUI.js
  * 负责在先攻条注入极致紧凑的双行 Buff 徽章，同时无缝支持人物卡与纯野怪 Token
+ * 配备持久化 MutationObserver 防御 Vue 响应式 DOM 重绘
  */
 class Pf1eBuffUI {
     static isStylesInjected = false;
+    static isObserverStarted = false;
+    static _observer = null;
+    static _debounceTimer = null;
 
     static injectStyles() {
         if (this.isStylesInjected) return;
@@ -1134,11 +1138,56 @@ class Pf1eBuffUI {
     }
 
     /**
+     * 启动持久 DOM 监听器（抵御 Vue.js 列表重新渲染擦除徽章）
+     */
+    static startObserver() {
+        if (this.isObserverStarted) return;
+        this.injectStyles();
+
+        const attachObserver = () => {
+            const tracker = document.querySelector("#initiativewindow, .turn-tracker");
+            if (!tracker) {
+                setTimeout(attachObserver, 1000);
+                return;
+            }
+
+            if (this._observer) this._observer.disconnect();
+
+            this._observer = new MutationObserver((mutations) => {
+                let shouldRefresh = false;
+                for (const m of mutations) {
+                    if (m.type === "childList") {
+                        for (const node of m.addedNodes) {
+                            if (node.nodeType === 1 && (node.matches?.("li.token") || node.querySelector?.("li.token"))) {
+                                shouldRefresh = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (shouldRefresh) break;
+                }
+
+                if (shouldRefresh) {
+                    if (this._debounceTimer) clearTimeout(this._debounceTimer);
+                    this._debounceTimer = setTimeout(() => {
+                        this.refreshAllBadges();
+                    }, 80);
+                }
+            });
+
+            this._observer.observe(tracker, { childList: true, subtree: true });
+            this.isObserverStarted = true;
+        };
+
+        attachObserver();
+    }
+
+    /**
      * 刷新整个先攻条上的徽章
      */
     static async refreshAllBadges() {
         this.injectStyles();
-        const tracker = document.querySelector(".turn-tracker");
+        const tracker = document.querySelector("#initiativewindow, .turn-tracker");
         if (!tracker) return;
 
         const rows = tracker.querySelectorAll("li.token");
@@ -1164,10 +1213,8 @@ class Pf1eBuffUI {
         const isCharacter = !!character;
 
         if (isCharacter) {
-            // 人物卡绑定单位
             activeBuffs = await Pf1eBuffManager.getActiveBuffs(character);
         } else if (token) {
-            // 纯 Token 野怪单位
             activeBuffs = TokenBuffManager.getTokenBuffs(token).map(b => ({
                 name: b.name,
                 rounds: b.rounds,
@@ -1221,50 +1268,52 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 单项修改与快速解除弹窗
+     * 单个 Buff 点击快捷编辑/关停弹窗
      */
     static showBuffEditModal(character, token, buff, row, tokenId) {
-        const targetName = character ? character.get("name") : (token ? token.get("name") : "单位");
         const mask = document.createElement("div");
-        mask.className = "r20-modal-mask";
+        mask.className = "r20-dialog-mask";
+
+        const currentRoundsStr = buff.rounds !== null ? String(buff.rounds) : "";
 
         mask.innerHTML = `
-            <div class="r20-modal-box">
-                <div class="r20-modal-title">Buff 设置 - ${targetName}</div>
-                <div class="r20-modal-row">
-                    <span class="r20-modal-label">当前 Buff：<b>${buff.name}</b></span>
+            <div class="r20-dialog-box" style="width: 320px;">
+                <div class="r20-dialog-header">状态管理: ${buff.name}</div>
+                <div class="r20-dialog-body">
+                    <label style="font-size:11px; color:#b0bec5;">剩余持续轮数 (留空为常驻):</label>
+                    <input type="number" class="r20-input-text input-rounds" value="${currentRoundsStr}" placeholder="轮数" />
                 </div>
-                <div class="r20-modal-row">
-                    <label class="r20-modal-label">剩余轮数 (大于100或留空视为常驻)：</label>
-                    <input type="number" class="r20-modal-input edit-rounds-input" value="${buff.rounds !== null ? buff.rounds : ''}" placeholder="常驻" />
-                </div>
-                <div class="r20-modal-actions">
-                    <button class="r20-btn r20-btn-danger btn-remove">🗑️ 解除/删除</button>
-                    <button class="r20-btn r20-btn-cancel btn-cancel">取消</button>
-                    <button class="r20-btn r20-btn-primary btn-save">保存轮数</button>
+                <div class="r20-dialog-footer">
+                    <button class="r20-btn-icon danger btn-delete" style="padding:6px 12px; margin-right:auto;">✕ 关停解除</button>
+                    <button class="r20-btn-icon btn-cancel" style="padding:6px 12px;">取消</button>
+                    <button class="r20-btn-apply btn-save" style="padding:6px 14px;">保存</button>
                 </div>
             </div>
         `;
 
         document.body.appendChild(mask);
-
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
-        mask.querySelector(".btn-remove").addEventListener("click", async () => {
+
+        // 解除
+        mask.querySelector(".btn-delete").addEventListener("click", async () => {
             if (character && buff.rowId) {
-                await Pf1eBuffManager.removeBuff(character, buff.rowId);
+                await Pf1eBuffManager.toggleBuff(character, buff.rowId, false);
             } else if (token) {
                 TokenBuffManager.removeBuff(token, buff.name);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
         });
+
+        // 保存轮数
         mask.querySelector(".btn-save").addEventListener("click", async () => {
-            const val = mask.querySelector(".edit-rounds-input").value.trim();
-            const parsed = val === "" ? null : parseInt(val, 10);
+            const val = mask.querySelector(".input-rounds").value.trim();
+            const rounds = val === "" ? null : parseInt(val, 10);
+
             if (character && buff.rowId) {
-                await Pf1eBuffManager.setBuffRounds(character, buff.rowId, parsed);
+                await Pf1eBuffManager.setBuffRounds(character, buff.rowId, rounds);
             } else if (token) {
-                TokenBuffManager.applyOrRefreshBuff(token, buff.name, parsed);
+                TokenBuffManager.applyOrRefreshBuff(token, buff.name, rounds);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
@@ -1272,50 +1321,38 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 单行快速添加弹窗
+     * 单行点击快捷添加 Buff 弹窗
      */
     static showSingleAddModal(character, token, row, tokenId) {
-        const targetName = character ? character.get("name") : (token ? token.get("name") : "单位");
         const mask = document.createElement("div");
-        mask.className = "r20-modal-mask";
-
-        const presets = ["神恩", "加速术", "祝福术", "护盾术", "牛之力量", "树皮术", "法师护甲", "祈祷术"];
+        mask.className = "r20-dialog-mask";
 
         mask.innerHTML = `
-            <div class="r20-modal-box">
-                <div class="r20-modal-title">添加 Buff - ${targetName}</div>
-                <div class="r20-modal-row">
-                    <label class="r20-modal-label">Buff 名称：</label>
-                    <input type="text" class="r20-modal-input buff-name-input" placeholder="输入名称或点击下方快捷标签" />
-                    <div class="r20-modal-tags">
-                        ${presets.map(p => `<span class="r20-tag-pill">${p}</span>`).join("")}
-                    </div>
+            <div class="r20-dialog-box" style="width: 340px;">
+                <div class="r20-dialog-header">添加状态 Buff</div>
+                <div class="r20-dialog-body">
+                    <label style="font-size:11px; color:#b0bec5;">Buff 名称:</label>
+                    <input type="text" class="r20-input-text input-name" placeholder="例如: 加速术、祝福术..." />
+
+                    <label style="font-size:11px; color:#b0bec5;">持续轮数 (留空为常驻):</label>
+                    <input type="number" class="r20-input-text input-rounds" value="10" placeholder="轮数" />
                 </div>
-                <div class="r20-modal-row">
-                    <label class="r20-modal-label">持续轮数 (默认10轮，大于100或留空视为常驻)：</label>
-                    <input type="number" class="r20-modal-input buff-rounds-input" value="10" />
-                </div>
-                <div class="r20-modal-actions">
-                    <button class="r20-btn r20-btn-cancel btn-cancel">取消</button>
-                    <button class="r20-btn r20-btn-primary btn-confirm">确定添加</button>
+                <div class="r20-dialog-footer">
+                    <button class="r20-btn-icon btn-cancel" style="padding:6px 12px;">取消</button>
+                    <button class="r20-btn-apply btn-confirm" style="padding:6px 14px;">添加并生效</button>
                 </div>
             </div>
         `;
 
         document.body.appendChild(mask);
-
-        mask.querySelectorAll(".r20-tag-pill").forEach(tag => {
-            tag.addEventListener("click", () => {
-                mask.querySelector(".buff-name-input").value = tag.innerText;
-            });
-        });
-
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
+
         mask.querySelector(".btn-confirm").addEventListener("click", async () => {
-            const name = mask.querySelector(".buff-name-input").value.trim();
-            if (!name) return;
-            const roundsStr = mask.querySelector(".buff-rounds-input").value.trim();
-            const rounds = roundsStr === "" ? null : parseInt(roundsStr, 10);
+            const name = mask.querySelector(".input-name").value.trim();
+            if (!name) { alert("请输入 Buff 名称"); return; }
+
+            const val = mask.querySelector(".input-rounds").value.trim();
+            const rounds = val === "" ? null : parseInt(val, 10);
 
             if (character) {
                 await Pf1eBuffManager.applyOrRefreshBuff(character, name, rounds);
@@ -1334,57 +1371,49 @@ class Pf1eBuffUI {
     // ==========================================
 /**
  * BuffPanelStyles.js
- * 状态Buff工作台样式定义与注入器
+ * 状态Buff工作台样式定义：极简基准定位模型
+ * 拖动仅作用于标题栏，内容栏以标题栏为基准向上（bottom:100%）或向下展示
  */
 class BuffPanelStyles {
     static STYLESHEET_ID = "r20-floating-panel-styles";
 
     static getCss() {
         return `
-            /* 主悬浮窗容器 */
+            /* 主悬浮窗容器（以标题栏为主体定位） */
             #r20-buff-panel {
                 position: fixed;
                 width: 320px;
-                background: #1a1e24;
-                border: 1px solid #323d47;
-                border-radius: 8px;
-                box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+                z-index: 99999;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 color: #eceff1;
-                z-index: 99999;
-                display: flex;
-                flex-direction: column;
                 user-select: none;
                 box-sizing: border-box;
             }
 
-            /* 向上展开时的布局翻转：标题栏在底，内容在顶 */
-            #r20-buff-panel.direction-up {
-                flex-direction: column-reverse;
-            }
-
-            /* 标题栏 */
+            /* 标题栏（拖拽句柄） */
             .r20-panel-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
                 padding: 7px 10px;
                 background: #232b34;
+                border: 1px solid #323d47;
                 cursor: grab;
                 box-sizing: border-box;
-                border-radius: 7px 7px 0 0;
-                border-bottom: 1px solid #323d47;
-            }
-            #r20-buff-panel.direction-up .r20-panel-header {
-                border-radius: 0 0 7px 7px;
-                border-top: 1px solid #323d47;
-                border-bottom: none;
-            }
-            /* 折叠为纯标题时，四周完整圆角 */
-            #r20-buff-panel.is-collapsed .r20-panel-header {
                 border-radius: 7px;
-                border-top: none;
+                box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+            }
+
+            /* 向下展开时：标题栏底角方正以贴合内容栏 */
+            #r20-buff-panel.direction-down:not(.is-collapsed) .r20-panel-header {
+                border-radius: 7px 7px 0 0;
                 border-bottom: none;
+            }
+
+            /* 向上展开时：标题栏顶角方正以贴合上方内容栏 */
+            #r20-buff-panel.direction-up:not(.is-collapsed) .r20-panel-header {
+                border-radius: 0 0 7px 7px;
+                border-top: none;
             }
 
             .r20-panel-title {
@@ -1394,6 +1423,7 @@ class BuffPanelStyles {
                 display: flex;
                 align-items: center;
                 gap: 6px;
+                pointer-events: none;
             }
             .r20-panel-controls {
                 display: flex;
@@ -1426,20 +1456,37 @@ class BuffPanelStyles {
             .r20-btn-icon.danger { color: #ef5350; }
             .r20-btn-icon.danger:hover { background: #c62828; color: #ffffff; }
 
-            /* 面板主体 */
+            /* 内容区容器 */
             .r20-panel-body {
-                display: flex;
-                flex-direction: column;
-                gap: 0px;
-                max-height: 80vh;
-                overflow: visible;
+                background: #1a1e24;
+                border: 1px solid #323d47;
                 box-sizing: border-box;
+                display: flex;
+                max-height: 75vh;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.6);
             }
+
+            /* 折叠时直接隐藏内容栏 */
             #r20-buff-panel.is-collapsed .r20-panel-body {
                 display: none !important;
             }
+
+            /* 向下展示：挂在标题栏下方，顺序为模板栏在上、单位栏在下 */
+            #r20-buff-panel.direction-down .r20-panel-body {
+                flex-direction: column;
+                border-radius: 0 0 7px 7px;
+                border-top: none;
+            }
+
+            /* 向上展示：以标题栏为基准，绝对定位在标题栏头顶向上生长 */
             #r20-buff-panel.direction-up .r20-panel-body {
+                position: absolute;
+                bottom: 100%;
+                left: 0;
+                right: 0;
                 flex-direction: column-reverse;
+                border-radius: 7px 7px 0 0;
+                border-bottom: none;
             }
 
             /* 分立窗格通用样式 */
@@ -1447,12 +1494,10 @@ class BuffPanelStyles {
                 display: flex;
                 flex-direction: column;
                 background: #1a1e24;
-                border-bottom: 1px solid #2a3440;
                 box-sizing: border-box;
             }
-            #r20-buff-panel.direction-up .r20-split-pane:first-child {
-                border-bottom: none;
-                border-top: 1px solid #2a3440;
+            .r20-split-pane:not(:last-child) {
+                border-bottom: 1px solid #2a3440;
             }
             .r20-pane-header {
                 display: flex;
@@ -1476,7 +1521,7 @@ class BuffPanelStyles {
                 gap: 5px;
             }
             .r20-pane-content {
-                max-height: 260px;
+                max-height: 250px;
                 overflow-y: auto;
                 padding: 6px 8px;
                 display: flex;
@@ -1858,51 +1903,64 @@ class BuffPanelTemplates {
     // ==========================================
 /**
  * BuffPanelDragDrop.js
- * 状态Buff工作台拖拽手势与交互处理器（窗口拖拽、栏内排序、跨栏复制）
+ * 状态Buff工作台拖拽手势与交互处理器（极简标题栏拖拽、栏内排序、跨栏复制）
  */
 class BuffPanelDragDrop {
     /**
-     * 初始化窗口标题栏拖拽移动
+     * 初始化窗口标题栏拖拽移动（拖动主体纯粹为标题栏，绝不跳变）
      */
     static initWindowDrag(panelEl, onDragEnd, onDragging) {
         const header = panelEl.querySelector(".r20-panel-header");
         let isDragging = false;
-        let startX, startY, initialX, initialY;
+        let startX, startY, initialLeft, initialTop;
 
         header.addEventListener("mousedown", (e) => {
             if (e.target.tagName === "BUTTON") return;
+            e.stopPropagation();
+            e.preventDefault();
+
             isDragging = true;
             header.style.cursor = "grabbing";
             startX = e.clientX;
             startY = e.clientY;
-            initialX = panelEl.offsetLeft;
-            initialY = panelEl.offsetTop;
+            initialLeft = panelEl.offsetLeft;
+            initialTop = panelEl.offsetTop;
 
             const onMouseMove = (moveEvent) => {
                 if (!isDragging) return;
+                moveEvent.stopPropagation();
+                moveEvent.preventDefault();
+
                 const dx = moveEvent.clientX - startX;
                 const dy = moveEvent.clientY - startY;
-                const newLeft = Math.max(10, Math.min(window.innerWidth - 340, initialX + dx));
-                const newTop = Math.max(10, Math.min(window.innerHeight - 60, initialY + dy));
+                const newLeft = Math.max(10, Math.min(window.innerWidth - 330, initialLeft + dx));
+                const newTop = Math.max(10, Math.min(window.innerHeight - 40, initialTop + dy));
 
                 panelEl.style.left = `${newLeft}px`;
                 panelEl.style.top = `${newTop}px`;
+                panelEl.style.bottom = "auto";
                 panelEl.style.right = "auto";
+
                 if (onDragging) onDragging(newLeft, newTop);
             };
 
-            const onMouseUp = () => {
+            const onMouseUp = (upEvent) => {
                 if (isDragging) {
                     isDragging = false;
                     header.style.cursor = "grab";
-                    if (onDragEnd) onDragEnd(panelEl.offsetLeft, panelEl.offsetTop);
+                    upEvent.stopPropagation();
+                    upEvent.preventDefault();
+
+                    const finalLeft = panelEl.offsetLeft;
+                    const finalTop = panelEl.offsetTop;
+                    if (onDragEnd) onDragEnd(finalLeft, finalTop);
                 }
-                document.removeEventListener("mousemove", onMouseMove);
-                document.removeEventListener("mouseup", onMouseUp);
+                document.removeEventListener("mousemove", onMouseMove, true);
+                document.removeEventListener("mouseup", onMouseUp, true);
             };
 
-            document.addEventListener("mousemove", onMouseMove);
-            document.addEventListener("mouseup", onMouseUp);
+            document.addEventListener("mousemove", onMouseMove, true);
+            document.addEventListener("mouseup", onMouseUp, true);
         });
     }
 
@@ -2014,16 +2072,15 @@ class BuffPanelDragDrop {
 /**
  * BuffFloatingPanel.js
  * 状态Buff工作台主控制器：
- * 1. 上下双栏独立延伸、重心自适应反转（底端固定、向上生长）；
+ * 1. 拖动主体纯粹为标题栏，内容栏以标题栏位置为基准向上或向下展示；
  * 2. 物理折叠（- 缩成只有标题栏，标号变为 +；未固定时移出 400ms 自动折叠，移入展开）；
- * 3. 三态直接点按高亮交互与未启用 Buff 展示；
- * 4. 角色卡原生 repeating_buff2 数据源实时全量同步，空卡即为空库；
- * 5. 编辑模式解绑与跨栏拖拽复制。
+ * 3. 完美适配 Jumpgate 现代引擎原生选区与先攻联动；
+ * 4. 角色卡原生 repeating_buff2 数据源双向实时同步。
  */
 class BuffFloatingPanel {
-    static POS_KEY = "r20_suite_panel_pos_v6";
-    static PIN_KEY = "r20_suite_panel_pinned_v6";
-    static COLLAPSE_KEY = "r20_suite_panel_collapsed_v6";
+    static POS_KEY = "r20_suite_panel_pos_v7";
+    static PIN_KEY = "r20_suite_panel_pinned_v7";
+    static COLLAPSE_KEY = "r20_suite_panel_collapsed_v7";
 
     static panelEl = null;
     static isPinned = false;
@@ -2037,6 +2094,7 @@ class BuffFloatingPanel {
     static editSelectedIds = new Set();
     static _draggedData = null;
     static _leaveTimer = null;
+    static _lastSelectedIdsStr = "";
 
     /**
      * 初始化悬浮面板
@@ -2053,25 +2111,10 @@ class BuffFloatingPanel {
         this.createPanelDOM();
         this.initHoverCollapse();
         this.initDragGestures();
-
-        // 监听画布 Token 选区变化
-        if (window.d20 && window.d20.engine) {
-            window.d20.engine.canvas.on("selection:created", () => this.onSelectionChange());
-            window.d20.engine.canvas.on("selection:updated", () => this.onSelectionChange());
-            window.d20.engine.canvas.on("selection:cleared", () => this.onSelectionChange());
-        }
+        this.initSelectionListeners();
+        this.initDatabaseCharacterWatcher();
 
         await this.renderAllPanes();
-    }
-
-    /**
-     * 选区变化防抖
-     */
-    static onSelectionChange() {
-        if (this._selTimer) clearTimeout(this._selTimer);
-        this._selTimer = setTimeout(async () => {
-            await this.renderAllPanes();
-        }, 120);
     }
 
     /**
@@ -2098,7 +2141,7 @@ class BuffFloatingPanel {
             panel.classList.add("is-collapsed");
         }
 
-        // 读取持久化位置并设置锚点
+        // 读取并应用持久化位置（纯 left / top）
         this.restorePanelPosition();
 
         // 绑定头部按钮
@@ -2112,7 +2155,6 @@ class BuffFloatingPanel {
             this.isTemplatePaneCollapsed = !this.isTemplatePaneCollapsed;
             panel.querySelector(".r20-template-pane .toggle-icon").textContent = this.isTemplatePaneCollapsed ? "▶" : "▼";
             panel.querySelector(".r20-template-tree").style.display = this.isTemplatePaneCollapsed ? "none" : "flex";
-            this.updateLayoutDirection();
         });
 
         panel.querySelector(".r20-unit-pane .r20-pane-header").addEventListener("click", (e) => {
@@ -2120,7 +2162,6 @@ class BuffFloatingPanel {
             this.isUnitPaneCollapsed = !this.isUnitPaneCollapsed;
             panel.querySelector(".r20-unit-pane .toggle-icon").textContent = this.isUnitPaneCollapsed ? "▶" : "▼";
             panel.querySelector(".r20-unit-tree").style.display = this.isUnitPaneCollapsed ? "none" : "flex";
-            this.updateLayoutDirection();
         });
 
         // 模板工具栏
@@ -2133,7 +2174,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 恢复持久化坐标并安全钳制
+     * 恢复持久化坐标（纯 left 与 top）
      */
     static restorePanelPosition() {
         const savedPos = localStorage.getItem(this.POS_KEY);
@@ -2144,60 +2185,32 @@ class BuffFloatingPanel {
             try {
                 const pos = JSON.parse(savedPos);
                 if (pos.left !== undefined) left = Math.max(10, Math.min(window.innerWidth - 340, pos.left));
-                if (pos.top !== undefined) top = Math.max(10, Math.min(window.innerHeight - 80, pos.top));
+                if (pos.top !== undefined) top = Math.max(10, Math.min(window.innerHeight - 40, pos.top));
             } catch (e) {}
         }
 
-        this.applyPosition(left, top);
+        this.panelEl.style.left = `${left}px`;
+        this.panelEl.style.top = `${top}px`;
+        this.panelEl.style.right = "auto";
+        this.panelEl.style.bottom = "auto";
+        this.updateLayoutDirection(top);
     }
 
     /**
-     * 应用坐标并自动判定上/下展开模式
-     * 关键逻辑：若在下半区（direction-up），以底部锚定（bottom），使高度伸缩完全向上生长
+     * 更新布局展开方向（以标题栏在屏幕上下半区为纯粹基准）
      */
-    static applyPosition(left, top) {
+    static updateLayoutDirection(currentTop = null) {
         if (!this.panelEl) return;
+        const top = currentTop !== null ? currentTop : this.panelEl.offsetTop;
         const middleY = window.innerHeight / 2;
         this.isDirectionUp = top > middleY;
-
-        this.panelEl.style.left = `${left}px`;
-        this.panelEl.style.right = "auto";
 
         if (this.isDirectionUp) {
             this.panelEl.classList.add("direction-up");
             this.panelEl.classList.remove("direction-down");
-
-            // 锁定标题栏在视口的位置：让底端对齐 (window.innerHeight - (top + 34))
-            const bottomOffset = Math.max(10, window.innerHeight - (top + 34));
-            this.panelEl.style.top = "auto";
-            this.panelEl.style.bottom = `${bottomOffset}px`;
         } else {
             this.panelEl.classList.add("direction-down");
             this.panelEl.classList.remove("direction-up");
-
-            this.panelEl.style.bottom = "auto";
-            this.panelEl.style.top = `${top}px`;
-        }
-    }
-
-    /**
-     * 更新布局反转与伸展方向
-     */
-    static updateLayoutDirection() {
-        if (!this.panelEl) return;
-        const rect = this.panelEl.getBoundingClientRect();
-        const middleY = window.innerHeight / 2;
-        const isUp = rect.top > middleY || (rect.bottom > middleY && rect.top > 150);
-
-        if (isUp !== this.isDirectionUp) {
-            this.isDirectionUp = isUp;
-            if (this.isDirectionUp) {
-                this.panelEl.classList.add("direction-up");
-                this.panelEl.classList.remove("direction-down");
-            } else {
-                this.panelEl.classList.add("direction-down");
-                this.panelEl.classList.remove("direction-up");
-            }
         }
     }
 
@@ -2208,12 +2221,11 @@ class BuffFloatingPanel {
         BuffPanelDragDrop.initWindowDrag(
             this.panelEl,
             (left, top) => {
-                // 拖拽结束：持久化坐标并重新定锚
                 localStorage.setItem(this.POS_KEY, JSON.stringify({ left, top }));
-                this.applyPosition(left, top);
+                this.updateLayoutDirection(top);
             },
             (left, top) => {
-                this.updateLayoutDirection();
+                this.updateLayoutDirection(top);
             }
         );
     }
@@ -2222,7 +2234,7 @@ class BuffFloatingPanel {
      * 鼠标移入展开、移出折叠（未钉住时 400ms 防抖）
      */
     static initHoverCollapse() {
-        this.panelEl.addEventListener("mouseenter", () => {
+        this.panelEl.addEventListener("mouseenter", async () => {
             if (this._leaveTimer) clearTimeout(this._leaveTimer);
             if (!this.isPinned && this.isCollapsed) {
                 this.setCollapsed(false);
@@ -2264,9 +2276,6 @@ class BuffFloatingPanel {
         }
     }
 
-    /**
-     * 切换最小化折叠
-     */
     static toggleCollapse() {
         this.setCollapsed(!this.isCollapsed);
     }
@@ -2292,63 +2301,117 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 编辑模式切换
+     * 监听 Jumpgate 画布选区变化
      */
-    static async toggleEditMode() {
-        this.isEditMode = !this.isEditMode;
-        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
-        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
+    static initSelectionListeners() {
+        // 监听画布点击释放
+        document.addEventListener("pointerup", () => this.checkSelectionChanged(), true);
+        document.addEventListener("mouseup", () => this.checkSelectionChanged(), true);
+        document.addEventListener("keyup", () => this.checkSelectionChanged(), true);
 
-        if (this.isEditMode) {
-            editBtn.classList.add("active");
-            editBtn.textContent = "🔒 完成";
-            toolbar.style.display = "flex";
-            this.editSelectedIds.clear();
-            this.showToast("✏️ 已进入编辑模式：点击多选待删，支持跨栏拖拽复制", "info");
-        } else {
-            editBtn.classList.remove("active");
-            editBtn.textContent = "✏️ 编辑";
-            toolbar.style.display = "none";
-            this.editSelectedIds.clear();
+        // 先攻条点击联动
+        const turnTracker = document.querySelector("#initiativewindow, .turn-tracker");
+        if (turnTracker) {
+            turnTracker.addEventListener("click", () => this.checkSelectionChanged(), true);
         }
 
-        await this.renderAllPanes();
+        // 轻量定时轮询保障（350ms）
+        setInterval(() => this.checkSelectionChanged(), 350);
     }
 
     /**
-     * 渲染全部窗格
+     * 检查选区是否发生实质变化
      */
-    static async renderAllPanes() {
-        await this.renderTemplatePane();
-        await this.renderUnitPane();
-        this.updateLayoutDirection();
+    static checkSelectionChanged() {
+        const tokens = this.getSelectedTokens();
+        const idsStr = tokens.map(t => t.token?.id || t.char?.id || t.name).sort().join(",");
+        if (idsStr !== this._lastSelectedIdsStr) {
+            this._lastSelectedIdsStr = idsStr;
+            this.renderAllPanes();
+        }
     }
 
     /**
-     * 获取画布选中的 Tokens
+     * 监听数据库角色卡的原生属性变动（实时更新模板库）
+     */
+    static initDatabaseCharacterWatcher() {
+        const dbChar = SuiteConfigStore.findDatabaseCharacter();
+        if (dbChar && dbChar.attribs) {
+            dbChar.attribs.on("add change remove reset", () => {
+                if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
+                this._dbSyncTimer = setTimeout(async () => {
+                    this.templates = await SuiteConfigStore.loadTemplates();
+                    await this.renderTemplatePane();
+                }, 150);
+            });
+        }
+    }
+
+    /**
+     * 获取 Jumpgate 现代架构下当前选中的 Tokens
      */
     static getSelectedTokens() {
-        if (!window.d20 || !window.d20.engine || !window.d20.engine.canvas) return [];
-        const active = window.d20.engine.canvas.getActiveObjects ? window.d20.engine.canvas.getActiveObjects() : [];
         const result = [];
+        const seenTokenIds = new Set();
 
-        for (const obj of active) {
-            const tokenModel = (window.Campaign && window.Campaign.pages)
-                ? window.Campaign.pages.get(window.currentEditingPageID || (window.Campaign.activePage && window.Campaign.activePage.id))
-                    ?.thegraphics?.get(obj.id)
-                : null;
+        // 1. Jumpgate 原生核心选区接口
+        const tt = window.Campaign?.engine?.tabletop;
+        if (tt && typeof tt.getSelection === "function") {
+            try {
+                const selection = tt.getSelection();
+                if (Array.isArray(selection) && selection.length > 0) {
+                    for (const item of selection) {
+                        const tokenId = item.id;
+                        if (!tokenId || seenTokenIds.has(tokenId)) continue;
+                        seenTokenIds.add(tokenId);
 
-            if (tokenModel) {
-                const charId = tokenModel.get("represents");
-                if (charId && window.Campaign && window.Campaign.characters) {
-                    const char = window.Campaign.characters.get(charId);
-                    if (char) {
-                        result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
-                        continue;
+                        // 提取 Backbone Token Model
+                        let tokenModel = item.model;
+                        if (!tokenModel) {
+                            tokenModel = Roll20Bridge.getTokenGraphic(tokenId);
+                        }
+
+                        if (tokenModel) {
+                            const charId = tokenModel.get("represents");
+                            if (charId && window.Campaign && window.Campaign.characters) {
+                                const char = window.Campaign.characters.get(charId);
+                                if (char) {
+                                    result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
+                                    continue;
+                                }
+                            }
+                            result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
+                        }
+                    }
+                    return result;
+                }
+            } catch (e) {
+                console.warn("[BuffFloatingPanel] Jumpgate getSelection 异常:", e);
+            }
+        }
+
+        // 2. 回退机制：老版 Fabric 引擎
+        if (window.d20 && window.d20.engine && window.d20.engine.canvas) {
+            try {
+                const active = window.d20.engine.canvas.getActiveObjects ? window.d20.engine.canvas.getActiveObjects() : [];
+                for (const obj of active) {
+                    if (obj.id && !seenTokenIds.has(obj.id)) {
+                        seenTokenIds.add(obj.id);
+                        const tokenModel = Roll20Bridge.getTokenGraphic(obj.id);
+                        if (tokenModel) {
+                            const charId = tokenModel.get("represents");
+                            if (charId && window.Campaign && window.Campaign.characters) {
+                                const char = window.Campaign.characters.get(charId);
+                                if (char) {
+                                    result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
+                                    continue;
+                                }
+                            }
+                            result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
+                        }
                     }
                 }
-                result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
-            }
+            } catch (e) {}
         }
 
         return result;
@@ -2403,6 +2466,38 @@ class BuffFloatingPanel {
         }
 
         return { activeStats, allBuffRows };
+    }
+
+    /**
+     * 编辑模式切换
+     */
+    static async toggleEditMode() {
+        this.isEditMode = !this.isEditMode;
+        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
+        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
+
+        if (this.isEditMode) {
+            editBtn.classList.add("active");
+            editBtn.textContent = "🔒 完成";
+            toolbar.style.display = "flex";
+            this.editSelectedIds.clear();
+            this.showToast("✏️ 已进入编辑模式：点击多选待删，支持跨栏拖拽复制", "info");
+        } else {
+            editBtn.classList.remove("active");
+            editBtn.textContent = "✏️ 编辑";
+            toolbar.style.display = "none";
+            this.editSelectedIds.clear();
+        }
+
+        await this.renderAllPanes();
+    }
+
+    /**
+     * 渲染全部窗格
+     */
+    static async renderAllPanes() {
+        await this.renderTemplatePane();
+        await this.renderUnitPane();
     }
 
     /**
@@ -2499,7 +2594,6 @@ class BuffFloatingPanel {
                     </div>
                 `;
 
-                // 挂载拖拽手势
                 BuffPanelDragDrop.setupItemDrag({
                     el: header,
                     node,
@@ -2533,7 +2627,6 @@ class BuffFloatingPanel {
                     }
                 });
 
-                // 点击事件
                 header.addEventListener("click", async (e) => {
                     if (e.target.tagName === "BUTTON") return;
                     if (this.isEditMode) {
@@ -2558,7 +2651,6 @@ class BuffFloatingPanel {
                     }
                 });
 
-                // 编辑模式内按钮
                 if (this.isEditMode) {
                     header.querySelector(".btn-folder-rename")?.addEventListener("click", async (e) => {
                         e.stopPropagation();
@@ -2582,7 +2674,6 @@ class BuffFloatingPanel {
 
                 folderEl.appendChild(header);
 
-                // 子容器
                 const childrenContainer = document.createElement("div");
                 childrenContainer.className = "r20-folder-children";
                 childrenContainer.style.display = node.collapsed ? "none" : "flex";
@@ -2624,7 +2715,6 @@ class BuffFloatingPanel {
                     </div>
                 `;
 
-                // 挂载拖拽
                 BuffPanelDragDrop.setupItemDrag({
                     el: itemEl,
                     node,
@@ -2654,7 +2744,6 @@ class BuffFloatingPanel {
                     }
                 });
 
-                // 点击交互
                 itemEl.addEventListener("click", async (e) => {
                     if (e.target.tagName === "BUTTON") return;
                     if (this.isEditMode) {
@@ -2776,7 +2865,6 @@ class BuffFloatingPanel {
                     this.renderUnitPane();
                 });
 
-                // 编辑模式拖拽
                 const nodeData = {
                     id: "unit_" + item.name,
                     name: item.name,
@@ -3049,9 +3137,6 @@ class BuffFloatingPanel {
         return await SuiteConfigStore.saveTemplates(this.templates, promptIfMissing);
     }
 
-    /**
-     * 辅助工具
-     */
     static collectFolderBuffNames(folder) {
         const names = [];
         const walk = (nodes) => {
@@ -3152,16 +3237,16 @@ class BuffFloatingPanel {
                 console.error("[Roll20Suite] 悬浮工作台初始化失败:", panelErr);
             }
 
-            // 3. 首次全量刷新先攻条徽章
-            setTimeout(async () => {
-                try {
-                    await Pf1eBuffUI.refreshAllBadges();
-                } catch (uiErr) {
-                    console.error("[Roll20Suite] 先攻条徽章初次刷新失败:", uiErr);
-                }
-            }, 800);
+            // 3. 启动先攻条 DOM 响应式监听与全量刷新
+            try {
+                Pf1eBuffUI.startObserver();
+                await Pf1eBuffUI.refreshAllBadges();
+                console.log("[Roll20Suite] Pf1eBuffUI 先攻徽章与 MutationObserver 挂载就绪");
+            } catch (uiErr) {
+                console.error("[Roll20Suite] 先攻条徽章挂载失败:", uiErr);
+            }
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.7.1 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.8.0 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

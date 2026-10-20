@@ -10,16 +10,15 @@ import { BuffPanelDragDrop } from "./BuffPanelDragDrop.js";
 /**
  * BuffFloatingPanel.js
  * 状态Buff工作台主控制器：
- * 1. 上下双栏独立延伸、重心自适应反转（底端固定、向上生长）；
+ * 1. 拖动主体纯粹为标题栏，内容栏以标题栏位置为基准向上或向下展示；
  * 2. 物理折叠（- 缩成只有标题栏，标号变为 +；未固定时移出 400ms 自动折叠，移入展开）；
- * 3. 三态直接点按高亮交互与未启用 Buff 展示；
- * 4. 角色卡原生 repeating_buff2 数据源实时全量同步，空卡即为空库；
- * 5. 编辑模式解绑与跨栏拖拽复制。
+ * 3. 完美适配 Jumpgate 现代引擎原生选区与先攻联动；
+ * 4. 角色卡原生 repeating_buff2 数据源双向实时同步。
  */
 export class BuffFloatingPanel {
-    static POS_KEY = "r20_suite_panel_pos_v6";
-    static PIN_KEY = "r20_suite_panel_pinned_v6";
-    static COLLAPSE_KEY = "r20_suite_panel_collapsed_v6";
+    static POS_KEY = "r20_suite_panel_pos_v7";
+    static PIN_KEY = "r20_suite_panel_pinned_v7";
+    static COLLAPSE_KEY = "r20_suite_panel_collapsed_v7";
 
     static panelEl = null;
     static isPinned = false;
@@ -33,6 +32,7 @@ export class BuffFloatingPanel {
     static editSelectedIds = new Set();
     static _draggedData = null;
     static _leaveTimer = null;
+    static _lastSelectedIdsStr = "";
 
     /**
      * 初始化悬浮面板
@@ -49,25 +49,10 @@ export class BuffFloatingPanel {
         this.createPanelDOM();
         this.initHoverCollapse();
         this.initDragGestures();
-
-        // 监听画布 Token 选区变化
-        if (window.d20 && window.d20.engine) {
-            window.d20.engine.canvas.on("selection:created", () => this.onSelectionChange());
-            window.d20.engine.canvas.on("selection:updated", () => this.onSelectionChange());
-            window.d20.engine.canvas.on("selection:cleared", () => this.onSelectionChange());
-        }
+        this.initSelectionListeners();
+        this.initDatabaseCharacterWatcher();
 
         await this.renderAllPanes();
-    }
-
-    /**
-     * 选区变化防抖
-     */
-    static onSelectionChange() {
-        if (this._selTimer) clearTimeout(this._selTimer);
-        this._selTimer = setTimeout(async () => {
-            await this.renderAllPanes();
-        }, 120);
     }
 
     /**
@@ -94,7 +79,7 @@ export class BuffFloatingPanel {
             panel.classList.add("is-collapsed");
         }
 
-        // 读取持久化位置并设置锚点
+        // 读取并应用持久化位置（纯 left / top）
         this.restorePanelPosition();
 
         // 绑定头部按钮
@@ -108,7 +93,6 @@ export class BuffFloatingPanel {
             this.isTemplatePaneCollapsed = !this.isTemplatePaneCollapsed;
             panel.querySelector(".r20-template-pane .toggle-icon").textContent = this.isTemplatePaneCollapsed ? "▶" : "▼";
             panel.querySelector(".r20-template-tree").style.display = this.isTemplatePaneCollapsed ? "none" : "flex";
-            this.updateLayoutDirection();
         });
 
         panel.querySelector(".r20-unit-pane .r20-pane-header").addEventListener("click", (e) => {
@@ -116,7 +100,6 @@ export class BuffFloatingPanel {
             this.isUnitPaneCollapsed = !this.isUnitPaneCollapsed;
             panel.querySelector(".r20-unit-pane .toggle-icon").textContent = this.isUnitPaneCollapsed ? "▶" : "▼";
             panel.querySelector(".r20-unit-tree").style.display = this.isUnitPaneCollapsed ? "none" : "flex";
-            this.updateLayoutDirection();
         });
 
         // 模板工具栏
@@ -129,7 +112,7 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 恢复持久化坐标并安全钳制
+     * 恢复持久化坐标（纯 left 与 top）
      */
     static restorePanelPosition() {
         const savedPos = localStorage.getItem(this.POS_KEY);
@@ -140,60 +123,32 @@ export class BuffFloatingPanel {
             try {
                 const pos = JSON.parse(savedPos);
                 if (pos.left !== undefined) left = Math.max(10, Math.min(window.innerWidth - 340, pos.left));
-                if (pos.top !== undefined) top = Math.max(10, Math.min(window.innerHeight - 80, pos.top));
+                if (pos.top !== undefined) top = Math.max(10, Math.min(window.innerHeight - 40, pos.top));
             } catch (e) {}
         }
 
-        this.applyPosition(left, top);
+        this.panelEl.style.left = `${left}px`;
+        this.panelEl.style.top = `${top}px`;
+        this.panelEl.style.right = "auto";
+        this.panelEl.style.bottom = "auto";
+        this.updateLayoutDirection(top);
     }
 
     /**
-     * 应用坐标并自动判定上/下展开模式
-     * 关键逻辑：若在下半区（direction-up），以底部锚定（bottom），使高度伸缩完全向上生长
+     * 更新布局展开方向（以标题栏在屏幕上下半区为纯粹基准）
      */
-    static applyPosition(left, top) {
+    static updateLayoutDirection(currentTop = null) {
         if (!this.panelEl) return;
+        const top = currentTop !== null ? currentTop : this.panelEl.offsetTop;
         const middleY = window.innerHeight / 2;
         this.isDirectionUp = top > middleY;
-
-        this.panelEl.style.left = `${left}px`;
-        this.panelEl.style.right = "auto";
 
         if (this.isDirectionUp) {
             this.panelEl.classList.add("direction-up");
             this.panelEl.classList.remove("direction-down");
-
-            // 锁定标题栏在视口的位置：让底端对齐 (window.innerHeight - (top + 34))
-            const bottomOffset = Math.max(10, window.innerHeight - (top + 34));
-            this.panelEl.style.top = "auto";
-            this.panelEl.style.bottom = `${bottomOffset}px`;
         } else {
             this.panelEl.classList.add("direction-down");
             this.panelEl.classList.remove("direction-up");
-
-            this.panelEl.style.bottom = "auto";
-            this.panelEl.style.top = `${top}px`;
-        }
-    }
-
-    /**
-     * 更新布局反转与伸展方向
-     */
-    static updateLayoutDirection() {
-        if (!this.panelEl) return;
-        const rect = this.panelEl.getBoundingClientRect();
-        const middleY = window.innerHeight / 2;
-        const isUp = rect.top > middleY || (rect.bottom > middleY && rect.top > 150);
-
-        if (isUp !== this.isDirectionUp) {
-            this.isDirectionUp = isUp;
-            if (this.isDirectionUp) {
-                this.panelEl.classList.add("direction-up");
-                this.panelEl.classList.remove("direction-down");
-            } else {
-                this.panelEl.classList.add("direction-down");
-                this.panelEl.classList.remove("direction-up");
-            }
         }
     }
 
@@ -204,12 +159,11 @@ export class BuffFloatingPanel {
         BuffPanelDragDrop.initWindowDrag(
             this.panelEl,
             (left, top) => {
-                // 拖拽结束：持久化坐标并重新定锚
                 localStorage.setItem(this.POS_KEY, JSON.stringify({ left, top }));
-                this.applyPosition(left, top);
+                this.updateLayoutDirection(top);
             },
             (left, top) => {
-                this.updateLayoutDirection();
+                this.updateLayoutDirection(top);
             }
         );
     }
@@ -218,7 +172,7 @@ export class BuffFloatingPanel {
      * 鼠标移入展开、移出折叠（未钉住时 400ms 防抖）
      */
     static initHoverCollapse() {
-        this.panelEl.addEventListener("mouseenter", () => {
+        this.panelEl.addEventListener("mouseenter", async () => {
             if (this._leaveTimer) clearTimeout(this._leaveTimer);
             if (!this.isPinned && this.isCollapsed) {
                 this.setCollapsed(false);
@@ -260,9 +214,6 @@ export class BuffFloatingPanel {
         }
     }
 
-    /**
-     * 切换最小化折叠
-     */
     static toggleCollapse() {
         this.setCollapsed(!this.isCollapsed);
     }
@@ -288,63 +239,117 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 编辑模式切换
+     * 监听 Jumpgate 画布选区变化
      */
-    static async toggleEditMode() {
-        this.isEditMode = !this.isEditMode;
-        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
-        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
+    static initSelectionListeners() {
+        // 监听画布点击释放
+        document.addEventListener("pointerup", () => this.checkSelectionChanged(), true);
+        document.addEventListener("mouseup", () => this.checkSelectionChanged(), true);
+        document.addEventListener("keyup", () => this.checkSelectionChanged(), true);
 
-        if (this.isEditMode) {
-            editBtn.classList.add("active");
-            editBtn.textContent = "🔒 完成";
-            toolbar.style.display = "flex";
-            this.editSelectedIds.clear();
-            this.showToast("✏️ 已进入编辑模式：点击多选待删，支持跨栏拖拽复制", "info");
-        } else {
-            editBtn.classList.remove("active");
-            editBtn.textContent = "✏️ 编辑";
-            toolbar.style.display = "none";
-            this.editSelectedIds.clear();
+        // 先攻条点击联动
+        const turnTracker = document.querySelector("#initiativewindow, .turn-tracker");
+        if (turnTracker) {
+            turnTracker.addEventListener("click", () => this.checkSelectionChanged(), true);
         }
 
-        await this.renderAllPanes();
+        // 轻量定时轮询保障（350ms）
+        setInterval(() => this.checkSelectionChanged(), 350);
     }
 
     /**
-     * 渲染全部窗格
+     * 检查选区是否发生实质变化
      */
-    static async renderAllPanes() {
-        await this.renderTemplatePane();
-        await this.renderUnitPane();
-        this.updateLayoutDirection();
+    static checkSelectionChanged() {
+        const tokens = this.getSelectedTokens();
+        const idsStr = tokens.map(t => t.token?.id || t.char?.id || t.name).sort().join(",");
+        if (idsStr !== this._lastSelectedIdsStr) {
+            this._lastSelectedIdsStr = idsStr;
+            this.renderAllPanes();
+        }
     }
 
     /**
-     * 获取画布选中的 Tokens
+     * 监听数据库角色卡的原生属性变动（实时更新模板库）
+     */
+    static initDatabaseCharacterWatcher() {
+        const dbChar = SuiteConfigStore.findDatabaseCharacter();
+        if (dbChar && dbChar.attribs) {
+            dbChar.attribs.on("add change remove reset", () => {
+                if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
+                this._dbSyncTimer = setTimeout(async () => {
+                    this.templates = await SuiteConfigStore.loadTemplates();
+                    await this.renderTemplatePane();
+                }, 150);
+            });
+        }
+    }
+
+    /**
+     * 获取 Jumpgate 现代架构下当前选中的 Tokens
      */
     static getSelectedTokens() {
-        if (!window.d20 || !window.d20.engine || !window.d20.engine.canvas) return [];
-        const active = window.d20.engine.canvas.getActiveObjects ? window.d20.engine.canvas.getActiveObjects() : [];
         const result = [];
+        const seenTokenIds = new Set();
 
-        for (const obj of active) {
-            const tokenModel = (window.Campaign && window.Campaign.pages)
-                ? window.Campaign.pages.get(window.currentEditingPageID || (window.Campaign.activePage && window.Campaign.activePage.id))
-                    ?.thegraphics?.get(obj.id)
-                : null;
+        // 1. Jumpgate 原生核心选区接口
+        const tt = window.Campaign?.engine?.tabletop;
+        if (tt && typeof tt.getSelection === "function") {
+            try {
+                const selection = tt.getSelection();
+                if (Array.isArray(selection) && selection.length > 0) {
+                    for (const item of selection) {
+                        const tokenId = item.id;
+                        if (!tokenId || seenTokenIds.has(tokenId)) continue;
+                        seenTokenIds.add(tokenId);
 
-            if (tokenModel) {
-                const charId = tokenModel.get("represents");
-                if (charId && window.Campaign && window.Campaign.characters) {
-                    const char = window.Campaign.characters.get(charId);
-                    if (char) {
-                        result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
-                        continue;
+                        // 提取 Backbone Token Model
+                        let tokenModel = item.model;
+                        if (!tokenModel) {
+                            tokenModel = Roll20Bridge.getTokenGraphic(tokenId);
+                        }
+
+                        if (tokenModel) {
+                            const charId = tokenModel.get("represents");
+                            if (charId && window.Campaign && window.Campaign.characters) {
+                                const char = window.Campaign.characters.get(charId);
+                                if (char) {
+                                    result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
+                                    continue;
+                                }
+                            }
+                            result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
+                        }
+                    }
+                    return result;
+                }
+            } catch (e) {
+                console.warn("[BuffFloatingPanel] Jumpgate getSelection 异常:", e);
+            }
+        }
+
+        // 2. 回退机制：老版 Fabric 引擎
+        if (window.d20 && window.d20.engine && window.d20.engine.canvas) {
+            try {
+                const active = window.d20.engine.canvas.getActiveObjects ? window.d20.engine.canvas.getActiveObjects() : [];
+                for (const obj of active) {
+                    if (obj.id && !seenTokenIds.has(obj.id)) {
+                        seenTokenIds.add(obj.id);
+                        const tokenModel = Roll20Bridge.getTokenGraphic(obj.id);
+                        if (tokenModel) {
+                            const charId = tokenModel.get("represents");
+                            if (charId && window.Campaign && window.Campaign.characters) {
+                                const char = window.Campaign.characters.get(charId);
+                                if (char) {
+                                    result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
+                                    continue;
+                                }
+                            }
+                            result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
+                        }
                     }
                 }
-                result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
-            }
+            } catch (e) {}
         }
 
         return result;
@@ -399,6 +404,38 @@ export class BuffFloatingPanel {
         }
 
         return { activeStats, allBuffRows };
+    }
+
+    /**
+     * 编辑模式切换
+     */
+    static async toggleEditMode() {
+        this.isEditMode = !this.isEditMode;
+        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
+        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
+
+        if (this.isEditMode) {
+            editBtn.classList.add("active");
+            editBtn.textContent = "🔒 完成";
+            toolbar.style.display = "flex";
+            this.editSelectedIds.clear();
+            this.showToast("✏️ 已进入编辑模式：点击多选待删，支持跨栏拖拽复制", "info");
+        } else {
+            editBtn.classList.remove("active");
+            editBtn.textContent = "✏️ 编辑";
+            toolbar.style.display = "none";
+            this.editSelectedIds.clear();
+        }
+
+        await this.renderAllPanes();
+    }
+
+    /**
+     * 渲染全部窗格
+     */
+    static async renderAllPanes() {
+        await this.renderTemplatePane();
+        await this.renderUnitPane();
     }
 
     /**
@@ -495,7 +532,6 @@ export class BuffFloatingPanel {
                     </div>
                 `;
 
-                // 挂载拖拽手势
                 BuffPanelDragDrop.setupItemDrag({
                     el: header,
                     node,
@@ -529,7 +565,6 @@ export class BuffFloatingPanel {
                     }
                 });
 
-                // 点击事件
                 header.addEventListener("click", async (e) => {
                     if (e.target.tagName === "BUTTON") return;
                     if (this.isEditMode) {
@@ -554,7 +589,6 @@ export class BuffFloatingPanel {
                     }
                 });
 
-                // 编辑模式内按钮
                 if (this.isEditMode) {
                     header.querySelector(".btn-folder-rename")?.addEventListener("click", async (e) => {
                         e.stopPropagation();
@@ -578,7 +612,6 @@ export class BuffFloatingPanel {
 
                 folderEl.appendChild(header);
 
-                // 子容器
                 const childrenContainer = document.createElement("div");
                 childrenContainer.className = "r20-folder-children";
                 childrenContainer.style.display = node.collapsed ? "none" : "flex";
@@ -620,7 +653,6 @@ export class BuffFloatingPanel {
                     </div>
                 `;
 
-                // 挂载拖拽
                 BuffPanelDragDrop.setupItemDrag({
                     el: itemEl,
                     node,
@@ -650,7 +682,6 @@ export class BuffFloatingPanel {
                     }
                 });
 
-                // 点击交互
                 itemEl.addEventListener("click", async (e) => {
                     if (e.target.tagName === "BUTTON") return;
                     if (this.isEditMode) {
@@ -772,7 +803,6 @@ export class BuffFloatingPanel {
                     this.renderUnitPane();
                 });
 
-                // 编辑模式拖拽
                 const nodeData = {
                     id: "unit_" + item.name,
                     name: item.name,
@@ -1045,9 +1075,6 @@ export class BuffFloatingPanel {
         return await SuiteConfigStore.saveTemplates(this.templates, promptIfMissing);
     }
 
-    /**
-     * 辅助工具
-     */
     static collectFolderBuffNames(folder) {
         const names = [];
         const walk = (nodes) => {

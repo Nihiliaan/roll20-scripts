@@ -5,9 +5,13 @@ import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
 /**
  * Pf1eBuffUI.js
  * 负责在先攻条注入极致紧凑的双行 Buff 徽章，同时无缝支持人物卡与纯野怪 Token
+ * 配备持久化 MutationObserver 防御 Vue 响应式 DOM 重绘
  */
 export class Pf1eBuffUI {
     static isStylesInjected = false;
+    static isObserverStarted = false;
+    static _observer = null;
+    static _debounceTimer = null;
 
     static injectStyles() {
         if (this.isStylesInjected) return;
@@ -74,11 +78,56 @@ export class Pf1eBuffUI {
     }
 
     /**
+     * 启动持久 DOM 监听器（抵御 Vue.js 列表重新渲染擦除徽章）
+     */
+    static startObserver() {
+        if (this.isObserverStarted) return;
+        this.injectStyles();
+
+        const attachObserver = () => {
+            const tracker = document.querySelector("#initiativewindow, .turn-tracker");
+            if (!tracker) {
+                setTimeout(attachObserver, 1000);
+                return;
+            }
+
+            if (this._observer) this._observer.disconnect();
+
+            this._observer = new MutationObserver((mutations) => {
+                let shouldRefresh = false;
+                for (const m of mutations) {
+                    if (m.type === "childList") {
+                        for (const node of m.addedNodes) {
+                            if (node.nodeType === 1 && (node.matches?.("li.token") || node.querySelector?.("li.token"))) {
+                                shouldRefresh = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (shouldRefresh) break;
+                }
+
+                if (shouldRefresh) {
+                    if (this._debounceTimer) clearTimeout(this._debounceTimer);
+                    this._debounceTimer = setTimeout(() => {
+                        this.refreshAllBadges();
+                    }, 80);
+                }
+            });
+
+            this._observer.observe(tracker, { childList: true, subtree: true });
+            this.isObserverStarted = true;
+        };
+
+        attachObserver();
+    }
+
+    /**
      * 刷新整个先攻条上的徽章
      */
     static async refreshAllBadges() {
         this.injectStyles();
-        const tracker = document.querySelector(".turn-tracker");
+        const tracker = document.querySelector("#initiativewindow, .turn-tracker");
         if (!tracker) return;
 
         const rows = tracker.querySelectorAll("li.token");
@@ -104,10 +153,8 @@ export class Pf1eBuffUI {
         const isCharacter = !!character;
 
         if (isCharacter) {
-            // 人物卡绑定单位
             activeBuffs = await Pf1eBuffManager.getActiveBuffs(character);
         } else if (token) {
-            // 纯 Token 野怪单位
             activeBuffs = TokenBuffManager.getTokenBuffs(token).map(b => ({
                 name: b.name,
                 rounds: b.rounds,
@@ -161,50 +208,52 @@ export class Pf1eBuffUI {
     }
 
     /**
-     * 单项修改与快速解除弹窗
+     * 单个 Buff 点击快捷编辑/关停弹窗
      */
     static showBuffEditModal(character, token, buff, row, tokenId) {
-        const targetName = character ? character.get("name") : (token ? token.get("name") : "单位");
         const mask = document.createElement("div");
-        mask.className = "r20-modal-mask";
+        mask.className = "r20-dialog-mask";
+
+        const currentRoundsStr = buff.rounds !== null ? String(buff.rounds) : "";
 
         mask.innerHTML = `
-            <div class="r20-modal-box">
-                <div class="r20-modal-title">Buff 设置 - ${targetName}</div>
-                <div class="r20-modal-row">
-                    <span class="r20-modal-label">当前 Buff：<b>${buff.name}</b></span>
+            <div class="r20-dialog-box" style="width: 320px;">
+                <div class="r20-dialog-header">状态管理: ${buff.name}</div>
+                <div class="r20-dialog-body">
+                    <label style="font-size:11px; color:#b0bec5;">剩余持续轮数 (留空为常驻):</label>
+                    <input type="number" class="r20-input-text input-rounds" value="${currentRoundsStr}" placeholder="轮数" />
                 </div>
-                <div class="r20-modal-row">
-                    <label class="r20-modal-label">剩余轮数 (大于100或留空视为常驻)：</label>
-                    <input type="number" class="r20-modal-input edit-rounds-input" value="${buff.rounds !== null ? buff.rounds : ''}" placeholder="常驻" />
-                </div>
-                <div class="r20-modal-actions">
-                    <button class="r20-btn r20-btn-danger btn-remove">🗑️ 解除/删除</button>
-                    <button class="r20-btn r20-btn-cancel btn-cancel">取消</button>
-                    <button class="r20-btn r20-btn-primary btn-save">保存轮数</button>
+                <div class="r20-dialog-footer">
+                    <button class="r20-btn-icon danger btn-delete" style="padding:6px 12px; margin-right:auto;">✕ 关停解除</button>
+                    <button class="r20-btn-icon btn-cancel" style="padding:6px 12px;">取消</button>
+                    <button class="r20-btn-apply btn-save" style="padding:6px 14px;">保存</button>
                 </div>
             </div>
         `;
 
         document.body.appendChild(mask);
-
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
-        mask.querySelector(".btn-remove").addEventListener("click", async () => {
+
+        // 解除
+        mask.querySelector(".btn-delete").addEventListener("click", async () => {
             if (character && buff.rowId) {
-                await Pf1eBuffManager.removeBuff(character, buff.rowId);
+                await Pf1eBuffManager.toggleBuff(character, buff.rowId, false);
             } else if (token) {
                 TokenBuffManager.removeBuff(token, buff.name);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
         });
+
+        // 保存轮数
         mask.querySelector(".btn-save").addEventListener("click", async () => {
-            const val = mask.querySelector(".edit-rounds-input").value.trim();
-            const parsed = val === "" ? null : parseInt(val, 10);
+            const val = mask.querySelector(".input-rounds").value.trim();
+            const rounds = val === "" ? null : parseInt(val, 10);
+
             if (character && buff.rowId) {
-                await Pf1eBuffManager.setBuffRounds(character, buff.rowId, parsed);
+                await Pf1eBuffManager.setBuffRounds(character, buff.rowId, rounds);
             } else if (token) {
-                TokenBuffManager.applyOrRefreshBuff(token, buff.name, parsed);
+                TokenBuffManager.applyOrRefreshBuff(token, buff.name, rounds);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
@@ -212,50 +261,38 @@ export class Pf1eBuffUI {
     }
 
     /**
-     * 单行快速添加弹窗
+     * 单行点击快捷添加 Buff 弹窗
      */
     static showSingleAddModal(character, token, row, tokenId) {
-        const targetName = character ? character.get("name") : (token ? token.get("name") : "单位");
         const mask = document.createElement("div");
-        mask.className = "r20-modal-mask";
-
-        const presets = ["神恩", "加速术", "祝福术", "护盾术", "牛之力量", "树皮术", "法师护甲", "祈祷术"];
+        mask.className = "r20-dialog-mask";
 
         mask.innerHTML = `
-            <div class="r20-modal-box">
-                <div class="r20-modal-title">添加 Buff - ${targetName}</div>
-                <div class="r20-modal-row">
-                    <label class="r20-modal-label">Buff 名称：</label>
-                    <input type="text" class="r20-modal-input buff-name-input" placeholder="输入名称或点击下方快捷标签" />
-                    <div class="r20-modal-tags">
-                        ${presets.map(p => `<span class="r20-tag-pill">${p}</span>`).join("")}
-                    </div>
+            <div class="r20-dialog-box" style="width: 340px;">
+                <div class="r20-dialog-header">添加状态 Buff</div>
+                <div class="r20-dialog-body">
+                    <label style="font-size:11px; color:#b0bec5;">Buff 名称:</label>
+                    <input type="text" class="r20-input-text input-name" placeholder="例如: 加速术、祝福术..." />
+
+                    <label style="font-size:11px; color:#b0bec5;">持续轮数 (留空为常驻):</label>
+                    <input type="number" class="r20-input-text input-rounds" value="10" placeholder="轮数" />
                 </div>
-                <div class="r20-modal-row">
-                    <label class="r20-modal-label">持续轮数 (默认10轮，大于100或留空视为常驻)：</label>
-                    <input type="number" class="r20-modal-input buff-rounds-input" value="10" />
-                </div>
-                <div class="r20-modal-actions">
-                    <button class="r20-btn r20-btn-cancel btn-cancel">取消</button>
-                    <button class="r20-btn r20-btn-primary btn-confirm">确定添加</button>
+                <div class="r20-dialog-footer">
+                    <button class="r20-btn-icon btn-cancel" style="padding:6px 12px;">取消</button>
+                    <button class="r20-btn-apply btn-confirm" style="padding:6px 14px;">添加并生效</button>
                 </div>
             </div>
         `;
 
         document.body.appendChild(mask);
-
-        mask.querySelectorAll(".r20-tag-pill").forEach(tag => {
-            tag.addEventListener("click", () => {
-                mask.querySelector(".buff-name-input").value = tag.innerText;
-            });
-        });
-
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
+
         mask.querySelector(".btn-confirm").addEventListener("click", async () => {
-            const name = mask.querySelector(".buff-name-input").value.trim();
-            if (!name) return;
-            const roundsStr = mask.querySelector(".buff-rounds-input").value.trim();
-            const rounds = roundsStr === "" ? null : parseInt(roundsStr, 10);
+            const name = mask.querySelector(".input-name").value.trim();
+            if (!name) { alert("请输入 Buff 名称"); return; }
+
+            const val = mask.querySelector(".input-rounds").value.trim();
+            const rounds = val === "" ? null : parseInt(val, 10);
 
             if (character) {
                 await Pf1eBuffManager.applyOrRefreshBuff(character, name, rounds);
