@@ -1,21 +1,28 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
+import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
 import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
 import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
 import { Pf1eBuffUI } from "../pf1e-buff-tracker/Pf1eBuffUI.js";
 
 /**
- * BuffFloatingPanel.js
- * 核心悬浮窗组件：支持多级目录树管理、JSON 细目编辑、卡上 Buff 导入、
- * 文件夹独立全选、多选批量删除、双向拖拽（含移出到根目录）、纯 Token 智能适配。
+ * BuffFloatingPanel.js (v0.5.0)
+ * 核心悬浮窗组件：
+ * 1. 响应式三态高亮联动：未高亮 / 半高亮 / 完全高亮；
+ * 2. 直接操作范式：点击即施加 / 即取消，彻底移除复选框与一键施加确认按钮；
+ * 3. 常驻顶置不可删除文件夹：【🎯 当前选中单位生效Buff】；
+ * 4. 文件夹级联三态高亮与一键全组开启/关闭；
+ * 5. 编辑模式门槛：只有画布无选中棋子时显示编辑按钮，编辑模式下支持多选高亮批量删除与拖拽重排；
+ * 6. 支持云端配置卡存储与玩家身份降级自动提取。
  */
 export class BuffFloatingPanel {
-    static STORAGE_KEY = "r20_buff_templates_v4";
     static POS_KEY = "r20_buff_panel_pos";
 
     static isEditMode = false;
     static isCollapsed = false;
     static panelEl = null;
     static templates = [];
+    static editSelectedIds = new Set(); // 编辑模式下被选中的待删 ID 集合
+    static lastSelectedTokenIds = [];
 
     /**
      * 默认预设模板树（多级目录）
@@ -147,37 +154,21 @@ export class BuffFloatingPanel {
     /**
      * 初始化悬浮面板
      */
-    static init() {
-        this.loadTemplates();
+    static async init() {
+        this.templates = await SuiteConfigStore.loadTemplates(this.defaultTemplates);
         this.injectStyles();
         this.createPanelDOM();
         this.renderTree();
         this.initDragWindow();
-        console.log("[BuffFloatingPanel] 悬浮面板已成功加载");
-    }
-
-    /**
-     * 读取模板数据
-     */
-    static loadTemplates() {
-        try {
-            const raw = localStorage.getItem(this.STORAGE_KEY);
-            if (raw) {
-                this.templates = JSON.parse(raw);
-            } else {
-                this.templates = JSON.parse(JSON.stringify(this.defaultTemplates));
-                this.saveTemplates();
-            }
-        } catch (e) {
-            this.templates = JSON.parse(JSON.stringify(this.defaultTemplates));
-        }
+        this.startSelectionObserver();
+        console.log("[BuffFloatingPanel] 悬浮面板 v0.5.0 已成功加载");
     }
 
     /**
      * 保存模板数据
      */
-    static saveTemplates() {
-        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.templates));
+    static async saveTemplates(promptIfMissing = false) {
+        await SuiteConfigStore.saveTemplates(this.templates, promptIfMissing);
     }
 
     /**
@@ -203,9 +194,9 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 获取画布上当前选中的所有 Token（信任 Roll20 内置权限机制，直接尝试操作选中的每一个 Token）
+     * 获取画布上当前选中的所有可用棋子
      */
-    static getSelectedControllableTokens() {
+    static getSelectedTokens() {
         if (!window.Campaign.engine || typeof window.Campaign.engine.getSelection !== "function") return [];
         const sel = window.Campaign.engine.getSelection();
         if (!Array.isArray(sel) || sel.length === 0) return [];
@@ -214,7 +205,6 @@ export class BuffFloatingPanel {
         if (!page || !page.thegraphics) return [];
 
         const validTokens = [];
-
         for (const item of sel) {
             const tokenId = item.id;
             const token = page.thegraphics.get(tokenId);
@@ -223,17 +213,70 @@ export class BuffFloatingPanel {
             const charId = token.get("represents");
             if (charId) {
                 const char = window.Campaign.characters.get(charId);
-                if (char) {
-                    validTokens.push({ token, char, type: "character" });
-                } else {
-                    validTokens.push({ token, char: null, type: "token" });
-                }
+                validTokens.push({ token, char: char || null, type: char ? "character" : "token", id: tokenId });
             } else {
-                validTokens.push({ token, char: null, type: "token" });
+                validTokens.push({ token, char: null, type: "token", id: tokenId });
             }
         }
 
         return validTokens;
+    }
+
+    /**
+     * 启动画布选中变化监听器（每 200ms 检测一次选中的变化）
+     */
+    static startSelectionObserver() {
+        setInterval(async () => {
+            const currentSelected = this.getSelectedTokens();
+            const currentIds = currentSelected.map(t => t.id).sort().join(",");
+            const lastIds = this.lastSelectedTokenIds.sort().join(",");
+
+            if (currentIds !== lastIds) {
+                this.lastSelectedTokenIds = currentSelected.map(t => t.id);
+                // 更新编辑按钮显隐：无选中时显示编辑按钮，有选中时隐藏
+                this.updateEditButtonVisibility(currentSelected.length === 0);
+                if (currentSelected.length > 0 && this.isEditMode) {
+                    // 若进入编辑模式后用户在画布选中了棋子，自动退出编辑模式
+                    this.isEditMode = false;
+                    this.updateToolbarVisibility();
+                }
+                await this.renderTree();
+            }
+        }, 200);
+    }
+
+    /**
+     * 更新编辑按钮显示状态
+     */
+    static updateEditButtonVisibility(show) {
+        if (!this.panelEl) return;
+        const btnEdit = this.panelEl.querySelector(".btn-toggle-edit");
+        if (btnEdit) {
+            btnEdit.style.display = show ? "inline-block" : "none";
+        }
+    }
+
+    /**
+     * 更新工具栏显示状态
+     */
+    static updateToolbarVisibility() {
+        if (!this.panelEl) return;
+        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
+        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
+        if (this.isEditMode) {
+            if (editBtn) {
+                editBtn.classList.add("active");
+                editBtn.textContent = "🔒 完成";
+            }
+            if (toolbar) toolbar.style.display = "flex";
+        } else {
+            if (editBtn) {
+                editBtn.classList.remove("active");
+                editBtn.textContent = "✏️ 编辑";
+            }
+            if (toolbar) toolbar.style.display = "none";
+            this.editSelectedIds.clear();
+        }
     }
 
     /**
@@ -307,6 +350,9 @@ export class BuffFloatingPanel {
                 background: #1565c0;
                 color: #ffffff;
             }
+            .r20-btn-icon.danger {
+                color: #ef5350;
+            }
             .r20-btn-icon.danger:hover {
                 background: #c62828;
                 color: #ffffff;
@@ -321,7 +367,7 @@ export class BuffFloatingPanel {
                 font-size: 11px;
             }
             .r20-panel-tree {
-                max-height: 400px;
+                max-height: 420px;
                 overflow-y: auto;
                 padding: 6px 8px;
                 display: flex;
@@ -356,17 +402,30 @@ export class BuffFloatingPanel {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 4px 6px;
+                padding: 5px 8px;
                 background: #202730;
                 border-radius: 4px;
                 font-size: 11px;
                 font-weight: 600;
                 color: #b0bec5;
                 cursor: pointer;
+                border: 1px solid transparent;
+                transition: all 0.2s ease;
             }
             .r20-folder-header:hover {
                 background: #2a3440;
                 color: #ffffff;
+            }
+            /* 文件夹三态高亮 */
+            .r20-folder-header.full-active {
+                background: #1b4931 !important;
+                border-color: #4caf50 !important;
+                color: #e8f5e9 !important;
+            }
+            .r20-folder-header.partial-active {
+                background: #3b3920 !important;
+                border-color: #fbc02d !important;
+                color: #fffde7 !important;
             }
             .r20-folder-title {
                 display: flex;
@@ -387,19 +446,38 @@ export class BuffFloatingPanel {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 4px 8px;
+                padding: 5px 8px;
                 background: #242c37;
                 border-radius: 4px;
                 font-size: 11px;
                 color: #cfd8dc;
                 cursor: pointer;
-                transition: background 0.15s;
+                transition: all 0.2s ease;
                 border: 1px solid transparent;
             }
             .r20-tree-item:hover {
                 background: #2e3947;
                 border-color: #64b5f6;
                 color: #ffffff;
+            }
+            /* 条目三态高亮 */
+            .r20-tree-item.full-active {
+                background: #1e3d59 !important;
+                border-color: #42a5f5 !important;
+                color: #ffffff !important;
+                box-shadow: inset 0 0 8px rgba(66, 165, 245, 0.4);
+            }
+            .r20-tree-item.partial-active {
+                background: #2e2a1b !important;
+                border-color: #ffd54f !important;
+                color: #fff8e1 !important;
+                border-style: dashed !important;
+            }
+            /* 编辑模式下的选中态 */
+            .r20-tree-item.edit-selected, .r20-tree-folder.edit-selected > .r20-folder-header {
+                background: #4a148c !important;
+                border-color: #ba68c8 !important;
+                color: #f3e5f5 !important;
             }
             .r20-item-left {
                 display: flex;
@@ -424,37 +502,6 @@ export class BuffFloatingPanel {
                 align-items: center;
                 gap: 4px;
             }
-            .r20-panel-footer {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 8px 10px;
-                background: #191f26;
-                border-top: 1px solid #323d47;
-                border-radius: 0 0 8px 8px;
-            }
-            .r20-btn-apply {
-                background: linear-gradient(135deg, #1976d2 0%, #0d47a1 100%);
-                color: #ffffff;
-                font-size: 11px;
-                font-weight: 600;
-                padding: 5px 12px;
-                border-radius: 4px;
-                border: none;
-                cursor: pointer;
-            }
-            .r20-btn-apply:hover { filter: brightness(1.15); }
-            .r20-btn-danger {
-                background: #c62828;
-                color: #ffffff;
-                font-size: 11px;
-                font-weight: 600;
-                padding: 5px 10px;
-                border-radius: 4px;
-                border: none;
-                cursor: pointer;
-            }
-            .r20-btn-danger:hover { background: #d32f2f; }
 
             /* 拖拽态高亮 */
             .r20-drag-over {
@@ -485,7 +532,7 @@ export class BuffFloatingPanel {
             .r20-toast.warn { border-color: #ffb74d; color: #ffe082; }
             .r20-toast.success { border-color: #81c784; color: #c8e6c9; }
 
-            /* JSON 与导入对话框通用样式 */
+            /* 对话框 */
             .r20-dialog-mask {
                 position: fixed;
                 top: 0; left: 0; right: 0; bottom: 0;
@@ -499,7 +546,7 @@ export class BuffFloatingPanel {
                 background: #1e242c;
                 border: 1px solid #37474f;
                 border-radius: 8px;
-                width: 420px;
+                width: 440px;
                 max-width: 90vw;
                 max-height: 85vh;
                 display: flex;
@@ -552,6 +599,17 @@ export class BuffFloatingPanel {
                 outline: none;
                 resize: vertical;
             }
+            .r20-btn-apply {
+                background: linear-gradient(135deg, #1976d2 0%, #0d47a1 100%);
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 5px 12px;
+                border-radius: 4px;
+                border: none;
+                cursor: pointer;
+            }
+            .r20-btn-apply:hover { filter: brightness(1.15); }
         `;
         document.head.appendChild(style);
     }
@@ -565,15 +623,33 @@ export class BuffFloatingPanel {
         const panel = document.createElement("div");
         panel.id = "r20-buff-panel";
 
-        // 读取持久化位置
+        // 读取持久化位置并做安全边界校验，防止超出当前窗口可视范围
         const savedPos = localStorage.getItem(this.POS_KEY);
+        let safeLeft = null;
+        let safeTop = null;
         if (savedPos) {
             try {
                 const pos = JSON.parse(savedPos);
-                panel.style.top = `${pos.top}px`;
-                panel.style.left = `${pos.left}px`;
-                panel.style.right = "auto";
+                const maxLeft = Math.max(10, window.innerWidth - 330);
+                const maxTop = Math.max(10, window.innerHeight - 100);
+                if (pos.left !== undefined && pos.left < maxLeft && pos.left >= 0) {
+                    safeLeft = Math.max(10, pos.left);
+                }
+                if (pos.top !== undefined && pos.top < maxTop && pos.top >= 0) {
+                    safeTop = Math.max(10, pos.top);
+                }
             } catch (e) {}
+        }
+
+        if (safeLeft !== null && safeTop !== null) {
+            panel.style.top = `${safeTop}px`;
+            panel.style.left = `${safeLeft}px`;
+            panel.style.right = "auto";
+        } else {
+            // 默认停靠在右上角安全区域
+            panel.style.top = "80px";
+            panel.style.right = "320px";
+            panel.style.left = "auto";
         }
 
         panel.innerHTML = `
@@ -583,7 +659,7 @@ export class BuffFloatingPanel {
                     <span>状态Buff库</span>
                 </div>
                 <div class="r20-panel-controls">
-                    <button class="r20-btn-icon btn-toggle-edit" title="打开/关闭编辑与排序模式">✏️ 编辑</button>
+                    <button class="r20-btn-icon btn-toggle-edit" title="进入编辑与排序模式" style="display:inline-block;">✏️ 编辑</button>
                     <button class="r20-btn-icon btn-minimize" title="最小化收起">─</button>
                 </div>
             </div>
@@ -592,38 +668,20 @@ export class BuffFloatingPanel {
                     <div style="display:flex; gap:4px;">
                         <button class="r20-btn-icon btn-new-buff" title="新建 Buff 模板">+ Buff</button>
                         <button class="r20-btn-icon btn-new-folder" title="新建文件夹">+ 目录</button>
-                        <button class="r20-btn-icon btn-import-buffs" title="从选中角色卡导入现有Buff">📥 导入卡上Buff</button>
+                        <button class="r20-btn-icon btn-import-buffs" title="从战役角色卡导入Buff">📥 导入卡上Buff</button>
                     </div>
-                    <button class="r20-btn-icon danger btn-batch-delete" title="批量删除勾选项">🗑️ 批量删除</button>
+                    <button class="r20-btn-icon danger btn-batch-delete" title="批量删除选中的高亮项">🗑️ 批量删除</button>
                 </div>
                 <div class="r20-panel-tree"></div>
-                <div class="r20-panel-footer">
-                    <label style="font-size:11px; display:flex; align-items:center; gap:4px; cursor:pointer;">
-                        <input type="checkbox" class="cb-select-all-buffs" />
-                        <span>全选</span>
-                    </label>
-                    <button class="r20-btn-apply btn-batch-apply">🚀 施加选中Buff</button>
-                </div>
             </div>
         `;
 
         document.body.appendChild(panel);
         this.panelEl = panel;
 
-        // 绑定最小化与编辑模式切换
         panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
         panel.querySelector(".btn-toggle-edit").addEventListener("click", () => this.toggleEditMode());
 
-        // 绑定全选与批量施加
-        panel.querySelector(".cb-select-all-buffs").addEventListener("change", (e) => {
-            const checked = e.target.checked;
-            panel.querySelectorAll(".r20-buff-item-cb").forEach(cb => cb.checked = checked);
-            panel.querySelectorAll(".r20-folder-select-cb").forEach(cb => cb.checked = checked);
-        });
-
-        panel.querySelector(".btn-batch-apply").addEventListener("click", () => this.applySelectedBuffs());
-
-        // 编辑模式工具栏按钮
         panel.querySelector(".btn-new-buff").addEventListener("click", () => this.showBuffEditorDialog());
         panel.querySelector(".btn-new-folder").addEventListener("click", () => this.showNewFolderDialog());
         panel.querySelector(".btn-import-buffs").addEventListener("click", () => this.showImportFromCharacterDialog());
@@ -649,39 +707,111 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 编辑模式切换
+     * 编辑模式切换（只有无选中棋子时允许触发）
      */
     static toggleEditMode() {
-        this.isEditMode = !this.isEditMode;
-        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
-        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
-        if (this.isEditMode) {
-            editBtn.classList.add("active");
-            editBtn.textContent = "🔒 完成";
-            toolbar.style.display = "flex";
-        } else {
-            editBtn.classList.remove("active");
-            editBtn.textContent = "✏️ 编辑";
-            toolbar.style.display = "none";
+        const selected = this.getSelectedTokens();
+        if (selected.length > 0) {
+            this.showToast("⚠️ 只有在未选中任何棋子时才可以进入编辑模式", "warn");
+            return;
         }
+
+        this.isEditMode = !this.isEditMode;
+        this.updateToolbarVisibility();
         this.renderTree();
+    }
+
+    /**
+     * 收集当前所有选中棋子身上的所有 Buff（包括生效中与未启动的）
+     * @returns {Promise<{activeStats: Map<string, {count: number, total: number}>, allBuffRows: Array}>}
+     */
+    static async getBuffStatsForSelected(selectedTokens) {
+        const activeStats = new Map();
+        const allBuffRows = []; // 包含 enabled 与 disabled 的全部条目详情
+        if (selectedTokens.length === 0) return { activeStats, allBuffRows };
+
+        for (const item of selectedTokens) {
+            let itemBuffs = [];
+            if (item.type === "character" && item.char) {
+                itemBuffs = await Pf1eBuffManager.getAllBuffs(item.char);
+            } else if (item.token) {
+                const tokenBuffs = TokenBuffManager.getTokenBuffs(item.token);
+                itemBuffs = tokenBuffs.map(b => ({
+                    name: b.name,
+                    enabled: true, // 纯 Token 默认均为生效
+                    rounds: b.rounds
+                }));
+            }
+
+            // 统计生效中的 Buff
+            const activeNames = itemBuffs.filter(b => b.enabled).map(b => b.name);
+            const uniqueActiveNames = new Set(activeNames);
+            for (const name of uniqueActiveNames) {
+                if (!activeStats.has(name)) {
+                    activeStats.set(name, { count: 1, total: selectedTokens.length });
+                } else {
+                    activeStats.get(name).count++;
+                }
+            }
+
+            // 收集所有条目（包含未启动）
+            for (const b of itemBuffs) {
+                let existing = allBuffRows.find(x => x.name === b.name);
+                if (!existing) {
+                    allBuffRows.push({
+                        name: b.name,
+                        enabledCount: b.enabled ? 1 : 0,
+                        totalCount: 1,
+                        rounds: b.rounds,
+                        extraAttrs: b.extraAttrs || null
+                    });
+                } else {
+                    existing.totalCount++;
+                    if (b.enabled) existing.enabledCount++;
+                }
+            }
+        }
+
+        return { activeStats, allBuffRows };
+    }
+
+    /**
+     * 计算 Buff 状态高亮类名：'full-active' | 'partial-active' | ''
+     */
+    static getHighlightClass(name, activeStats, isSelectedCount) {
+        if (isSelectedCount === 0 || !activeStats.has(name)) return "";
+        const stat = activeStats.get(name);
+        if (stat.count === isSelectedCount) return "full-active";
+        if (stat.count > 0) return "partial-active";
+        return "";
     }
 
     /**
      * 递归渲染目录树
      */
-    static renderTree() {
+    static async renderTree() {
         const treeContainer = this.panelEl.querySelector(".r20-panel-tree");
         if (!treeContainer) return;
         treeContainer.innerHTML = "";
 
-        // 在树的最顶部增加一个“移出到根目录”放置区（仅编辑模式展示）
+        const selectedTokens = this.getSelectedTokens();
+        const { activeStats, allBuffRows } = await this.getBuffStatsForSelected(selectedTokens);
+        const selCount = selectedTokens.length;
+
+        // 1. 如果选中了棋子，顶置常驻【🎯 当前选中单位生效Buff】文件夹（不可删除/拖拽，包含已启用与未启用）
+        if (selCount > 0) {
+            const activeFolderEl = this.createCurrentActiveFolderDOM(selectedTokens, activeStats, allBuffRows);
+            treeContainer.appendChild(activeFolderEl);
+        }
+
+        // 2. 根放置区（仅编辑模式展示）
         const topDropZone = document.createElement("div");
         topDropZone.className = `r20-drop-zone-root ${this.isEditMode ? "active-zone" : ""}`;
         topDropZone.textContent = "⬆️ 拖到此处：移出到根目录最上方";
         this.setupRootDropZone(topDropZone, 0);
         treeContainer.appendChild(topDropZone);
 
+        // 3. 递归渲染主模板树
         const renderNodes = (nodes, container) => {
             nodes.forEach((node, index) => {
                 if (node.type === "folder") {
@@ -690,41 +820,89 @@ export class BuffFloatingPanel {
                     folderEl.dataset.id = node.id;
                     if (this.isEditMode) folderEl.draggable = true;
 
+                    // 计算该文件夹下所有 Buff 的统计状态以决定文件夹头部的高亮
+                    const folderBuffs = [];
+                    const collectLeafs = (fn) => {
+                        if (fn.children) {
+                            fn.children.forEach(c => {
+                                if (c.type === "buff") folderBuffs.push(c);
+                                else collectLeafs(c);
+                            });
+                        }
+                    };
+                    collectLeafs(node);
+
+                    let folderActiveState = "";
+                    if (selCount > 0 && folderBuffs.length > 0) {
+                        const states = folderBuffs.map(b => this.getHighlightClass(b.name, activeStats, selCount));
+                        const allFull = states.every(s => s === "full-active");
+                        const anyActive = states.some(s => s === "full-active" || s === "partial-active");
+                        if (allFull) folderActiveState = "full-active";
+                        else if (anyActive) folderActiveState = "partial-active";
+                    }
+
+                    const isFolderSelectedInEdit = this.isEditMode && this.editSelectedIds.has(node.id);
+                    if (isFolderSelectedInEdit) folderEl.classList.add("edit-selected");
+
                     const isClosed = !!node.collapsed;
                     folderEl.innerHTML = `
-                        <div class="r20-folder-header">
+                        <div class="r20-folder-header ${folderActiveState}">
                             <div class="r20-folder-title">
-                                <span>${isClosed ? "▶" : "▼"}</span>
+                                <span class="arrow-toggle">${isClosed ? "▶" : "▼"}</span>
                                 <span>📁 ${node.name}</span>
                             </div>
                             <div class="r20-item-actions">
-                                <label style="font-size:10px; display:flex; align-items:center; gap:2px; cursor:pointer;" title="全选/反选本文件夹内所有Buff">
-                                    <input type="checkbox" class="r20-folder-select-cb" data-folder-id="${node.id}" />
-                                    <span>选</span>
-                                </label>
                                 ${this.isEditMode ? `<button class="r20-btn-icon btn-edit-folder" title="重命名目录">✏️</button>` : ""}
                             </div>
                         </div>
                         <div class="r20-folder-children" style="display: ${isClosed ? 'none' : 'flex'};"></div>
                     `;
 
-                    // 展开/收折文件夹
-                    folderEl.querySelector(".r20-folder-title").addEventListener("click", (e) => {
+                    // 点击折叠箭头
+                    folderEl.querySelector(".arrow-toggle").addEventListener("click", (e) => {
                         e.stopPropagation();
                         node.collapsed = !node.collapsed;
-                        this.saveTemplates();
+                        this.saveTemplates(false);
                         this.renderTree();
                     });
 
-                    // 文件夹独立全选/反选
-                    folderEl.querySelector(".r20-folder-select-cb").addEventListener("click", (e) => {
-                        e.stopPropagation();
-                    });
-                    folderEl.querySelector(".r20-folder-select-cb").addEventListener("change", (e) => {
-                        e.stopPropagation();
-                        const isChecked = e.target.checked;
-                        const childCheckboxes = folderEl.querySelectorAll(".r20-buff-item-cb");
-                        childCheckboxes.forEach(cb => cb.checked = isChecked);
+                    // 点击文件夹头部：非编辑模式下一键全加/全解；编辑模式下切换待选
+                    folderEl.querySelector(".r20-folder-header").addEventListener("click", async (e) => {
+                        if (e.target.tagName === "BUTTON") return;
+                        if (this.isEditMode) {
+                            // 编辑模式：标记选中待删
+                            if (this.editSelectedIds.has(node.id)) {
+                                this.editSelectedIds.delete(node.id);
+                            } else {
+                                this.editSelectedIds.add(node.id);
+                            }
+                            this.renderTree();
+                            return;
+                        }
+
+                        // 正常模式：文件夹三态点击行为
+                        if (selCount === 0) {
+                            node.collapsed = !node.collapsed;
+                            this.saveTemplates(false);
+                            this.renderTree();
+                            return;
+                        }
+
+                        if (folderActiveState === "full-active" || folderActiveState === "partial-active") {
+                            // 一键全部取消
+                            for (const b of folderBuffs) {
+                                await this.toggleBuffAction(b.name, null, null, false);
+                            }
+                            this.showToast(`✨ 已批量清除 [${node.name}] 内所有状态`, "info");
+                        } else {
+                            // 一键全部施加
+                            for (const b of folderBuffs) {
+                                await this.toggleBuffAction(b.name, b.rounds, b.extraAttrs, true);
+                            }
+                            this.showToast(`🚀 已批量施加 [${node.name}] 内所有 Buff`, "success");
+                        }
+                        await Pf1eBuffUI.refreshAllBadges();
+                        await this.renderTree();
                     });
 
                     if (this.isEditMode) {
@@ -733,7 +911,7 @@ export class BuffFloatingPanel {
                             const newName = prompt("重命名文件夹:", node.name);
                             if (newName && newName.trim()) {
                                 node.name = newName.trim();
-                                this.saveTemplates();
+                                this.saveTemplates(true);
                                 this.renderTree();
                             }
                         });
@@ -753,12 +931,18 @@ export class BuffFloatingPanel {
                     itemEl.dataset.id = node.id;
                     if (this.isEditMode) itemEl.draggable = true;
 
+                    // 计算高亮状态
+                    const highlightClass = this.getHighlightClass(node.name, activeStats, selCount);
+                    if (highlightClass) itemEl.classList.add(highlightClass);
+
+                    const isItemSelectedInEdit = this.isEditMode && this.editSelectedIds.has(node.id);
+                    if (isItemSelectedInEdit) itemEl.classList.add("edit-selected");
+
                     const showRounds = node.rounds !== null && !isNaN(node.rounds) && node.rounds <= 100;
                     const roundsLabel = (node.rounds === null || isNaN(node.rounds)) ? "永久" : (showRounds ? `${node.rounds}轮` : "永久");
 
                     itemEl.innerHTML = `
                         <div class="r20-item-left">
-                            <input type="checkbox" class="r20-buff-item-cb" data-id="${node.id}" />
                             <span class="r20-item-name">${node.name}</span>
                             <span class="r20-item-rounds">${roundsLabel}</span>
                         </div>
@@ -770,19 +954,30 @@ export class BuffFloatingPanel {
                         ` : ""}
                     `;
 
-                    // 复选框点击防止冒泡触发点击施加
-                    itemEl.querySelector(".r20-buff-item-cb").addEventListener("click", (e) => {
-                        e.stopPropagation();
-                    });
-
                     if (!this.isEditMode) {
-                        // 正常模式：点击条目直接施加
-                        itemEl.addEventListener("click", (e) => {
-                            if (e.target.tagName === "INPUT") return;
-                            this.applySingleBuff(node.name, node.rounds, node.extraAttrs);
+                        // 正常模式：点击即施加 / 即取消
+                        itemEl.addEventListener("click", async () => {
+                            if (selCount === 0) {
+                                this.showToast("⚠️ 请先在画布上选择要施加或关闭 Buff 的棋子", "warn");
+                                return;
+                            }
+                            const shouldRemove = (highlightClass === "full-active" || highlightClass === "partial-active");
+                            await this.toggleBuffAction(node.name, node.rounds, node.extraAttrs, !shouldRemove);
+                            await Pf1eBuffUI.refreshAllBadges();
+                            await this.renderTree();
                         });
                     } else {
-                        // 编辑模式操作
+                        // 编辑模式：点击条目切换勾选高亮（用于批量删除）
+                        itemEl.addEventListener("click", (e) => {
+                            if (e.target.tagName === "BUTTON") return;
+                            if (this.editSelectedIds.has(node.id)) {
+                                this.editSelectedIds.delete(node.id);
+                            } else {
+                                this.editSelectedIds.add(node.id);
+                            }
+                            this.renderTree();
+                        });
+
                         itemEl.querySelector(".btn-edit-buff").addEventListener("click", (e) => {
                             e.stopPropagation();
                             this.showBuffEditorDialog(node);
@@ -802,12 +997,163 @@ export class BuffFloatingPanel {
 
         renderNodes(this.templates, treeContainer);
 
-        // 在树的最底部增加一个“移出到根目录”放置区（仅编辑模式展示）
+        // 4. 底部根放置区（仅编辑模式展示）
         const bottomDropZone = document.createElement("div");
         bottomDropZone.className = `r20-drop-zone-root ${this.isEditMode ? "active-zone" : ""}`;
         bottomDropZone.textContent = "⬇️ 拖到此处：移出到根目录最下方";
         this.setupRootDropZone(bottomDropZone, this.templates.length);
         treeContainer.appendChild(bottomDropZone);
+    }
+
+    /**
+     * 生成【🎯 当前选中单位生效Buff】常驻顶置文件夹 DOM（包含生效中与未启动条目）
+     */
+    static createCurrentActiveFolderDOM(selectedTokens, activeStats, allBuffRows) {
+        const folderEl = document.createElement("div");
+        folderEl.className = "r20-tree-folder";
+
+        const count = allBuffRows.length;
+        const activeCount = activeStats.size;
+
+        folderEl.innerHTML = `
+            <div class="r20-folder-header full-active" style="border-left: 3px solid #64b5f6 !important;">
+                <div class="r20-folder-title">
+                    <span>🎯</span>
+                    <span>当前单位Buff (${activeCount}生效 / ${count}总数)</span>
+                </div>
+                <span style="font-size:10px; color:#90caf9;">点击一键清除生效</span>
+            </div>
+            <div class="r20-folder-children" style="display: flex;"></div>
+        `;
+
+        const childrenContainer = folderEl.querySelector(".r20-folder-children");
+
+        if (count === 0) {
+            const emptyEl = document.createElement("div");
+            emptyEl.style.cssText = "font-size:11px; color:#78909c; padding:4px 8px;";
+            emptyEl.textContent = "当前选中的棋子身上暂无任何 Buff 记录";
+            childrenContainer.appendChild(emptyEl);
+        } else {
+            for (const item of allBuffRows) {
+                const itemEl = document.createElement("div");
+                const isFullActive = item.enabledCount === selectedTokens.length;
+                const isPartialActive = item.enabledCount > 0 && !isFullActive;
+                const isInactive = item.enabledCount === 0;
+
+                let itemClass = "";
+                if (isFullActive) itemClass = "full-active";
+                else if (isPartialActive) itemClass = "partial-active";
+
+                itemEl.className = `r20-tree-item ${itemClass}`;
+                itemEl.style.cursor = "pointer";
+
+                let statusBadge = "";
+                let actionText = "";
+                if (isInactive) {
+                    statusBadge = `<span style="font-size:10px; color:#90a4ae; background:rgba(255,255,255,0.06); padding:1px 4px; border-radius:3px;">○ 未启用</span>`;
+                    actionText = `<span style="font-size:10px; color:#81c784;">＋ 启用</span>`;
+                } else if (isFullActive) {
+                    statusBadge = `<span class="r20-item-rounds">${item.rounds !== null ? item.rounds + '轮' : '永久'}</span>`;
+                    actionText = `<span style="font-size:10px; color:#ef5350;">✕ 解除</span>`;
+                } else {
+                    statusBadge = `<span style="font-size:10px; color:#ffd54f;">部分(${item.enabledCount}/${selectedTokens.length})</span>`;
+                    actionText = `<span style="font-size:10px; color:#ef5350;">✕ 全部解除</span>`;
+                }
+
+                itemEl.innerHTML = `
+                    <div class="r20-item-left">
+                        <span class="r20-item-name">${item.name}</span>
+                        ${statusBadge}
+                    </div>
+                    ${actionText}
+                `;
+
+                // 点击：若未启用则立即激活启用；若已启用则关闭解除
+                itemEl.addEventListener("click", async () => {
+                    const shouldApply = isInactive;
+                    await this.toggleBuffAction(item.name, item.rounds, item.extraAttrs, shouldApply);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    await this.renderTree();
+                });
+
+                childrenContainer.appendChild(itemEl);
+            }
+        }
+
+        // 点击常驻文件夹头部：一键解除当前生效的全部 Buff
+        folderEl.querySelector(".r20-folder-header").addEventListener("click", async () => {
+            if (activeCount === 0) return;
+            for (const name of activeStats.keys()) {
+                await this.toggleBuffAction(name, null, null, false);
+            }
+            this.showToast("🧹 已解除当前选中棋子身上的所有生效 Buff！", "info");
+            await Pf1eBuffUI.refreshAllBadges();
+            await this.renderTree();
+        });
+
+        return folderEl;
+    }
+
+    /**
+     * 触发对当前所有选中棋子的 Buff 增加或移除
+     * @param {string} buffName Buff 名称
+     * @param {number|null} rounds 持续轮数
+     * @param {object|null} extraAttrs 细目字典
+     * @param {boolean} apply 是否施加（true 施加/刷新，false 移除）
+     */
+    static async toggleBuffAction(buffName, rounds, extraAttrs, apply) {
+        const selected = this.getSelectedTokens();
+        if (selected.length === 0) return;
+
+        for (const item of selected) {
+            if (apply) {
+                // 施加/激活
+                if (item.type === "character" && item.char) {
+                    await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs);
+                } else if (item.token) {
+                    TokenBuffManager.applyOrRefreshBuff(item.token, buffName, rounds, extraAttrs);
+                }
+            } else {
+                // 移除/解除
+                if (item.type === "character" && item.char) {
+                    const activeBuffs = await Pf1eBuffManager.getActiveBuffs(item.char);
+                    const target = activeBuffs.find(b => b.name === buffName);
+                    if (target && target.rowId) {
+                        await Pf1eBuffManager.removeBuff(item.char, target.rowId);
+                    }
+                } else if (item.token) {
+                    TokenBuffManager.removeBuff(item.token, buffName);
+                }
+            }
+        }
+    }
+
+    /**
+     * 批量删除选中的项目（编辑模式下被点击高亮的项目）
+     */
+    static async deleteSelectedBuffs() {
+        if (this.editSelectedIds.size === 0) {
+            this.showToast("⚠️ 请先在列表中点击要删除的项目（高亮选中）", "warn");
+            return;
+        }
+
+        if (!confirm(`确定要批量删除选中的 ${this.editSelectedIds.size} 个项目吗？`)) return;
+
+        const removeRecursive = (list) => {
+            for (let i = list.length - 1; i >= 0; i--) {
+                if (this.editSelectedIds.has(list[i].id)) {
+                    list.splice(i, 1);
+                } else if (list[i].children) {
+                    removeRecursive(list[i].children);
+                }
+            }
+        };
+
+        removeRecursive(this.templates);
+        this.editSelectedIds.clear();
+        await this.saveTemplates(true);
+        this.renderTree();
+        this.showToast("🗑️ 批量删除成功", "success");
     }
 
     /**
@@ -825,7 +1171,7 @@ export class BuffFloatingPanel {
             el.classList.remove("r20-drag-into");
         });
 
-        el.addEventListener("drop", (e) => {
+        el.addEventListener("drop", async (e) => {
             e.preventDefault();
             e.stopPropagation();
             el.classList.remove("r20-drag-into");
@@ -833,114 +1179,15 @@ export class BuffFloatingPanel {
             if (!this._draggedData) return;
             const { node: draggedNode, parentList: sourceList, index: sourceIdx } = this._draggedData;
 
-            // 从源位置移除
             sourceList.splice(sourceIdx, 1);
-
-            // 插入根列表对应位置
             const realIdx = Math.min(targetIndex, this.templates.length);
             this.templates.splice(realIdx, 0, draggedNode);
 
             this._draggedData = null;
-            this.saveTemplates();
+            await this.saveTemplates(true);
             this.renderTree();
-            this.showToast(`✨ 已成功将 [${draggedNode.name}] 移出到根目录`, "success");
+            this.showToast(`✨ 已成功将 [${draggedNode.name}] 移至根目录`, "success");
         });
-    }
-
-    /**
-     * 施加单个 Buff 到选中的棋子
-     */
-    static async applySingleBuff(buffName, rounds, extraAttrs = null) {
-        const selected = this.getSelectedControllableTokens();
-        if (selected.length === 0) {
-            this.showToast("⚠️ 请先在画布上选择要施加 Buff 的棋子", "warn");
-            return;
-        }
-
-        let appliedCount = 0;
-        for (const item of selected) {
-            if (item.type === "character" && item.char) {
-                await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs);
-                appliedCount++;
-            } else if (item.type === "token" && item.token) {
-                TokenBuffManager.applyOrRefreshBuff(item.token, buffName, rounds, extraAttrs);
-                appliedCount++;
-            }
-        }
-
-        await Pf1eBuffUI.refreshAllBadges();
-        const roundsText = (rounds === null || isNaN(rounds) || rounds > 100) ? "永久" : `${rounds}轮`;
-        this.showToast(`✨ 已为 ${appliedCount} 个棋子施加 [${buffName} ${roundsText}]`, "success");
-    }
-
-    /**
-     * 批量应用复选框选中的 Buff
-     */
-    static async applySelectedBuffs() {
-        const checkedBoxes = Array.from(this.panelEl.querySelectorAll(".r20-buff-item-cb:checked"));
-        if (checkedBoxes.length === 0) {
-            this.showToast("⚠️ 请先勾选要施加的 Buff 模板", "warn");
-            return;
-        }
-
-        const selectedTokens = this.getSelectedControllableTokens();
-        if (selectedTokens.length === 0) {
-            this.showToast("⚠️ 请先在画布上选择要施加 Buff 的棋子", "warn");
-            return;
-        }
-
-        const buffIds = checkedBoxes.map(cb => cb.dataset.id);
-        const buffsToApply = [];
-
-        const findBuffs = (nodes) => {
-            for (const n of nodes) {
-                if (n.type === "buff" && buffIds.includes(n.id)) buffsToApply.push(n);
-                if (n.type === "folder" && n.children) findBuffs(n.children);
-            }
-        };
-        findBuffs(this.templates);
-
-        for (const target of selectedTokens) {
-            for (const buff of buffsToApply) {
-                if (target.type === "character" && target.char) {
-                    await Pf1eBuffManager.applyOrRefreshBuff(target.char, buff.name, buff.rounds, buff.extraAttrs);
-                } else if (target.type === "token" && target.token) {
-                    TokenBuffManager.applyOrRefreshBuff(target.token, buff.name, buff.rounds, buff.extraAttrs);
-                }
-            }
-        }
-
-        await Pf1eBuffUI.refreshAllBadges();
-        this.showToast(`🚀 已为 ${selectedTokens.length} 个棋子批量施加 ${buffsToApply.length} 项 Buff！`, "success");
-    }
-
-    /**
-     * 批量删除选中的 Buff 项
-     */
-    static deleteSelectedBuffs() {
-        const checkedBoxes = Array.from(this.panelEl.querySelectorAll(".r20-buff-item-cb:checked"));
-        if (checkedBoxes.length === 0) {
-            this.showToast("⚠️ 请先勾选要批量删除的 Buff 项", "warn");
-            return;
-        }
-
-        if (!confirm(`确定要批量删除选中的 ${checkedBoxes.length} 个 Buff 模板吗？`)) return;
-
-        const idsToDelete = new Set(checkedBoxes.map(cb => cb.dataset.id));
-        const removeRecursive = (list) => {
-            for (let i = list.length - 1; i >= 0; i--) {
-                if (idsToDelete.has(list[i].id)) {
-                    list.splice(i, 1);
-                } else if (list[i].children) {
-                    removeRecursive(list[i].children);
-                }
-            }
-        };
-
-        removeRecursive(this.templates);
-        this.saveTemplates();
-        this.renderTree();
-        this.showToast(`🗑️ 已成功批量删除 ${checkedBoxes.length} 项 Buff`, "success");
     }
 
     /**
@@ -968,7 +1215,7 @@ export class BuffFloatingPanel {
             el.classList.remove("r20-drag-over", "r20-drag-into");
         });
 
-        el.addEventListener("drop", (e) => {
+        el.addEventListener("drop", async (e) => {
             e.preventDefault();
             e.stopPropagation();
             el.classList.remove("r20-drag-over", "r20-drag-into");
@@ -977,22 +1224,18 @@ export class BuffFloatingPanel {
 
             const { node: draggedNode, parentList: sourceList, index: sourceIdx } = this._draggedData;
 
-            // 1. 从源列表移除
             sourceList.splice(sourceIdx, 1);
 
-            // 2. 放入目标位置
             if (node.type === "folder") {
-                // 拖入文件夹内
                 node.children = node.children || [];
                 node.children.push(draggedNode);
                 node.collapsed = false;
             } else {
-                // 插在同级当前项之后
                 parentList.splice(index, 0, draggedNode);
             }
 
             this._draggedData = null;
-            this.saveTemplates();
+            await this.saveTemplates(true);
             this.renderTree();
         });
     }
@@ -1000,7 +1243,7 @@ export class BuffFloatingPanel {
     /**
      * 复制一个 Buff 模板
      */
-    static cloneBuff(node, list, index) {
+    static async cloneBuff(node, list, index) {
         const clone = {
             id: "b_" + Date.now(),
             type: "buff",
@@ -1009,14 +1252,14 @@ export class BuffFloatingPanel {
             extraAttrs: node.extraAttrs ? JSON.parse(JSON.stringify(node.extraAttrs)) : null
         };
         list.splice(index + 1, 0, clone);
-        this.saveTemplates();
+        await this.saveTemplates(true);
         this.renderTree();
     }
 
     /**
      * 新建文件夹弹窗
      */
-    static showNewFolderDialog() {
+    static async showNewFolderDialog() {
         const name = prompt("请输入新文件夹名称:");
         if (!name || !name.trim()) return;
 
@@ -1027,7 +1270,7 @@ export class BuffFloatingPanel {
             collapsed: false,
             children: []
         });
-        this.saveTemplates();
+        await this.saveTemplates(true);
         this.renderTree();
     }
 
@@ -1074,7 +1317,7 @@ export class BuffFloatingPanel {
         document.body.appendChild(mask);
 
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
-        mask.querySelector(".btn-save").addEventListener("click", () => {
+        mask.querySelector(".btn-save").addEventListener("click", async () => {
             const name = mask.querySelector(".input-buff-name").value.trim();
             if (!name) {
                 alert("请输入 Buff 名称");
@@ -1109,7 +1352,8 @@ export class BuffFloatingPanel {
                 });
             }
 
-            this.saveTemplates();
+            // 用户创建或修改首个 Buff 时，若未找到配置卡会主动提示是否新建
+            await this.saveTemplates(true);
             this.renderTree();
             mask.remove();
             this.showToast(`✅ 已成功保存 Buff [${name}]`, "success");
@@ -1117,34 +1361,39 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 从画布选中的角色卡导入 Buff 弹窗（可复选导入项，并可指定目标文件夹）
+     * 从角色卡导入 Buff 弹窗（可复选导入项，并可指定目标文件夹）
      */
     static async showImportFromCharacterDialog() {
-        const selected = this.getSelectedControllableTokens();
-        const charItem = selected.find(s => s.type === "character" && s.char);
+        const selected = this.getSelectedTokens();
+        let character = null;
 
-        if (!charItem) {
-            this.showToast("⚠️ 请先在画布上选择一个绑定了人物卡的棋子", "warn");
-            return;
+        if (selected.length > 0) {
+            const charItem = selected.find(s => s.type === "character" && s.char);
+            if (charItem) character = charItem.char;
         }
 
-        const character = charItem.char;
+        // 若无选中棋子，允许从战役全量角色列表中下拉选择角色卡
+        if (!character) {
+            if (!window.Campaign || !window.Campaign.characters || window.Campaign.characters.length === 0) {
+                this.showToast("⚠️ 战役中暂无可用的角色卡", "warn");
+                return;
+            }
+            character = window.Campaign.characters.at(0);
+        }
+
         await Roll20Bridge.ensureCharacterAttributes(character);
 
-        // 扫描该卡上现有的所有 repeating_buff2
         const cardBuffs = [];
         if (character.attribs && character.attribs.models) {
             character.attribs.models.forEach(a => {
                 const attrName = a.get("name") || "";
                 if (attrName.startsWith("repeating_buff2_") && attrName.endsWith("_name")) {
                     const prefix = attrName.substring(0, attrName.lastIndexOf("_name"));
-                    const rowId = prefix.replace("repeating_buff2_", "");
                     const name = a.get("current") || "未命名Buff";
 
                     const roundsAttr = character.attribs.models.find(x => x.get("name") === `${prefix}_rounds`);
                     const rounds = roundsAttr && roundsAttr.get("current") !== "" ? Number(roundsAttr.get("current")) : null;
 
-                    // 收集细目
                     const extraAttrs = {};
                     character.attribs.models.forEach(m => {
                         const mName = m.get("name") || "";
@@ -1156,11 +1405,7 @@ export class BuffFloatingPanel {
                         }
                     });
 
-                    cardBuffs.push({
-                        name,
-                        rounds,
-                        extraAttrs
-                    });
+                    cardBuffs.push({ name, rounds, extraAttrs });
                 }
             });
         }
@@ -1170,7 +1415,6 @@ export class BuffFloatingPanel {
             return;
         }
 
-        // 获取所有可用的目标文件夹列表
         const folders = [{ id: "root", name: "📁 根目录" }];
         const collectFolders = (nodes, depth = 0) => {
             nodes.forEach(n => {
@@ -1229,7 +1473,7 @@ export class BuffFloatingPanel {
 
         mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
 
-        mask.querySelector(".btn-confirm-import").addEventListener("click", () => {
+        mask.querySelector(".btn-confirm-import").addEventListener("click", async () => {
             const checkedBoxes = Array.from(mask.querySelectorAll(".cb-import-item:checked"));
             if (checkedBoxes.length === 0) {
                 alert("请先勾选至少一个要导入的 Buff 条目");
@@ -1259,7 +1503,7 @@ export class BuffFloatingPanel {
                 });
             });
 
-            this.saveTemplates();
+            await this.saveTemplates(true);
             this.renderTree();
             mask.remove();
             this.showToast(`🎉 已成功导入 ${checkedBoxes.length} 项 Buff！`, "success");
