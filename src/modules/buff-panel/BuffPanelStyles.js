@@ -1,6 +1,6 @@
 /**
  * BuffPanelStyles.js
- * 状态Buff工作台样式定义：极简基准定位模型 + 上下垂直排版 + 原生 details/summary 折叠
+ * 状态Buff工作台样式定义：极简基准定位模型 + 上下垂直排版 + 原生 details/summary 折叠 + 纯粹整行高亮多选
  */
 export class BuffPanelStyles {
     static STYLESHEET_ID = "r20-floating-panel-styles";
@@ -223,18 +223,18 @@ export class BuffPanelStyles {
                 gap: 2px;
             }
 
-            /* 树形子项 */
+            /* 树形条目（干净纯粹无复选框） */
             .r20-tree-item {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 4px 8px;
+                padding: 5px 8px;
                 background: #20262f;
-                border-radius: 3px;
+                border-radius: 4px;
                 font-size: 11px;
                 color: #cfd8dc;
                 cursor: pointer;
-                transition: background 0.15s ease;
+                transition: all 0.15s ease;
                 border: 1px solid transparent;
             }
             .r20-tree-item:hover {
@@ -242,6 +242,7 @@ export class BuffPanelStyles {
                 border-color: #42a5f5;
                 color: #ffffff;
             }
+            /* 激活态（已生效在选中Token身上） */
             .r20-tree-item.full-active {
                 background: #1e3d59 !important;
                 border-color: #42a5f5 !important;
@@ -252,31 +253,19 @@ export class BuffPanelStyles {
                 border-color: #ffd54f !important;
                 color: #fff8e1 !important;
             }
-
-            .r20-item-label {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                cursor: pointer;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-                flex: 1;
-            }
-            /* 复选框仅在编辑模式下展现 */
-            .r20-cb-select {
-                cursor: pointer;
-                margin: 0;
-                display: none !important;
-            }
-            #r20-buff-panel.is-editing .r20-cb-select {
-                display: inline-block !important;
+            /* 编辑多选高亮态（整行精致高亮，彻底取代生硬复选框） */
+            .r20-tree-item.selected {
+                background: rgba(21, 101, 192, 0.45) !important;
+                border-color: #64b5f6 !important;
+                box-shadow: 0 0 6px rgba(100, 181, 246, 0.4);
+                color: #ffffff !important;
             }
 
             .r20-item-name {
                 overflow: hidden;
                 text-overflow: ellipsis;
                 white-space: nowrap;
+                flex: 1;
             }
             .r20-item-rounds {
                 font-size: 10px;
@@ -285,6 +274,7 @@ export class BuffPanelStyles {
                 padding: 1px 4px;
                 border-radius: 3px;
                 white-space: nowrap;
+                margin-left: 6px;
             }
 
             /* 悬浮 Toast */

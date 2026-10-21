@@ -1452,7 +1452,7 @@ class Pf1eBuffUI {
     // ==========================================
 /**
  * BuffPanelStyles.js
- * 状态Buff工作台样式定义：极简基准定位模型 + 上下垂直排版 + 原生 details/summary 折叠
+ * 状态Buff工作台样式定义：极简基准定位模型 + 上下垂直排版 + 原生 details/summary 折叠 + 纯粹整行高亮多选
  */
 class BuffPanelStyles {
     static STYLESHEET_ID = "r20-floating-panel-styles";
@@ -1675,18 +1675,18 @@ class BuffPanelStyles {
                 gap: 2px;
             }
 
-            /* 树形子项 */
+            /* 树形条目（干净纯粹无复选框） */
             .r20-tree-item {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 4px 8px;
+                padding: 5px 8px;
                 background: #20262f;
-                border-radius: 3px;
+                border-radius: 4px;
                 font-size: 11px;
                 color: #cfd8dc;
                 cursor: pointer;
-                transition: background 0.15s ease;
+                transition: all 0.15s ease;
                 border: 1px solid transparent;
             }
             .r20-tree-item:hover {
@@ -1694,6 +1694,7 @@ class BuffPanelStyles {
                 border-color: #42a5f5;
                 color: #ffffff;
             }
+            /* 激活态（已生效在选中Token身上） */
             .r20-tree-item.full-active {
                 background: #1e3d59 !important;
                 border-color: #42a5f5 !important;
@@ -1704,31 +1705,19 @@ class BuffPanelStyles {
                 border-color: #ffd54f !important;
                 color: #fff8e1 !important;
             }
-
-            .r20-item-label {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                cursor: pointer;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-                flex: 1;
-            }
-            /* 复选框仅在编辑模式下展现 */
-            .r20-cb-select {
-                cursor: pointer;
-                margin: 0;
-                display: none !important;
-            }
-            #r20-buff-panel.is-editing .r20-cb-select {
-                display: inline-block !important;
+            /* 编辑多选高亮态（整行精致高亮，彻底取代生硬复选框） */
+            .r20-tree-item.selected {
+                background: rgba(21, 101, 192, 0.45) !important;
+                border-color: #64b5f6 !important;
+                box-shadow: 0 0 6px rgba(100, 181, 246, 0.4);
+                color: #ffffff !important;
             }
 
             .r20-item-name {
                 overflow: hidden;
                 text-overflow: ellipsis;
                 white-space: nowrap;
+                flex: 1;
             }
             .r20-item-rounds {
                 font-size: 10px;
@@ -1737,6 +1726,7 @@ class BuffPanelStyles {
                 padding: 1px 4px;
                 border-radius: 3px;
                 white-space: nowrap;
+                margin-left: 6px;
             }
 
             /* 悬浮 Toast */
@@ -1975,12 +1965,12 @@ class BuffPanelDragDrop {
 /**
  * BuffFloatingPanel.js
  * 状态Buff工作台主控制器（SSOT 单一真实数据源 + 宿主原生能力驱动）
- * 1. 唯一真实数据源：=== R20_SUITE_DATABASE === 角色卡，面板直接基于角色卡引用，绝无独立脱节内存变量；
+ * 1. 唯一真实数据源：=== R20_SUITE_DATABASE === 角色卡，面板直接基于角色卡引用；
  * 2. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
  * 3. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
  * 4. 垂直上下排版（上栏模板库，下栏当前单位）；
- * 5. 标题栏「✏️ 编辑」模式切换，进入后才展示工具栏与复选框；
- * 6. 增删均采用原子操作，杜绝全量覆盖与误杀。
+ * 5. 标题栏「✏️ 编辑」模式切换，点击整行高亮多选（彻底拔除 Checkbox）；
+ * 6. 属性变动事件 + 签名心跳比对双重保障，100% 实时无感同步。
  */
 
 
@@ -1999,9 +1989,11 @@ class BuffFloatingPanel {
     static isCollapsed = false;
     static isEditMode = false;
     static currentTemplates = [];
+    static selectedNodeIds = new Set();
     static isInternalSaving = false;
     static _dbWatcherBound = false;
     static _dbSyncTimer = null;
+    static _lastSignature = "";
     static _draggedContext = null;
     static _lastSelectedIdsStr = "";
 
@@ -2048,7 +2040,7 @@ class BuffFloatingPanel {
             }
         });
 
-        console.log("[BuffFloatingPanel] SSOT 极简工作台初始化就绪");
+        console.log("[BuffFloatingPanel] SSOT 极简工作台初始化就绪 (整行高亮多选 + 实时同步)");
     }
 
     /**
@@ -2078,7 +2070,7 @@ class BuffFloatingPanel {
                         <button class="r20-btn-icon btn-new-buff" title="新建Buff">+ Buff</button>
                         <button class="r20-btn-icon btn-new-folder" title="新建目录">+ 目录</button>
                         <button class="r20-btn-icon btn-open-sheet" title="在官方角色卡中配置加值">📋 角色卡</button>
-                        <button class="r20-btn-icon danger btn-delete-selected" title="删除勾选的Buff">🗑️ 删除选中</button>
+                        <button class="r20-btn-icon danger btn-delete-selected" title="删除选中的Buff">🗑️ 批量删除</button>
                     </div>
                     <div class="r20-panel-panes">
                         <div class="r20-pane r20-template-pane">
@@ -2130,11 +2122,29 @@ class BuffFloatingPanel {
             editBtn.classList.toggle("active", this.isEditMode);
             editBtn.textContent = this.isEditMode ? "🔒 完成" : "✏️ 编辑";
         }
-        this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（可勾选删除/新增）" : "🔒 已退出编辑模式", "info");
+
+        // 退出编辑模式时清空多选
+        if (!this.isEditMode) {
+            this.selectedNodeIds.clear();
+            this.updateDeleteButtonText();
+            this.panelEl.querySelectorAll(".r20-tree-item.selected").forEach(el => el.classList.remove("selected"));
+        }
+
+        this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（点击条目高亮多选，可批量删除/新建）" : "🔒 已退出编辑模式", "info");
     }
 
     /**
-     * 极简事件委托：非编辑模式直接应用；编辑模式点击切换勾选
+     * 更新批量删除按钮文本与数字
+     */
+    static updateDeleteButtonText() {
+        const btn = this.panelEl.querySelector(".btn-delete-selected");
+        if (!btn) return;
+        const count = this.selectedNodeIds.size;
+        btn.textContent = count > 0 ? ("🗑️ 删除选中 (" + count + ")") : "🗑️ 批量删除";
+    }
+
+    /**
+     * 极简事件委托：非编辑模式直接应用；编辑模式点击整行切换高亮多选
      */
     static initPaneEvents() {
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -2142,17 +2152,23 @@ class BuffFloatingPanel {
 
         // 模板栏点击
         templateTree.addEventListener("click", async (e) => {
-            if (e.target.classList.contains("r20-cb-select") || e.target.closest("summary")) return;
+            if (e.target.closest("summary")) return;
 
             const item = e.target.closest(".r20-tree-item");
             if (!item) return;
 
-            // 编辑模式下点击整行切换勾选
+            const id = item.dataset.id;
+
+            // 编辑模式下点击整行切换高亮多选
             if (this.isEditMode) {
-                const cb = item.querySelector(".r20-cb-select");
-                if (cb && e.target !== cb) {
-                    cb.checked = !cb.checked;
+                if (this.selectedNodeIds.has(id)) {
+                    this.selectedNodeIds.delete(id);
+                    item.classList.remove("selected");
+                } else {
+                    this.selectedNodeIds.add(id);
+                    item.classList.add("selected");
                 }
+                this.updateDeleteButtonText();
                 return;
             }
 
@@ -2255,24 +2271,26 @@ class BuffFloatingPanel {
      * 原子批量删除选中的 Buff 条目（直接从卡上物理销毁，绝无复活可能）
      */
     static async deleteSelectedTemplates() {
-        const checkboxes = Array.from(this.panelEl.querySelectorAll(".r20-template-tree .r20-cb-select:checked"));
-        if (checkboxes.length === 0) {
-            this.showToast("⚠️ 请先勾选要删除的 Buff 条目", "warn");
+        if (this.selectedNodeIds.size === 0) {
+            this.showToast("⚠️ 请先在列表中点击要删除的 Buff 条目以高亮选中", "warn");
             return;
         }
 
-        if (!confirm("确定要彻底销毁选中的 " + checkboxes.length + " 个 Buff 项吗？")) return;
+        const count = this.selectedNodeIds.size;
+        if (!confirm("确定要彻底销毁选中的 " + count + " 个 Buff 项吗？")) return;
 
         this.isInternalSaving = true;
 
-        for (const cb of checkboxes) {
-            const rowId = cb.value;
+        for (const rowId of this.selectedNodeIds) {
             await SuiteConfigStore.deleteBuffFromDatabase(rowId);
         }
 
+        this.selectedNodeIds.clear();
+        this.updateDeleteButtonText();
         this.isInternalSaving = false;
+
         await this.renderTemplatePane();
-        this.showToast("🗑️ 已彻底销毁 " + checkboxes.length + " 项原生 Buff", "success");
+        this.showToast("🗑️ 已彻底销毁 " + count + " 项原生 Buff", "success");
     }
 
     /**
@@ -2357,26 +2375,26 @@ class BuffFloatingPanel {
                     }
                 });
             } else {
+                const rowId = node.rowId || node.id;
                 const stat = activeStats.get(node.name);
                 const isFull = selectedTokens.length > 0 && stat && stat.count === stat.total;
                 const isPartial = selectedTokens.length > 0 && stat && stat.count > 0 && !isFull;
+                const isSelected = this.selectedNodeIds.has(rowId);
 
                 const item = document.createElement("div");
-                item.className = "r20-tree-item" + (isFull ? " full-active" : isPartial ? " partial-active" : "");
+                item.className = "r20-tree-item" + 
+                    (isSelected ? " selected" : "") +
+                    (isFull ? " full-active" : isPartial ? " partial-active" : "");
                 item.dataset.name = node.name;
-                item.dataset.id = node.id || node.rowId;
+                item.dataset.id = rowId;
                 if (node.rounds) item.dataset.rounds = node.rounds;
                 item._extraAttrs = node.extraAttrs || null;
                 item.draggable = true;
 
                 const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") ? (node.rounds + "轮") : "永久";
-                const rowId = node.rowId || node.id;
 
                 item.innerHTML = `
-                    <label class="r20-item-label" title="${node.name}">
-                        <input type="checkbox" class="r20-cb-select" value="${rowId}">
-                        <span class="r20-item-name">${node.name}</span>
-                    </label>
+                    <span class="r20-item-name">${node.name}</span>
                     <span class="r20-item-rounds">${roundsText}</span>
                 `;
 
@@ -2464,7 +2482,7 @@ class BuffFloatingPanel {
                             sourcePane: "unit",
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
-                            onCrossCopy: async (draggedNode, targetNode, parentList, idx) => {
+                            onCrossCopy: async (draggedNode) => {
                                 const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
                                 if (newRowId) {
                                     await this.renderTemplatePane();
@@ -2533,7 +2551,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 监听数据库角色卡属性变动（实时双向联动）
+     * 监听数据库角色卡属性变动（事件绑定 + 签名比对双重保障）
      */
     static initDatabaseCharacterWatcher() {
         if (this._dbWatcherBound) return;
@@ -2541,7 +2559,8 @@ class BuffFloatingPanel {
 
         const attachToChar = (char) => {
             if (!char) return;
-            const bind = () => {
+
+            const bindEvents = () => {
                 if (!char.attribs) return;
                 char.attribs.on("add change remove reset", () => {
                     if (this.isInternalSaving) return;
@@ -2549,13 +2568,13 @@ class BuffFloatingPanel {
                     this._dbSyncTimer = setTimeout(async () => {
                         if (this.isInternalSaving) return;
                         await this.renderTemplatePane();
-                    }, 200);
+                    }, 150);
                 });
             };
 
-            bind();
+            bindEvents();
             if (typeof char.connectAttributesAndAbilities === "function" && (!char.attribs || char.attribs.length === 0)) {
-                char.connectAttributesAndAbilities().then(() => bind());
+                char.connectAttributesAndAbilities().then(() => bindEvents());
             }
         };
 
@@ -2567,6 +2586,27 @@ class BuffFloatingPanel {
                 if (c.get("name") === SuiteConfigStore.DATABASE_CHARACTER_NAME) attachToChar(c);
             });
         }
+
+        // 双重保障守护心跳：每 1.2 秒比对一次卡上 repeating_buff2 签名，确保跨 iframe 或外部变更 100% 自动无缝感知
+        setInterval(async () => {
+            if (this.isInternalSaving) return;
+            const targetChar = SuiteConfigStore.findDatabaseCharacter();
+            if (!targetChar || !targetChar.attribs) return;
+
+            const buffAttrs = targetChar.attribs.models.filter(a => {
+                const n = a.get("name") || "";
+                return n.startsWith("repeating_buff2_") && (n.endsWith("_name") || n.endsWith("_rounds"));
+            });
+
+            const sig = buffAttrs.map(a => a.get("name") + "=" + a.get("current")).sort().join(";");
+            if (sig !== this._lastSignature) {
+                if (this._lastSignature !== "") {
+                    console.log("[BuffFloatingPanel] 检测到角色卡数据变动，触发自愈刷新...");
+                    await this.renderTemplatePane();
+                }
+                this._lastSignature = sig;
+            }
+        }, 1200);
     }
 
     /**
