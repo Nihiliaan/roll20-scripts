@@ -21,10 +21,10 @@ export class Pf1eBuffUI {
             .r20-buff-container {
                 display: inline-flex;
                 flex-wrap: wrap;
-                max-height: 34px;
-                max-width: 180px;
+                max-height: 28px;
+                max-width: 160px;
                 overflow: hidden;
-                gap: 2px 3px;
+                gap: 2px 4px;
                 margin-left: 6px;
                 vertical-align: middle;
                 line-height: 1;
@@ -32,27 +32,27 @@ export class Pf1eBuffUI {
             .r20-buff-pill-compact {
                 display: inline-flex;
                 align-items: center;
-                background: #1f364d;
-                color: #e0e6ed;
+                background: #1e3a8a;
+                color: #f1f5f9;
                 font-size: 10px;
-                font-weight: 500;
-                padding: 1px 4px;
+                font-weight: 600;
+                padding: 1px 5px;
                 border-radius: 3px;
                 cursor: pointer;
                 user-select: none;
-                border: 1px solid rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(255, 255, 255, 0.2);
                 white-space: nowrap;
                 transition: background 0.15s, border-color 0.15s;
             }
             .r20-buff-pill-compact:hover {
-                background: #2a4d6f;
-                border-color: #64b5f6;
+                background: #2563eb;
+                border-color: #93c5fd;
                 color: #ffffff;
             }
             .r20-buff-pill-compact.expiring {
-                background: #5c1d1d;
-                border-color: #e57373;
-                color: #ffcdd2;
+                background: #7f1d1d;
+                border-color: #f87171;
+                color: #fecaca;
             }
             .r20-add-buff-btn {
                 display: inline-flex;
@@ -84,42 +84,49 @@ export class Pf1eBuffUI {
         if (this.isObserverStarted) return;
         this.injectStyles();
 
-        const attachObserver = () => {
-            const tracker = document.querySelector("#initiativewindow, .turn-tracker");
-            if (!tracker) {
-                setTimeout(attachObserver, 1000);
-                return;
-            }
+        // 1. 监听主窗口变动（包含 Vue 动态渲染的 #vm-turn-order 和 .turn-tracker）
+        if (this._observer) this._observer.disconnect();
 
-            if (this._observer) this._observer.disconnect();
-
-            this._observer = new MutationObserver((mutations) => {
-                let shouldRefresh = false;
-                for (const m of mutations) {
-                    if (m.type === "childList") {
-                        for (const node of m.addedNodes) {
-                            if (node.nodeType === 1 && (node.matches?.("li.token") || node.querySelector?.("li.token"))) {
+        this._observer = new MutationObserver((mutations) => {
+            let shouldRefresh = false;
+            for (const m of mutations) {
+                if (m.type === "childList") {
+                    for (const node of m.addedNodes) {
+                        if (node.nodeType === 1) {
+                            if (node.matches?.("li.token") || node.querySelector?.("li.token") ||
+                                node.matches?.(".turn-tracker") || node.querySelector?.(".turn-tracker") ||
+                                node.id === "vm-turn-order") {
                                 shouldRefresh = true;
                                 break;
                             }
                         }
                     }
-                    if (shouldRefresh) break;
                 }
+                if (shouldRefresh) break;
+            }
 
-                if (shouldRefresh) {
-                    if (this._debounceTimer) clearTimeout(this._debounceTimer);
-                    this._debounceTimer = setTimeout(() => {
-                        this.refreshAllBadges();
-                    }, 80);
-                }
+            if (shouldRefresh) {
+                if (this._debounceTimer) clearTimeout(this._debounceTimer);
+                this._debounceTimer = setTimeout(() => {
+                    this.refreshAllBadges();
+                }, 80);
+            }
+        });
+
+        // 优先监听 vm-turn-order 或 body
+        const targetContainer = document.getElementById("vm-turn-order") || document.body;
+        this._observer.observe(targetContainer, { childList: true, subtree: true });
+
+        // 2. 联动 Roll20 先攻数据变动事件
+        if (window.Campaign && typeof window.Campaign.on === "function") {
+            window.Campaign.on("change:turnorder change:initiativepage", () => {
+                setTimeout(() => this.refreshAllBadges(), 100);
             });
+        }
 
-            this._observer.observe(tracker, { childList: true, subtree: true });
-            this.isObserverStarted = true;
-        };
-
-        attachObserver();
+        this.isObserverStarted = true;
+        // 立即尝试一次初次刷新
+        this.refreshAllBadges();
     }
 
     /**
@@ -127,10 +134,10 @@ export class Pf1eBuffUI {
      */
     static async refreshAllBadges() {
         this.injectStyles();
-        const tracker = document.querySelector("#initiativewindow, .turn-tracker");
-        if (!tracker) return;
+        // 现代 Jumpgate 优先匹配 #vm-turn-order 与 .turn-tracker，兼顾旧版 #initiativewindow
+        const rows = document.querySelectorAll("#vm-turn-order li.token, .turn-tracker li.token, #initiativewindow li.token");
+        if (!rows || rows.length === 0) return;
 
-        const rows = tracker.querySelectorAll("li.token");
         for (const row of rows) {
             const tokenId = row.dataset.tokenid;
             if (tokenId) {

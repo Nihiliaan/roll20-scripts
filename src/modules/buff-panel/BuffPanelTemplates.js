@@ -31,6 +31,7 @@ export class BuffPanelTemplates {
                             <span class="toggle-icon">${isTemplatePaneCollapsed ? "▶" : "▼"}</span>
                             <span>📚 Buff 模板库</span>
                         </div>
+                        <button class="r20-btn-icon btn-refresh-templates" title="从云端角色卡重新拉取同步" style="font-size:11px; padding:1px 5px;">🔄 同步</button>
                     </div>
                     <div class="r20-panel-toolbar" style="display: none;">
                         <div style="display:flex; gap:4px;">

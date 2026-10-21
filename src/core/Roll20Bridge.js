@@ -12,17 +12,19 @@ export class Roll20Bridge {
         return new Promise((resolve) => {
             const start = Date.now();
             const check = () => {
+                const c = window.Campaign;
                 if (
-                    typeof window.Campaign !== "undefined" &&
-                    window.Campaign.characters &&
-                    window.Campaign.pages
+                    typeof c !== "undefined" &&
+                    c.characters &&
+                    c.pages &&
+                    (c.gameFullyLoaded || c.bootstrapped || c.characters.length > 0 || Date.now() - start > 4000)
                 ) {
                     resolve(true);
                 } else if (Date.now() - start > timeoutMs) {
-                    console.warn("[Roll20Bridge] 等待 Roll20 就绪超时");
-                    resolve(false);
+                    console.warn("[Roll20Bridge] 等待 Roll20 就绪超时，尝试降级启动");
+                    resolve(typeof window.Campaign !== "undefined");
                 } else {
-                    setTimeout(check, 500);
+                    setTimeout(check, 300);
                 }
             };
             check();

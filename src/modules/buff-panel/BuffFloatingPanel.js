@@ -103,6 +103,10 @@ export class BuffFloatingPanel {
         });
 
         // 模板工具栏
+        panel.querySelector(".btn-refresh-templates")?.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            await this.refreshTemplates(true);
+        });
         panel.querySelector(".btn-new-buff").addEventListener("click", () => this.showBuffEditorDialog());
         panel.querySelector(".btn-new-folder").addEventListener("click", () => this.showNewFolderDialog());
         panel.querySelector(".btn-import-buffs").addEventListener("click", () => this.showImportFromCharacterDialog());
@@ -177,6 +181,8 @@ export class BuffFloatingPanel {
             if (!this.isPinned && this.isCollapsed) {
                 this.setCollapsed(false);
             }
+            // 移入时轻量重验模板
+            this.refreshTemplates(false);
         });
 
         this.panelEl.addEventListener("mouseleave", () => {
@@ -211,6 +217,7 @@ export class BuffFloatingPanel {
                 minBtn.title = "折叠面板(仅留标题)";
             }
             this.updateLayoutDirection();
+            this.refreshTemplates(false);
         }
     }
 
@@ -269,20 +276,51 @@ export class BuffFloatingPanel {
         }
     }
 
+    static _dbWatcherBound = false;
+
     /**
-     * 监听数据库角色卡的原生属性变动（实时更新模板库）
+     * 监听数据库角色卡的原生属性变动（实时双向更新模板库）
      */
     static initDatabaseCharacterWatcher() {
-        const dbChar = SuiteConfigStore.findDatabaseCharacter();
-        if (dbChar && dbChar.attribs) {
-            dbChar.attribs.on("add change remove reset", () => {
+        const attachToChar = (char) => {
+            if (!char || !char.attribs) return;
+            if (char._r20SuiteWatcherBound) return;
+            char._r20SuiteWatcherBound = true;
+
+            char.attribs.on("add change remove reset", () => {
                 if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
                 this._dbSyncTimer = setTimeout(async () => {
-                    this.templates = await SuiteConfigStore.loadTemplates();
-                    await this.renderTemplatePane();
-                }, 150);
+                    await this.refreshTemplates(false);
+                }, 120);
+            });
+            console.log("[BuffFloatingPanel] 数据库角色卡属性监听已成功挂载");
+        };
+
+        const existing = SuiteConfigStore.findDatabaseCharacter();
+        if (existing) {
+            attachToChar(existing);
+        }
+
+        // 无论当前是否存在，都在 Campaign.characters 上建立监听，应对异步注水或新建
+        if (window.Campaign && window.Campaign.characters && !this._dbWatcherBound) {
+            this._dbWatcherBound = true;
+            window.Campaign.characters.on("add reset", (addedChar) => {
+                const charName = (addedChar.get("name") || "").trim();
+                if (charName === SuiteConfigStore.DB_CHAR_NAME || charName.toLowerCase() === SuiteConfigStore.DB_CHAR_NAME.toLowerCase()) {
+                    attachToChar(addedChar);
+                    this.refreshTemplates(false);
+                }
             });
         }
+    }
+
+    /**
+     * 主动刷新模板库
+     */
+    static async refreshTemplates(notify = false) {
+        this.templates = await SuiteConfigStore.loadTemplates();
+        await this.renderTemplatePane();
+        if (notify) this.showToast("🔄 模板库已与原生角色卡同步", "success");
     }
 
     /**

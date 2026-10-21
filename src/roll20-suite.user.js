@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.8.0
+// @version      0.9.0
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.8.0...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.0...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -31,17 +31,19 @@ class Roll20Bridge {
         return new Promise((resolve) => {
             const start = Date.now();
             const check = () => {
+                const c = window.Campaign;
                 if (
-                    typeof window.Campaign !== "undefined" &&
-                    window.Campaign.characters &&
-                    window.Campaign.pages
+                    typeof c !== "undefined" &&
+                    c.characters &&
+                    c.pages &&
+                    (c.gameFullyLoaded || c.bootstrapped || c.characters.length > 0 || Date.now() - start > 4000)
                 ) {
                     resolve(true);
                 } else if (Date.now() - start > timeoutMs) {
-                    console.warn("[Roll20Bridge] 等待 Roll20 就绪超时");
-                    resolve(false);
+                    console.warn("[Roll20Bridge] 等待 Roll20 就绪超时，尝试降级启动");
+                    resolve(typeof window.Campaign !== "undefined");
                 } else {
-                    setTimeout(check, 500);
+                    setTimeout(check, 300);
                 }
             };
             check();
@@ -473,7 +475,10 @@ class SuiteConfigStore {
      */
     static findDatabaseCharacter() {
         if (!window.Campaign || !window.Campaign.characters) return null;
-        return window.Campaign.characters.find(c => c.get("name") === this.DB_CHAR_NAME) || null;
+        return window.Campaign.characters.find(c => {
+            const n = (c.get("name") || "").trim();
+            return n === this.DB_CHAR_NAME || n.toLowerCase() === this.DB_CHAR_NAME.toLowerCase();
+        }) || null;
     }
 
     /**
@@ -499,6 +504,9 @@ class SuiteConfigStore {
 
         if (dbChar) {
             await Roll20Bridge.ensureCharacterAttributes(dbChar);
+            if (typeof dbChar.connectAttributesAndAbilities === "function" && (!dbChar.attribs || dbChar.attribs.length === 0)) {
+                await dbChar.connectAttributesAndAbilities();
+            }
 
             // 1. 读取原生角色卡上的所有 repeating_buff2 条目
             const nativeBuffs = await Pf1eBuffManager.getAllBuffs(dbChar);
@@ -1081,10 +1089,10 @@ class Pf1eBuffUI {
             .r20-buff-container {
                 display: inline-flex;
                 flex-wrap: wrap;
-                max-height: 34px;
-                max-width: 180px;
+                max-height: 28px;
+                max-width: 160px;
                 overflow: hidden;
-                gap: 2px 3px;
+                gap: 2px 4px;
                 margin-left: 6px;
                 vertical-align: middle;
                 line-height: 1;
@@ -1092,27 +1100,27 @@ class Pf1eBuffUI {
             .r20-buff-pill-compact {
                 display: inline-flex;
                 align-items: center;
-                background: #1f364d;
-                color: #e0e6ed;
+                background: #1e3a8a;
+                color: #f1f5f9;
                 font-size: 10px;
-                font-weight: 500;
-                padding: 1px 4px;
+                font-weight: 600;
+                padding: 1px 5px;
                 border-radius: 3px;
                 cursor: pointer;
                 user-select: none;
-                border: 1px solid rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(255, 255, 255, 0.2);
                 white-space: nowrap;
                 transition: background 0.15s, border-color 0.15s;
             }
             .r20-buff-pill-compact:hover {
-                background: #2a4d6f;
-                border-color: #64b5f6;
+                background: #2563eb;
+                border-color: #93c5fd;
                 color: #ffffff;
             }
             .r20-buff-pill-compact.expiring {
-                background: #5c1d1d;
-                border-color: #e57373;
-                color: #ffcdd2;
+                background: #7f1d1d;
+                border-color: #f87171;
+                color: #fecaca;
             }
             .r20-add-buff-btn {
                 display: inline-flex;
@@ -1144,42 +1152,49 @@ class Pf1eBuffUI {
         if (this.isObserverStarted) return;
         this.injectStyles();
 
-        const attachObserver = () => {
-            const tracker = document.querySelector("#initiativewindow, .turn-tracker");
-            if (!tracker) {
-                setTimeout(attachObserver, 1000);
-                return;
-            }
+        // 1. 监听主窗口变动（包含 Vue 动态渲染的 #vm-turn-order 和 .turn-tracker）
+        if (this._observer) this._observer.disconnect();
 
-            if (this._observer) this._observer.disconnect();
-
-            this._observer = new MutationObserver((mutations) => {
-                let shouldRefresh = false;
-                for (const m of mutations) {
-                    if (m.type === "childList") {
-                        for (const node of m.addedNodes) {
-                            if (node.nodeType === 1 && (node.matches?.("li.token") || node.querySelector?.("li.token"))) {
+        this._observer = new MutationObserver((mutations) => {
+            let shouldRefresh = false;
+            for (const m of mutations) {
+                if (m.type === "childList") {
+                    for (const node of m.addedNodes) {
+                        if (node.nodeType === 1) {
+                            if (node.matches?.("li.token") || node.querySelector?.("li.token") ||
+                                node.matches?.(".turn-tracker") || node.querySelector?.(".turn-tracker") ||
+                                node.id === "vm-turn-order") {
                                 shouldRefresh = true;
                                 break;
                             }
                         }
                     }
-                    if (shouldRefresh) break;
                 }
+                if (shouldRefresh) break;
+            }
 
-                if (shouldRefresh) {
-                    if (this._debounceTimer) clearTimeout(this._debounceTimer);
-                    this._debounceTimer = setTimeout(() => {
-                        this.refreshAllBadges();
-                    }, 80);
-                }
+            if (shouldRefresh) {
+                if (this._debounceTimer) clearTimeout(this._debounceTimer);
+                this._debounceTimer = setTimeout(() => {
+                    this.refreshAllBadges();
+                }, 80);
+            }
+        });
+
+        // 优先监听 vm-turn-order 或 body
+        const targetContainer = document.getElementById("vm-turn-order") || document.body;
+        this._observer.observe(targetContainer, { childList: true, subtree: true });
+
+        // 2. 联动 Roll20 先攻数据变动事件
+        if (window.Campaign && typeof window.Campaign.on === "function") {
+            window.Campaign.on("change:turnorder change:initiativepage", () => {
+                setTimeout(() => this.refreshAllBadges(), 100);
             });
+        }
 
-            this._observer.observe(tracker, { childList: true, subtree: true });
-            this.isObserverStarted = true;
-        };
-
-        attachObserver();
+        this.isObserverStarted = true;
+        // 立即尝试一次初次刷新
+        this.refreshAllBadges();
     }
 
     /**
@@ -1187,10 +1202,10 @@ class Pf1eBuffUI {
      */
     static async refreshAllBadges() {
         this.injectStyles();
-        const tracker = document.querySelector("#initiativewindow, .turn-tracker");
-        if (!tracker) return;
+        // 现代 Jumpgate 优先匹配 #vm-turn-order 与 .turn-tracker，兼顾旧版 #initiativewindow
+        const rows = document.querySelectorAll("#vm-turn-order li.token, .turn-tracker li.token, #initiativewindow li.token");
+        if (!rows || rows.length === 0) return;
 
-        const rows = tracker.querySelectorAll("li.token");
         for (const row of rows) {
             const tokenId = row.dataset.tokenid;
             if (tokenId) {
@@ -1803,6 +1818,7 @@ class BuffPanelTemplates {
                             <span class="toggle-icon">${isTemplatePaneCollapsed ? "▶" : "▼"}</span>
                             <span>📚 Buff 模板库</span>
                         </div>
+                        <button class="r20-btn-icon btn-refresh-templates" title="从云端角色卡重新拉取同步" style="font-size:11px; padding:1px 5px;">🔄 同步</button>
                     </div>
                     <div class="r20-panel-toolbar" style="display: none;">
                         <div style="display:flex; gap:4px;">
@@ -2165,6 +2181,10 @@ class BuffFloatingPanel {
         });
 
         // 模板工具栏
+        panel.querySelector(".btn-refresh-templates")?.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            await this.refreshTemplates(true);
+        });
         panel.querySelector(".btn-new-buff").addEventListener("click", () => this.showBuffEditorDialog());
         panel.querySelector(".btn-new-folder").addEventListener("click", () => this.showNewFolderDialog());
         panel.querySelector(".btn-import-buffs").addEventListener("click", () => this.showImportFromCharacterDialog());
@@ -2239,6 +2259,8 @@ class BuffFloatingPanel {
             if (!this.isPinned && this.isCollapsed) {
                 this.setCollapsed(false);
             }
+            // 移入时轻量重验模板
+            this.refreshTemplates(false);
         });
 
         this.panelEl.addEventListener("mouseleave", () => {
@@ -2273,6 +2295,7 @@ class BuffFloatingPanel {
                 minBtn.title = "折叠面板(仅留标题)";
             }
             this.updateLayoutDirection();
+            this.refreshTemplates(false);
         }
     }
 
@@ -2331,20 +2354,51 @@ class BuffFloatingPanel {
         }
     }
 
+    static _dbWatcherBound = false;
+
     /**
-     * 监听数据库角色卡的原生属性变动（实时更新模板库）
+     * 监听数据库角色卡的原生属性变动（实时双向更新模板库）
      */
     static initDatabaseCharacterWatcher() {
-        const dbChar = SuiteConfigStore.findDatabaseCharacter();
-        if (dbChar && dbChar.attribs) {
-            dbChar.attribs.on("add change remove reset", () => {
+        const attachToChar = (char) => {
+            if (!char || !char.attribs) return;
+            if (char._r20SuiteWatcherBound) return;
+            char._r20SuiteWatcherBound = true;
+
+            char.attribs.on("add change remove reset", () => {
                 if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
                 this._dbSyncTimer = setTimeout(async () => {
-                    this.templates = await SuiteConfigStore.loadTemplates();
-                    await this.renderTemplatePane();
-                }, 150);
+                    await this.refreshTemplates(false);
+                }, 120);
+            });
+            console.log("[BuffFloatingPanel] 数据库角色卡属性监听已成功挂载");
+        };
+
+        const existing = SuiteConfigStore.findDatabaseCharacter();
+        if (existing) {
+            attachToChar(existing);
+        }
+
+        // 无论当前是否存在，都在 Campaign.characters 上建立监听，应对异步注水或新建
+        if (window.Campaign && window.Campaign.characters && !this._dbWatcherBound) {
+            this._dbWatcherBound = true;
+            window.Campaign.characters.on("add reset", (addedChar) => {
+                const charName = (addedChar.get("name") || "").trim();
+                if (charName === SuiteConfigStore.DB_CHAR_NAME || charName.toLowerCase() === SuiteConfigStore.DB_CHAR_NAME.toLowerCase()) {
+                    attachToChar(addedChar);
+                    this.refreshTemplates(false);
+                }
             });
         }
+    }
+
+    /**
+     * 主动刷新模板库
+     */
+    static async refreshTemplates(notify = false) {
+        this.templates = await SuiteConfigStore.loadTemplates();
+        await this.renderTemplatePane();
+        if (notify) this.showToast("🔄 模板库已与原生角色卡同步", "success");
     }
 
     /**
@@ -3246,7 +3300,7 @@ class BuffFloatingPanel {
                 console.error("[Roll20Suite] 先攻条徽章挂载失败:", uiErr);
             }
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.8.0 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.0 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

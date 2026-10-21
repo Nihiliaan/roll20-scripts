@@ -33,7 +33,10 @@ export class SuiteConfigStore {
      */
     static findDatabaseCharacter() {
         if (!window.Campaign || !window.Campaign.characters) return null;
-        return window.Campaign.characters.find(c => c.get("name") === this.DB_CHAR_NAME) || null;
+        return window.Campaign.characters.find(c => {
+            const n = (c.get("name") || "").trim();
+            return n === this.DB_CHAR_NAME || n.toLowerCase() === this.DB_CHAR_NAME.toLowerCase();
+        }) || null;
     }
 
     /**
@@ -59,6 +62,9 @@ export class SuiteConfigStore {
 
         if (dbChar) {
             await Roll20Bridge.ensureCharacterAttributes(dbChar);
+            if (typeof dbChar.connectAttributesAndAbilities === "function" && (!dbChar.attribs || dbChar.attribs.length === 0)) {
+                await dbChar.connectAttributesAndAbilities();
+            }
 
             // 1. 读取原生角色卡上的所有 repeating_buff2 条目
             const nativeBuffs = await Pf1eBuffManager.getAllBuffs(dbChar);
