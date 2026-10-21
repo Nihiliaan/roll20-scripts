@@ -137,7 +137,7 @@ export class BuffFloatingPanel {
 
         // 绑定工具栏
         panel.querySelector(".btn-refresh-templates").addEventListener("click", () => this.renderTemplatePane(true));
-        panel.querySelector(".btn-new-buff").addEventListener("click", () => this.createBuffPrompt());
+        panel.querySelector(".btn-new-buff").addEventListener("click", () => this.showBuffEditorDialog(null));
         panel.querySelector(".btn-new-folder").addEventListener("click", () => this.createFolderPrompt());
         panel.querySelector(".btn-open-sheet").addEventListener("click", () => this.openDatabaseSheet());
         panel.querySelector(".btn-delete-selected").addEventListener("click", () => this.deleteSelectedTemplates());
@@ -189,6 +189,7 @@ export class BuffFloatingPanel {
         // 模板栏点击
         templateTree.addEventListener("click", async (e) => {
             if (e.target.closest("summary")) return;
+            if (e.target.closest(".btn-edit-buff")) return;
 
             const item = e.target.closest(".r20-tree-item");
             if (!item) return;
@@ -265,33 +266,92 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 原子创建 Buff（直接在角色卡上新建，绝无中间变量覆盖）
+     * 调出 Buff 编辑/新建弹窗
      */
-    static async createBuffPrompt() {
-        const name = prompt("请输入 Buff 名称:");
-        if (!name || !name.trim()) return;
+    static showBuffEditorDialog(existingNode = null) {
+        const isEditing = !!existingNode;
+        const mask = document.createElement("div");
+        mask.className = "r20-dialog-mask";
 
-        const roundsInput = prompt("请输入持续轮数 (留空为永久):", "");
-        let rounds = null;
-        if (roundsInput && !isNaN(parseInt(roundsInput))) {
-            rounds = parseInt(roundsInput);
-        }
+        const currentName = isEditing ? existingNode.name : "";
+        const currentRounds = isEditing && existingNode.rounds !== null && existingNode.rounds !== undefined ? existingNode.rounds : "";
+        const currentJson = isEditing
+            ? JSON.stringify(existingNode.extraAttrs || {}, null, 2)
+            : `{
+  "bufftype": "spell",
+  "b1-show": 1,
+  "b1_bonus": "attack",
+  "b1_bonustype": "luck",
+  "b1_val": 1
+}`;
 
-        const defaultExtraAttrs = {
-            bufftype: "spell",
-            "b1-show": 1,
-            b1_bonus: "attack",
-            b1_bonustype: "luck",
-            b1_val: 1
-        };
+        mask.innerHTML = `
+            <div class="r20-dialog-box">
+                <div class="r20-dialog-header">${isEditing ? "编辑 Buff 模板" : "新建 Buff 模板"}</div>
+                <div class="r20-dialog-body">
+                    <label style="font-size:11px; color:#b0bec5;">Buff 名称:</label>
+                    <input type="text" class="r20-input-text input-buff-name" value="${currentName}" placeholder="例如: 神恩、加速术..." />
 
-        const rowId = await SuiteConfigStore.addBuffToDatabase(name.trim(), rounds, defaultExtraAttrs);
-        if (rowId) {
-            await this.renderTemplatePane();
-            this.showToast("✨ Buff [" + name.trim() + "] 已在角色卡上原子创建成功", "success");
-        } else {
-            this.showToast("⚠️ 创建 Buff 失败，请确保战役配置卡存在", "warn");
-        }
+                    <label style="font-size:11px; color:#b0bec5;">持续轮数 (留空视为永久):</label>
+                    <input type="number" class="r20-input-text input-buff-rounds" value="${currentRounds}" placeholder="留空或大于100视为永久" />
+
+                    <label style="font-size:11px; color:#b0bec5;">PF1e 细目加值字典 (JSON 格式):</label>
+                    <textarea class="r20-textarea-json input-buff-json">${currentJson}</textarea>
+                    <span style="font-size:10px; color:#78909c;">提示: 可配置 b1_bonus, b1_bonustype, b1_val, b1_macro-text 等原生字段。</span>
+                </div>
+                <div class="r20-dialog-footer">
+                    <button class="r20-btn-icon btn-cancel" style="padding:6px 12px;">取消</button>
+                    <button class="r20-btn-apply btn-save" style="padding:6px 14px;">保存</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(mask);
+        mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
+        mask.querySelector(".btn-save").addEventListener("click", async () => {
+            const name = mask.querySelector(".input-buff-name").value.trim();
+            if (!name) { alert("请输入 Buff 名称"); return; }
+
+            const roundsVal = mask.querySelector(".input-buff-rounds").value.trim();
+            const rounds = roundsVal === "" ? null : parseInt(roundsVal, 10);
+
+            let extraAttrs = null;
+            const jsonText = mask.querySelector(".input-buff-json").value.trim();
+            if (jsonText) {
+                try { extraAttrs = JSON.parse(jsonText); }
+                catch (err) { alert("JSON 细目格式错误:\n" + err.message); return; }
+            }
+
+            this.isInternalSaving = true;
+            try {
+                if (isEditing) {
+                    const rowId = existingNode.rowId || existingNode.id;
+                    await SuiteConfigStore.updateBuffInDatabase(rowId, name, rounds, extraAttrs);
+                    existingNode.name = name;
+                    existingNode.rounds = rounds;
+                    existingNode.extraAttrs = extraAttrs;
+                    this.showToast("✅ 已更新 Buff [" + name + "]", "success");
+                } else {
+                    const newRowId = await SuiteConfigStore.addBuffToDatabase(name, rounds, extraAttrs);
+                    if (newRowId) {
+                        this.currentTemplates.push({
+                            id: newRowId,
+                            rowId: newRowId,
+                            type: "buff",
+                            name,
+                            rounds,
+                            extraAttrs
+                        });
+                        await SuiteConfigStore.saveTopology(this.currentTemplates);
+                    }
+                    this.showToast("✨ 已创建 Buff [" + name + "]", "success");
+                }
+                mask.remove();
+                await this.renderTemplatePane();
+            } finally {
+                setTimeout(() => { this.isInternalSaving = false; }, 300);
+            }
+        });
     }
 
     /**
@@ -441,9 +501,21 @@ export class BuffFloatingPanel {
                 const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") ? (node.rounds + "轮") : "永久";
 
                 item.innerHTML = `
-                    <span class="r20-item-name">${node.name}</span>
-                    <span class="r20-item-rounds">${roundsText}</span>
+                    <div class="r20-item-left">
+                        <span class="r20-item-name">${node.name}</span>
+                        <span class="r20-item-rounds">${roundsText}</span>
+                    </div>
+                    <div class="r20-item-actions">
+                        ${this.isEditMode ? `<button class="r20-btn-icon btn-edit-buff" title="编辑细目">✏️</button>` : ""}
+                    </div>
                 `;
+
+                if (this.isEditMode) {
+                    item.querySelector(".btn-edit-buff")?.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        this.showBuffEditorDialog(node);
+                    });
+                }
 
                 container.appendChild(item);
 

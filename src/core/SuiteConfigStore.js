@@ -223,6 +223,20 @@ export class SuiteConfigStore {
     }
 
     /**
+     * 原子更新数据库角色卡上的指定 Buff
+     */
+    static async updateBuffInDatabase(rowId, name, rounds = null, extraAttrs = null) {
+        const dbChar = this.findDatabaseCharacter();
+        if (!dbChar || !rowId) return false;
+
+        await Roll20Bridge.ensureCharacterAttributes(dbChar);
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs);
+
+        console.log("[SuiteConfigStore] 原子更新原生 Buff [" + name + "] (rowId: " + rowId + ")");
+        return true;
+    }
+
+    /**
      * 原子删除一个 Buff（彻底物理销毁）
      */
     static async deleteBuffFromDatabase(rowId) {

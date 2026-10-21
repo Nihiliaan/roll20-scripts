@@ -288,6 +288,13 @@ export class BuffPanelStyles {
                 color: #ffffff !important;
             }
 
+            .r20-item-left {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                flex: 1;
+                overflow: hidden;
+            }
             .r20-item-name {
                 overflow: hidden;
                 text-overflow: ellipsis;
@@ -303,6 +310,101 @@ export class BuffPanelStyles {
                 white-space: nowrap;
                 margin-left: 6px;
             }
+            .r20-item-actions {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                margin-left: 6px;
+            }
+            .btn-edit-buff {
+                padding: 1px 4px !important;
+                font-size: 11px !important;
+                border-radius: 3px;
+                background: rgba(255, 255, 255, 0.08);
+            }
+            .btn-edit-buff:hover {
+                background: #1976d2 !important;
+                color: #ffffff !important;
+            }
+
+            /* 对话框模态层 */
+            .r20-dialog-mask {
+                position: fixed;
+                top: 0; left: 0; right: 0; bottom: 0;
+                background: rgba(0,0,0,0.65);
+                z-index: 1000001;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .r20-dialog-box {
+                background: #1e242c;
+                border: 1px solid #37474f;
+                border-radius: 8px;
+                width: 440px;
+                max-width: 90vw;
+                max-height: 85vh;
+                display: flex;
+                flex-direction: column;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+                color: #eceff1;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            }
+            .r20-dialog-header {
+                padding: 10px 14px;
+                font-size: 13px;
+                font-weight: 600;
+                border-bottom: 1px solid #323d47;
+                background: #242c37;
+                color: #64b5f6;
+            }
+            .r20-dialog-body {
+                padding: 12px 14px;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+            .r20-dialog-footer {
+                padding: 10px 14px;
+                border-top: 1px solid #323d47;
+                display: flex;
+                justify-content: flex-end;
+                gap: 8px;
+                background: #191f26;
+            }
+            .r20-input-text {
+                background: #121519;
+                border: 1px solid #37474f;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 8px;
+                font-size: 12px;
+                outline: none;
+            }
+            .r20-textarea-json {
+                background: #121519;
+                border: 1px solid #37474f;
+                border-radius: 4px;
+                color: #81c784;
+                font-family: monospace;
+                padding: 6px 8px;
+                font-size: 11px;
+                height: 120px;
+                outline: none;
+                resize: vertical;
+            }
+            .r20-btn-apply {
+                background: linear-gradient(135deg, #1976d2 0%, #0d47a1 100%);
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 5px 12px;
+                border-radius: 4px;
+                border: none;
+                cursor: pointer;
+            }
+            .r20-btn-apply:hover { filter: brightness(1.15); }
 
             /* 悬浮 Toast */
             .r20-toast {
