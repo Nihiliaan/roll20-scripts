@@ -243,21 +243,62 @@ export class Pf1eBuffManager {
     }
 
     /**
-     * 关停/解除指定角色身上的某个 Buff
+     * 切换/设置 Buff 的激活开关 (enable_toggle)
+     * @param {object} character Character Backbone 模型
+     * @param {string} rowId 行唯一标识
+     * @param {boolean|number} enable 是否激活
      */
-    static async removeBuff(character, rowId) {
+    static async toggleBuff(character, rowId, enable = false) {
         if (!character) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
-        const prefix = `repeating_buff2_${rowId}`;
-        const toggleAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_enable_toggle`);
-        const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+        const targetPrefix = `repeating_buff2_${rowId}`;
+        const lowerPrefix = `repeating_buff2_${rowId.toLowerCase()}`;
 
-        if (toggleAttr) toggleAttr.save({ current: 0 });
-        if (roundsAttr) roundsAttr.save({ current: 0 });
+        let toggleAttr = character.attribs.models.find(a => {
+            const n = a.get("name") || "";
+            return n === `${targetPrefix}_enable_toggle` || n.toLowerCase() === `${lowerPrefix}_enable_toggle`;
+        });
 
-        console.log(`[Pf1eBuffManager] 已关停 ${character.get("name")} 的 Buff (${rowId})`);
+        const val = enable ? 1 : 0;
+        if (!toggleAttr) {
+            toggleAttr = character.attribs.create({ name: `${targetPrefix}_enable_toggle`, current: val });
+        } else {
+            toggleAttr.save({ current: val });
+        }
+
+        // 若关停，同步将轮数重置清零，防止僵尸轮数残留
+        if (!enable) {
+            const roundsAttr = character.attribs.models.find(a => {
+                const n = a.get("name") || "";
+                return n === `${targetPrefix}_rounds` || n.toLowerCase() === `${lowerPrefix}_rounds`;
+            });
+            if (roundsAttr) roundsAttr.save({ current: 0 });
+        }
+
+        console.log(`[Pf1eBuffManager] 已${enable ? "启用" : "关停"} ${character.get("name")} 的 Buff (${rowId})`);
         return true;
+    }
+
+    /**
+     * 关停/解除指定角色身上的某个 Buff (基于 rowId)
+     */
+    static async removeBuff(character, rowId) {
+        return this.toggleBuff(character, rowId, false);
+    }
+
+    /**
+     * 关停/解除指定角色身上的同名 Buff (基于名称)
+     */
+    static async removeBuffByName(character, buffName) {
+        if (!character || !buffName) return false;
+        const buffs = await this.getAllBuffs(character);
+        const cleanTarget = buffName.trim().toLowerCase();
+        const target = buffs.find(b => (b.name || "").trim().toLowerCase() === cleanTarget && b.enabled);
+        if (target && target.rowId) {
+            return this.toggleBuff(character, target.rowId, false);
+        }
+        return false;
     }
 
     /**

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.9.3
+// @version      0.9.4
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.3...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.4...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -406,21 +406,62 @@ class Pf1eBuffManager {
     }
 
     /**
-     * 关停/解除指定角色身上的某个 Buff
+     * 切换/设置 Buff 的激活开关 (enable_toggle)
+     * @param {object} character Character Backbone 模型
+     * @param {string} rowId 行唯一标识
+     * @param {boolean|number} enable 是否激活
      */
-    static async removeBuff(character, rowId) {
+    static async toggleBuff(character, rowId, enable = false) {
         if (!character) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
-        const prefix = `repeating_buff2_${rowId}`;
-        const toggleAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_enable_toggle`);
-        const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+        const targetPrefix = `repeating_buff2_${rowId}`;
+        const lowerPrefix = `repeating_buff2_${rowId.toLowerCase()}`;
 
-        if (toggleAttr) toggleAttr.save({ current: 0 });
-        if (roundsAttr) roundsAttr.save({ current: 0 });
+        let toggleAttr = character.attribs.models.find(a => {
+            const n = a.get("name") || "";
+            return n === `${targetPrefix}_enable_toggle` || n.toLowerCase() === `${lowerPrefix}_enable_toggle`;
+        });
 
-        console.log(`[Pf1eBuffManager] 已关停 ${character.get("name")} 的 Buff (${rowId})`);
+        const val = enable ? 1 : 0;
+        if (!toggleAttr) {
+            toggleAttr = character.attribs.create({ name: `${targetPrefix}_enable_toggle`, current: val });
+        } else {
+            toggleAttr.save({ current: val });
+        }
+
+        // 若关停，同步将轮数重置清零，防止僵尸轮数残留
+        if (!enable) {
+            const roundsAttr = character.attribs.models.find(a => {
+                const n = a.get("name") || "";
+                return n === `${targetPrefix}_rounds` || n.toLowerCase() === `${lowerPrefix}_rounds`;
+            });
+            if (roundsAttr) roundsAttr.save({ current: 0 });
+        }
+
+        console.log(`[Pf1eBuffManager] 已${enable ? "启用" : "关停"} ${character.get("name")} 的 Buff (${rowId})`);
         return true;
+    }
+
+    /**
+     * 关停/解除指定角色身上的某个 Buff (基于 rowId)
+     */
+    static async removeBuff(character, rowId) {
+        return this.toggleBuff(character, rowId, false);
+    }
+
+    /**
+     * 关停/解除指定角色身上的同名 Buff (基于名称)
+     */
+    static async removeBuffByName(character, buffName) {
+        if (!character || !buffName) return false;
+        const buffs = await this.getAllBuffs(character);
+        const cleanTarget = buffName.trim().toLowerCase();
+        const target = buffs.find(b => (b.name || "").trim().toLowerCase() === cleanTarget && b.enabled);
+        if (target && target.rowId) {
+            return this.toggleBuff(character, target.rowId, false);
+        }
+        return false;
     }
 
     /**
@@ -1363,6 +1404,21 @@ class Pf1eBuffUI {
     }
 
     /**
+     * 安全触发状态工作台双向联动刷新
+     */
+    static async notifyPanelsRefresh() {
+        try {
+            if (typeof window !== "undefined" && window.Roll20Suite?.BuffFloatingPanel?.renderAllPanes) {
+                await window.Roll20Suite.BuffFloatingPanel.renderAllPanes();
+            } else if (typeof BuffFloatingPanel !== "undefined" && BuffFloatingPanel.renderAllPanes) {
+                await BuffFloatingPanel.renderAllPanes();
+            }
+        } catch (e) {
+            console.warn("[Pf1eBuffUI] 联动工作台刷新略过:", e);
+        }
+    }
+
+    /**
      * 单个 Buff 点击快捷编辑/关停弹窗
      */
     static showBuffEditModal(character, token, buff, row, tokenId) {
@@ -1391,27 +1447,41 @@ class Pf1eBuffUI {
 
         // 解除
         mask.querySelector(".btn-delete").addEventListener("click", async () => {
-            if (character && buff.rowId) {
-                await Pf1eBuffManager.toggleBuff(character, buff.rowId, false);
-            } else if (token) {
-                TokenBuffManager.removeBuff(token, buff.name);
+            try {
+                if (character) {
+                    if (buff.rowId) {
+                        await Pf1eBuffManager.toggleBuff(character, buff.rowId, false);
+                    } else {
+                        await Pf1eBuffManager.removeBuffByName(character, buff.name);
+                    }
+                } else if (token) {
+                    TokenBuffManager.removeBuff(token, buff.name);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 关停解除 Buff 异常:", err);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
+            await this.notifyPanelsRefresh();
         });
 
         // 保存轮数
         mask.querySelector(".btn-save").addEventListener("click", async () => {
-            const val = mask.querySelector(".input-rounds").value.trim();
-            const rounds = val === "" ? null : parseInt(val, 10);
+            try {
+                const val = mask.querySelector(".input-rounds").value.trim();
+                const rounds = val === "" ? null : parseInt(val, 10);
 
-            if (character && buff.rowId) {
-                await Pf1eBuffManager.setBuffRounds(character, buff.rowId, rounds);
-            } else if (token) {
-                TokenBuffManager.applyOrRefreshBuff(token, buff.name, rounds);
+                if (character && buff.rowId) {
+                    await Pf1eBuffManager.setBuffRounds(character, buff.rowId, rounds);
+                } else if (token) {
+                    TokenBuffManager.applyOrRefreshBuff(token, buff.name, rounds);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 保存 Buff 轮数异常:", err);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
+            await this.notifyPanelsRefresh();
         });
     }
 
@@ -1449,14 +1519,19 @@ class Pf1eBuffUI {
             const val = mask.querySelector(".input-rounds").value.trim();
             const rounds = val === "" ? null : parseInt(val, 10);
 
-            if (character) {
-                await Pf1eBuffManager.applyOrRefreshBuff(character, name, rounds);
-            } else if (token) {
-                TokenBuffManager.applyOrRefreshBuff(token, name, rounds);
+            try {
+                if (character) {
+                    await Pf1eBuffManager.applyOrRefreshBuff(character, name, rounds);
+                } else if (token) {
+                    TokenBuffManager.applyOrRefreshBuff(token, name, rounds);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 添加 Buff 异常:", err);
             }
 
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
+            await this.notifyPanelsRefresh();
         });
     }
 }
@@ -2151,6 +2226,7 @@ class BuffFloatingPanel {
         this.updatePinState();
 
         this.restorePanelPosition();
+        this.updateLayoutDirection();
 
         BuffPanelDragDrop.initWindowDrag(
             this.panelEl,
@@ -2162,8 +2238,11 @@ class BuffFloatingPanel {
         this.initSelectionListeners();
         this.initDatabaseCharacterWatcher();
 
+        window.addEventListener("resize", () => this.updateLayoutDirection());
+
         // 初始渲染两栏
         await this.renderAllPanes();
+        this.updateLayoutDirection();
 
         // 绑定底部放置兜底（移动至根目录）
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -3030,7 +3109,8 @@ class BuffFloatingPanel {
         const headerTop = rect.top;
         const windowHeight = window.innerHeight;
 
-        if (headerTop > windowHeight / 2 && (windowHeight - headerTop < 380)) {
+        // 只要标题栏处于屏幕下半区，为了防止内容向下溢出视口，始终向上展开
+        if (headerTop > windowHeight / 2) {
             this.panelEl.classList.remove("direction-down");
             this.panelEl.classList.add("direction-up");
         } else {
@@ -3040,7 +3120,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 恢复持久化位置
+     * 恢复持久化位置并立即更新生长朝向
      */
     static restorePanelPosition() {
         const saved = localStorage.getItem(this.POS_KEY);
@@ -3057,6 +3137,7 @@ class BuffFloatingPanel {
 
         this.panelEl.style.left = `${left}px`;
         this.panelEl.style.top = `${top}px`;
+        this.updateLayoutDirection();
     }
 
     static savePosition() {
@@ -3141,7 +3222,18 @@ class BuffFloatingPanel {
                 console.error("[Roll20Suite] 先攻条徽章挂载失败:", uiErr);
             }
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.3 全部就绪！");
+            // 4. 挂载命名空间供外部或开发者排查联动
+            window.Roll20Suite = {
+                Roll20Bridge,
+                Pf1eBuffManager,
+                SuiteConfigStore,
+                TurnOrderObserver,
+                TokenBuffManager,
+                Pf1eBuffUI,
+                BuffFloatingPanel
+            };
+
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.4 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

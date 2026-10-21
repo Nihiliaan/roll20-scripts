@@ -215,6 +215,21 @@ export class Pf1eBuffUI {
     }
 
     /**
+     * 安全触发状态工作台双向联动刷新
+     */
+    static async notifyPanelsRefresh() {
+        try {
+            if (typeof window !== "undefined" && window.Roll20Suite?.BuffFloatingPanel?.renderAllPanes) {
+                await window.Roll20Suite.BuffFloatingPanel.renderAllPanes();
+            } else if (typeof BuffFloatingPanel !== "undefined" && BuffFloatingPanel.renderAllPanes) {
+                await BuffFloatingPanel.renderAllPanes();
+            }
+        } catch (e) {
+            console.warn("[Pf1eBuffUI] 联动工作台刷新略过:", e);
+        }
+    }
+
+    /**
      * 单个 Buff 点击快捷编辑/关停弹窗
      */
     static showBuffEditModal(character, token, buff, row, tokenId) {
@@ -243,27 +258,41 @@ export class Pf1eBuffUI {
 
         // 解除
         mask.querySelector(".btn-delete").addEventListener("click", async () => {
-            if (character && buff.rowId) {
-                await Pf1eBuffManager.toggleBuff(character, buff.rowId, false);
-            } else if (token) {
-                TokenBuffManager.removeBuff(token, buff.name);
+            try {
+                if (character) {
+                    if (buff.rowId) {
+                        await Pf1eBuffManager.toggleBuff(character, buff.rowId, false);
+                    } else {
+                        await Pf1eBuffManager.removeBuffByName(character, buff.name);
+                    }
+                } else if (token) {
+                    TokenBuffManager.removeBuff(token, buff.name);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 关停解除 Buff 异常:", err);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
+            await this.notifyPanelsRefresh();
         });
 
         // 保存轮数
         mask.querySelector(".btn-save").addEventListener("click", async () => {
-            const val = mask.querySelector(".input-rounds").value.trim();
-            const rounds = val === "" ? null : parseInt(val, 10);
+            try {
+                const val = mask.querySelector(".input-rounds").value.trim();
+                const rounds = val === "" ? null : parseInt(val, 10);
 
-            if (character && buff.rowId) {
-                await Pf1eBuffManager.setBuffRounds(character, buff.rowId, rounds);
-            } else if (token) {
-                TokenBuffManager.applyOrRefreshBuff(token, buff.name, rounds);
+                if (character && buff.rowId) {
+                    await Pf1eBuffManager.setBuffRounds(character, buff.rowId, rounds);
+                } else if (token) {
+                    TokenBuffManager.applyOrRefreshBuff(token, buff.name, rounds);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 保存 Buff 轮数异常:", err);
             }
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
+            await this.notifyPanelsRefresh();
         });
     }
 
@@ -301,14 +330,19 @@ export class Pf1eBuffUI {
             const val = mask.querySelector(".input-rounds").value.trim();
             const rounds = val === "" ? null : parseInt(val, 10);
 
-            if (character) {
-                await Pf1eBuffManager.applyOrRefreshBuff(character, name, rounds);
-            } else if (token) {
-                TokenBuffManager.applyOrRefreshBuff(token, name, rounds);
+            try {
+                if (character) {
+                    await Pf1eBuffManager.applyOrRefreshBuff(character, name, rounds);
+                } else if (token) {
+                    TokenBuffManager.applyOrRefreshBuff(token, name, rounds);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 添加 Buff 异常:", err);
             }
 
             mask.remove();
             await this.refreshRowBadge(row, tokenId);
+            await this.notifyPanelsRefresh();
         });
     }
 }

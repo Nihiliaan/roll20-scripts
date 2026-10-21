@@ -44,6 +44,7 @@ export class BuffFloatingPanel {
         this.updatePinState();
 
         this.restorePanelPosition();
+        this.updateLayoutDirection();
 
         BuffPanelDragDrop.initWindowDrag(
             this.panelEl,
@@ -55,8 +56,11 @@ export class BuffFloatingPanel {
         this.initSelectionListeners();
         this.initDatabaseCharacterWatcher();
 
+        window.addEventListener("resize", () => this.updateLayoutDirection());
+
         // 初始渲染两栏
         await this.renderAllPanes();
+        this.updateLayoutDirection();
 
         // 绑定底部放置兜底（移动至根目录）
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -923,7 +927,8 @@ export class BuffFloatingPanel {
         const headerTop = rect.top;
         const windowHeight = window.innerHeight;
 
-        if (headerTop > windowHeight / 2 && (windowHeight - headerTop < 380)) {
+        // 只要标题栏处于屏幕下半区，为了防止内容向下溢出视口，始终向上展开
+        if (headerTop > windowHeight / 2) {
             this.panelEl.classList.remove("direction-down");
             this.panelEl.classList.add("direction-up");
         } else {
@@ -933,7 +938,7 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 恢复持久化位置
+     * 恢复持久化位置并立即更新生长朝向
      */
     static restorePanelPosition() {
         const saved = localStorage.getItem(this.POS_KEY);
@@ -950,6 +955,7 @@ export class BuffFloatingPanel {
 
         this.panelEl.style.left = `${left}px`;
         this.panelEl.style.top = `${top}px`;
+        this.updateLayoutDirection();
     }
 
     static savePosition() {
