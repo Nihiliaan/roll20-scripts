@@ -88,8 +88,18 @@ export class BuffPanelDragDrop {
         el.addEventListener("dragover", (e) => {
             e.preventDefault();
             e.stopPropagation();
+
             if (node.type === "folder") {
-                el.classList.add("r20-drag-into");
+                const rect = el.getBoundingClientRect();
+                const offsetX = e.clientX - rect.left;
+                // 文件夹左侧 36px 范围内表示作为同级插入，右侧表示放入文件夹
+                if (offsetX < 36) {
+                    el.classList.remove("r20-drag-into");
+                    el.classList.add("r20-drag-over");
+                } else {
+                    el.classList.remove("r20-drag-over");
+                    el.classList.add("r20-drag-into");
+                }
             } else {
                 el.classList.add("r20-drag-over");
             }
@@ -103,6 +113,11 @@ export class BuffPanelDragDrop {
         el.addEventListener("drop", async (e) => {
             e.preventDefault();
             e.stopPropagation();
+
+            const rect = el.getBoundingClientRect();
+            const offsetX = e.clientX - rect.left;
+            const isPeerDrop = node.type === "folder" ? (offsetX < 36) : true;
+
             el.classList.remove("r20-drag-over", "r20-drag-into");
 
             const dragged = getDraggedContext();
@@ -111,7 +126,7 @@ export class BuffPanelDragDrop {
 
             // 1. 跨栏拖拽：单位栏 -> 模板库 (复制另存为新模板)
             if (fromPane === "unit" && sourcePane === "template") {
-                if (onCrossCopy) await onCrossCopy(draggedNode, node, parentList, index);
+                if (onCrossCopy) await onCrossCopy(draggedNode, node, parentList, index, isPeerDrop);
                 setDraggedContext(null);
                 return;
             }
@@ -119,44 +134,42 @@ export class BuffPanelDragDrop {
             // 2. 栏内排序：模板库 -> 模板库
             if (fromPane === "template" && sourcePane === "template" && sourceList) {
                 if (draggedNode.id === node.id) return;
-                if (onReorder) await onReorder(draggedNode, sourceList, sourceIdx, node, parentList, index);
+                if (onReorder) await onReorder(draggedNode, sourceList, sourceIdx, node, parentList, index, isPeerDrop);
                 setDraggedContext(null);
             }
         });
     }
 
     /**
-     * 模板库根目录放置区
+     * 为模板树容器挂载兜底空白区放置监听（拖至末尾空白即为根目录）
      */
-    static setupRootDropZone({ el, templates, getDraggedContext, setDraggedContext, onCrossCopyRoot, onReorderRoot }) {
+    static setupTreeContainerDrop({ el, getDraggedContext, setDraggedContext, onCrossCopyRoot, onReorderRoot }) {
         el.addEventListener("dragover", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            el.classList.add("r20-drag-into");
+            if (e.target === el || e.target.classList.contains("r20-template-tree")) {
+                e.preventDefault();
+                el.classList.add("r20-drag-container-over");
+            }
         });
 
         el.addEventListener("dragleave", (e) => {
-            e.stopPropagation();
-            el.classList.remove("r20-drag-into");
+            if (e.target === el) {
+                el.classList.remove("r20-drag-container-over");
+            }
         });
 
         el.addEventListener("drop", async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            el.classList.remove("r20-drag-into");
+            if (e.target === el || e.target.classList.contains("r20-template-tree")) {
+                e.preventDefault();
+                el.classList.remove("r20-drag-container-over");
+                const dragged = getDraggedContext();
+                if (!dragged) return;
+                const { node: draggedNode, parentList: sourceList, index: sourceIdx, sourcePane: fromPane } = dragged;
 
-            const dragged = getDraggedContext();
-            if (!dragged) return;
-            const { node: draggedNode, parentList: sourceList, index: sourceIdx, sourcePane: fromPane } = dragged;
-
-            if (fromPane === "unit") {
-                if (onCrossCopyRoot) await onCrossCopyRoot(draggedNode);
-                setDraggedContext(null);
-                return;
-            }
-
-            if (fromPane === "template" && sourceList) {
-                if (onReorderRoot) await onReorderRoot(draggedNode, sourceList, sourceIdx);
+                if (fromPane === "unit") {
+                    if (onCrossCopyRoot) await onCrossCopyRoot(draggedNode);
+                } else if (fromPane === "template" && sourceList) {
+                    if (onReorderRoot) await onReorderRoot(draggedNode, sourceList, sourceIdx);
+                }
                 setDraggedContext(null);
             }
         });

@@ -211,10 +211,10 @@ export class SuiteConfigStore {
 
         await syncNodesToNative(templates);
 
-        // 删除在原生卡上已不存在于模板树中的 Buff
+        // 删除在原生卡上已不存在于模板树中的 Buff（物理彻底销毁）
         for (const [oldRowId] of existingRowMap) {
             if (!activeRowIdsInTemplates.has(oldRowId)) {
-                await Pf1eBuffManager.removeBuff(dbChar, oldRowId);
+                await Pf1eBuffManager.deleteBuffRowPermanently(dbChar, oldRowId);
             }
         }
 

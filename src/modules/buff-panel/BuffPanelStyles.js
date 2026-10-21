@@ -170,23 +170,11 @@ export class BuffPanelStyles {
                 font-size: 11px;
             }
 
-            /* 根目录放置区 */
-            .r20-drop-zone-root {
-                padding: 4px;
-                border: 1px dashed #37474f;
+            /* 容器拖拽放置态 */
+            .r20-template-tree.r20-drag-container-over {
+                background: rgba(33, 150, 243, 0.08) !important;
+                border: 1px dashed #64b5f6 !important;
                 border-radius: 4px;
-                text-align: center;
-                font-size: 10px;
-                color: #78909c;
-                margin: 2px 0;
-                display: none;
-                transition: background 0.2s, border-color 0.2s;
-            }
-            .r20-drop-zone-root.active-zone { display: block; }
-            .r20-drop-zone-root.r20-drag-into {
-                background: rgba(33, 150, 243, 0.2);
-                border-color: #64b5f6;
-                color: #ffffff;
             }
 
             /* 树状文件夹与项目 */

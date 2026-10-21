@@ -261,6 +261,30 @@ export class Pf1eBuffManager {
     }
 
     /**
+     * 物理删除角色卡上的原生 repeating_buff2 一整行属性（彻底销毁，杜绝死灰复燃）
+     * @param {object} character Character Backbone 模型
+     * @param {string} rowId 行唯一标识
+     */
+    static async deleteBuffRowPermanently(character, rowId) {
+        if (!character || !character.attribs) return false;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+
+        const prefix = `repeating_buff2_${rowId}`;
+        const prefixWithUnderscore = `${prefix}_`;
+        const toDestroy = character.attribs.models.filter(a => {
+            const n = a.get("name") || "";
+            return n === prefix || n.startsWith(prefixWithUnderscore);
+        });
+
+        if (toDestroy.length === 0) return false;
+
+        // 彻底物理销毁所有匹配的 Attribute 模型
+        toDestroy.forEach(attr => attr.destroy());
+        console.log(`[Pf1eBuffManager] 已物理彻底销毁 ${character.get("name")} 的 Buff [${rowId}] 共 ${toDestroy.length} 项原生属性`);
+        return true;
+    }
+
+    /**
      * 为指定的 Buff 行设置/更新剩余轮数
      */
     static async setBuffRounds(character, rowId, rounds) {

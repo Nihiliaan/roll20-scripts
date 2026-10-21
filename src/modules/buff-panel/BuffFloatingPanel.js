@@ -30,6 +30,7 @@ export class BuffFloatingPanel {
 
     static templates = [];
     static editSelectedIds = new Set();
+    static isInternalSaving = false;
     static _draggedData = null;
     static _leaveTimer = null;
     static _lastSelectedIdsStr = "";
@@ -288,10 +289,12 @@ export class BuffFloatingPanel {
             char._r20SuiteWatcherBound = true;
 
             char.attribs.on("add change remove reset", () => {
+                if (this.isInternalSaving) return;
                 if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
                 this._dbSyncTimer = setTimeout(async () => {
+                    if (this.isInternalSaving) return;
                     await this.refreshTemplates(false);
-                }, 120);
+                }, 200);
             });
             console.log("[BuffFloatingPanel] 数据库角色卡属性监听已成功挂载");
         };
@@ -487,13 +490,16 @@ export class BuffFloatingPanel {
         const selectedTokens = this.getSelectedTokens();
         const { activeStats } = await this.getBuffStatsForSelected(selectedTokens);
 
-        // 根目录放置区（编辑模式展示）
-        const rootDropZone = document.createElement("div");
-        rootDropZone.className = `r20-drop-zone-root ${this.isEditMode ? "active-zone" : ""}`;
-        rootDropZone.textContent = "📥 拖拽到此处放置于根目录";
-        BuffPanelDragDrop.setupRootDropZone({
-            el: rootDropZone,
-            templates: this.templates,
+        // 更新批量删除按钮状态与选中数量
+        const batchDeleteBtn = this.panelEl.querySelector(".btn-batch-delete");
+        if (batchDeleteBtn) {
+            const count = this.editSelectedIds.size;
+            batchDeleteBtn.textContent = count > 0 ? `🗑️ 删除选中 (${count})` : "🗑️ 批量删除";
+        }
+
+        // 挂载整个树容器空白区拖拽监听（拖到空白处放置于根目录，无需独立区域）
+        BuffPanelDragDrop.setupTreeContainerDrop({
+            el: treeEl,
             getDraggedContext: () => this._draggedData,
             setDraggedContext: (ctx) => { this._draggedData = ctx; },
             onCrossCopyRoot: async (draggedNode) => {
@@ -501,13 +507,13 @@ export class BuffFloatingPanel {
                     id: "b_" + Date.now(),
                     type: "buff",
                     name: draggedNode.name,
-                    rounds: draggedNode.rounds,
+                    rounds: draggedNode.rounds !== undefined ? draggedNode.rounds : null,
                     extraAttrs: draggedNode.extraAttrs ? JSON.parse(JSON.stringify(draggedNode.extraAttrs)) : null
                 };
                 this.templates.push(copyNode);
                 await this.saveTemplates(true);
                 await this.renderAllPanes();
-                this.showToast(`📋 已复制 [${copyNode.name}] 到模板库`, "success");
+                this.showToast(`📋 已将 [${copyNode.name}] 复制到根目录`, "success");
             },
             onReorderRoot: async (draggedNode, sourceList, sourceIdx) => {
                 sourceList.splice(sourceIdx, 1);
@@ -516,7 +522,6 @@ export class BuffFloatingPanel {
                 await this.renderTemplatePane();
             }
         });
-        treeEl.appendChild(rootDropZone);
 
         // 如果没有模板，呈现说明
         if (this.templates.length === 0) {
@@ -565,7 +570,6 @@ export class BuffFloatingPanel {
                     <div class="r20-item-actions">
                         ${this.isEditMode ? `
                             <button class="r20-btn-icon btn-folder-rename" title="重命名">✏️</button>
-                            <button class="r20-btn-icon danger btn-node-delete" title="删除文件夹">🗑️</button>
                         ` : ""}
                     </div>
                 `;
@@ -578,26 +582,35 @@ export class BuffFloatingPanel {
                     sourcePane: "template",
                     getDraggedContext: () => this._draggedData,
                     setDraggedContext: (ctx) => { this._draggedData = ctx; },
-                    onCrossCopy: async (draggedNode, targetNode) => {
+                    onCrossCopy: async (draggedNode, targetNode, parentList, targetIdx, isPeerDrop) => {
                         const copyNode = {
                             id: "b_" + Date.now(),
                             type: "buff",
                             name: draggedNode.name,
-                            rounds: draggedNode.rounds,
+                            rounds: draggedNode.rounds !== undefined ? draggedNode.rounds : null,
                             extraAttrs: draggedNode.extraAttrs ? JSON.parse(JSON.stringify(draggedNode.extraAttrs)) : null
                         };
-                        targetNode.children = targetNode.children || [];
-                        targetNode.children.push(copyNode);
-                        targetNode.collapsed = false;
+                        if (isPeerDrop) {
+                            parentList.splice(targetIdx, 0, copyNode);
+                            this.showToast(`📋 已将 [${copyNode.name}] 作为同级项复制`, "success");
+                        } else {
+                            targetNode.children = targetNode.children || [];
+                            targetNode.children.push(copyNode);
+                            targetNode.collapsed = false;
+                            this.showToast(`📋 已将 [${copyNode.name}] 存入文件夹 [${targetNode.name}]`, "success");
+                        }
                         await this.saveTemplates(true);
                         await this.renderAllPanes();
-                        this.showToast(`📋 已将 [${copyNode.name}] 存入文件夹 [${targetNode.name}]`, "success");
                     },
-                    onReorder: async (draggedNode, sourceList, sourceIdx, targetNode) => {
+                    onReorder: async (draggedNode, sourceList, sourceIdx, targetNode, parentList, targetIdx, isPeerDrop) => {
                         sourceList.splice(sourceIdx, 1);
-                        targetNode.children = targetNode.children || [];
-                        targetNode.children.push(draggedNode);
-                        targetNode.collapsed = false;
+                        if (isPeerDrop) {
+                            parentList.splice(targetIdx, 0, draggedNode);
+                        } else {
+                            targetNode.children = targetNode.children || [];
+                            targetNode.children.push(draggedNode);
+                            targetNode.collapsed = false;
+                        }
                         await this.saveTemplates(true);
                         await this.renderTemplatePane();
                     }
@@ -635,15 +648,6 @@ export class BuffFloatingPanel {
                             node.name = newName.trim();
                             await this.saveTemplates(true);
                             this.renderTemplatePane();
-                        }
-                    });
-
-                    header.querySelector(".btn-node-delete")?.addEventListener("click", async (e) => {
-                        e.stopPropagation();
-                        if (confirm(`确定要删除文件夹 [${node.name}] 及其内部所有内容吗？`)) {
-                            nodes.splice(idx, 1);
-                            await this.saveTemplates(true);
-                            await this.renderTemplatePane();
                         }
                     });
                 }
@@ -686,7 +690,6 @@ export class BuffFloatingPanel {
                         ${this.isEditMode ? `
                             <button class="r20-btn-icon btn-edit-buff" title="编辑细目">✏️</button>
                             <button class="r20-btn-icon btn-clone-buff" title="复制副本">📋</button>
-                            <button class="r20-btn-icon danger btn-node-delete" title="删除">🗑️</button>
                         ` : ""}
                     </div>
                 `;
@@ -747,14 +750,6 @@ export class BuffFloatingPanel {
                     itemEl.querySelector(".btn-clone-buff")?.addEventListener("click", async (e) => {
                         e.stopPropagation();
                         await this.cloneBuff(node, nodes, idx);
-                    });
-                    itemEl.querySelector(".btn-node-delete")?.addEventListener("click", async (e) => {
-                        e.stopPropagation();
-                        if (confirm(`确定要删除 Buff [${node.name}] 吗？`)) {
-                            nodes.splice(idx, 1);
-                            await this.saveTemplates(true);
-                            await this.renderTemplatePane();
-                        }
                     });
                 }
 
@@ -892,7 +887,7 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 批量删除选中的项目
+     * 批量删除选中的项目（从原生角色卡彻底物理销毁）
      */
     static async deleteSelectedBuffs() {
         if (this.editSelectedIds.size === 0) {
@@ -900,23 +895,45 @@ export class BuffFloatingPanel {
             return;
         }
 
-        if (!confirm(`确定要批量删除选中的 ${this.editSelectedIds.size} 个项目吗？`)) return;
+        const count = this.editSelectedIds.size;
+        if (!confirm(`确定要彻底删除选中的 ${count} 个项目吗？\n（此操作将从云端角色卡彻底物理销毁，绝不复活）`)) return;
+
+        // 收集所有要被删除的 Buff 的 rowId / id
+        const deletedRowIds = new Set();
+        const collectBuffRowIds = (item) => {
+            if (item.type === "buff") {
+                deletedRowIds.add(item.rowId || item.id);
+            } else if (item.type === "folder" && item.children) {
+                item.children.forEach(collectBuffRowIds);
+            }
+        };
 
         const removeRecursive = (list) => {
             for (let i = list.length - 1; i >= 0; i--) {
-                if (this.editSelectedIds.has(list[i].id)) {
+                const item = list[i];
+                if (this.editSelectedIds.has(item.id)) {
+                    collectBuffRowIds(item);
                     list.splice(i, 1);
-                } else if (list[i].children) {
-                    removeRecursive(list[i].children);
+                } else if (item.children) {
+                    removeRecursive(item.children);
                 }
             }
         };
 
         removeRecursive(this.templates);
         this.editSelectedIds.clear();
+
+        // 立即物理销毁原生角色卡上的数据
+        const dbChar = SuiteConfigStore.findDatabaseCharacter();
+        if (dbChar) {
+            for (const rowId of deletedRowIds) {
+                await Pf1eBuffManager.deleteBuffRowPermanently(dbChar, rowId);
+            }
+        }
+
         await this.saveTemplates(true);
         await this.renderAllPanes();
-        this.showToast("🗑️ 批量删除成功", "success");
+        this.showToast(`🗑️ 已彻底删除 ${count} 个项目`, "success");
     }
 
     /**
@@ -1108,10 +1125,17 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 保存模板
+     * 保存模板（带有内部互斥锁，防止删除与保存期间触发回环同步）
      */
     static async saveTemplates(promptIfMissing = false) {
-        return await SuiteConfigStore.saveTemplates(this.templates, promptIfMissing);
+        this.isInternalSaving = true;
+        try {
+            return await SuiteConfigStore.saveTemplates(this.templates, promptIfMissing);
+        } finally {
+            setTimeout(() => {
+                this.isInternalSaving = false;
+            }, 300);
+        }
     }
 
     static collectFolderBuffNames(folder) {
