@@ -271,11 +271,20 @@ export class BuffPanelStyles {
                 border-color: #ffd54f !important;
                 color: #fff8e1 !important;
             }
-            /* 编辑多选高亮态（整行精致高亮，彻底取代生硬复选框） */
-            .r20-tree-item.selected {
-                background: rgba(21, 101, 192, 0.45) !important;
-                border-color: #64b5f6 !important;
-                box-shadow: 0 0 6px rgba(100, 181, 246, 0.4);
+            /* 编辑模式下彻底清除日常 Token 激活态高亮，保证编辑视图纯净无干扰 */
+            #r20-buff-panel.is-editing .r20-tree-item.full-active,
+            #r20-buff-panel.is-editing .r20-tree-item.partial-active {
+                background: #1b2128 !important;
+                border-color: transparent !important;
+                color: #eceff1 !important;
+                box-shadow: none !important;
+            }
+            /* 编辑多选高亮态（在编辑模式下选中的待删/操作条目：醒目的珊瑚红发光边框，与常规激活态截然区分） */
+            .r20-tree-item.selected,
+            #r20-buff-panel.is-editing .r20-tree-item.selected {
+                background: rgba(239, 83, 80, 0.25) !important;
+                border-color: #ef5350 !important;
+                box-shadow: 0 0 6px rgba(239, 83, 80, 0.4) !important;
                 color: #ffffff !important;
             }
 

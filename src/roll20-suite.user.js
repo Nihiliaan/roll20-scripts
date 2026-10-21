@@ -1723,11 +1723,20 @@ class BuffPanelStyles {
                 border-color: #ffd54f !important;
                 color: #fff8e1 !important;
             }
-            /* 编辑多选高亮态（整行精致高亮，彻底取代生硬复选框） */
-            .r20-tree-item.selected {
-                background: rgba(21, 101, 192, 0.45) !important;
-                border-color: #64b5f6 !important;
-                box-shadow: 0 0 6px rgba(100, 181, 246, 0.4);
+            /* 编辑模式下彻底清除日常 Token 激活态高亮，保证编辑视图纯净无干扰 */
+            #r20-buff-panel.is-editing .r20-tree-item.full-active,
+            #r20-buff-panel.is-editing .r20-tree-item.partial-active {
+                background: #1b2128 !important;
+                border-color: transparent !important;
+                color: #eceff1 !important;
+                box-shadow: none !important;
+            }
+            /* 编辑多选高亮态（在编辑模式下选中的待删/操作条目：醒目的珊瑚红发光边框，与常规激活态截然区分） */
+            .r20-tree-item.selected,
+            #r20-buff-panel.is-editing .r20-tree-item.selected {
+                background: rgba(239, 83, 80, 0.25) !important;
+                border-color: #ef5350 !important;
+                box-shadow: 0 0 6px rgba(239, 83, 80, 0.4) !important;
                 color: #ffffff !important;
             }
 
@@ -2132,7 +2141,7 @@ class BuffFloatingPanel {
     /**
      * 切换编辑模式
      */
-    static toggleEditMode() {
+    static async toggleEditMode() {
         this.isEditMode = !this.isEditMode;
         this.panelEl.classList.toggle("is-editing", this.isEditMode);
         const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
@@ -2141,12 +2150,12 @@ class BuffFloatingPanel {
             editBtn.textContent = this.isEditMode ? "🔒 完成" : "✏️ 编辑";
         }
 
-        // 退出编辑模式时清空多选
-        if (!this.isEditMode) {
-            this.selectedNodeIds.clear();
-            this.updateDeleteButtonText();
-            this.panelEl.querySelectorAll(".r20-tree-item.selected").forEach(el => el.classList.remove("selected"));
-        }
+        // 无论是进入还是退出编辑模式，始终清空多选状态与高亮
+        this.selectedNodeIds.clear();
+        this.updateDeleteButtonText();
+
+        // 重新渲染模板栏：编辑模式下彻底清除 Token 激活态高亮，保证编辑视图纯净
+        await this.renderTemplatePane();
 
         this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（点击条目高亮多选，可批量删除/新建）" : "🔒 已退出编辑模式", "info");
     }
@@ -2405,9 +2414,10 @@ class BuffFloatingPanel {
             } else {
                 const rowId = node.rowId || node.id;
                 const stat = activeStats.get(node.name);
-                const isFull = selectedTokens.length > 0 && stat && stat.count === stat.total;
-                const isPartial = selectedTokens.length > 0 && stat && stat.count > 0 && !isFull;
-                const isSelected = this.selectedNodeIds.has(rowId);
+                // 编辑模式下不渲染 Token 激活态高亮，确保编辑视图纯净无干扰
+                const isFull = !this.isEditMode && selectedTokens.length > 0 && stat && stat.count === stat.total;
+                const isPartial = !this.isEditMode && selectedTokens.length > 0 && stat && stat.count > 0 && !isFull;
+                const isSelected = this.isEditMode && this.selectedNodeIds.has(rowId);
 
                 const item = document.createElement("div");
                 item.className = "r20-tree-item" + 

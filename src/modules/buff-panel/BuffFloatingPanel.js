@@ -150,7 +150,7 @@ export class BuffFloatingPanel {
     /**
      * 切换编辑模式
      */
-    static toggleEditMode() {
+    static async toggleEditMode() {
         this.isEditMode = !this.isEditMode;
         this.panelEl.classList.toggle("is-editing", this.isEditMode);
         const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
@@ -159,12 +159,12 @@ export class BuffFloatingPanel {
             editBtn.textContent = this.isEditMode ? "🔒 完成" : "✏️ 编辑";
         }
 
-        // 退出编辑模式时清空多选
-        if (!this.isEditMode) {
-            this.selectedNodeIds.clear();
-            this.updateDeleteButtonText();
-            this.panelEl.querySelectorAll(".r20-tree-item.selected").forEach(el => el.classList.remove("selected"));
-        }
+        // 无论是进入还是退出编辑模式，始终清空多选状态与高亮
+        this.selectedNodeIds.clear();
+        this.updateDeleteButtonText();
+
+        // 重新渲染模板栏：编辑模式下彻底清除 Token 激活态高亮，保证编辑视图纯净
+        await this.renderTemplatePane();
 
         this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（点击条目高亮多选，可批量删除/新建）" : "🔒 已退出编辑模式", "info");
     }
@@ -423,9 +423,10 @@ export class BuffFloatingPanel {
             } else {
                 const rowId = node.rowId || node.id;
                 const stat = activeStats.get(node.name);
-                const isFull = selectedTokens.length > 0 && stat && stat.count === stat.total;
-                const isPartial = selectedTokens.length > 0 && stat && stat.count > 0 && !isFull;
-                const isSelected = this.selectedNodeIds.has(rowId);
+                // 编辑模式下不渲染 Token 激活态高亮，确保编辑视图纯净无干扰
+                const isFull = !this.isEditMode && selectedTokens.length > 0 && stat && stat.count === stat.total;
+                const isPartial = !this.isEditMode && selectedTokens.length > 0 && stat && stat.count > 0 && !isFull;
+                const isSelected = this.isEditMode && this.selectedNodeIds.has(rowId);
 
                 const item = document.createElement("div");
                 item.className = "r20-tree-item" + 
