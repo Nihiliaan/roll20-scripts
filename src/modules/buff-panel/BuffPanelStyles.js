@@ -116,6 +116,24 @@ export class BuffPanelStyles {
                 border-radius: 7px 7px 0 0;
             }
 
+            /* 向上展开时：内容与双栏顺序反转，使选中单位栏始终处于离标题较远的一侧（顶部），模板库与工具栏靠近标题（底部） */
+            #r20-buff-panel.direction-up .r20-panel-content {
+                flex-direction: column-reverse;
+            }
+            #r20-buff-panel.direction-up .r20-panel-toolbar {
+                border-top: 1px solid #2d3748;
+                border-bottom: none;
+            }
+            #r20-buff-panel.direction-up .r20-panel-panes {
+                flex-direction: column-reverse;
+            }
+            #r20-buff-panel.direction-up .r20-pane.r20-unit-pane {
+                border-bottom: 1px solid #2d3748;
+            }
+            #r20-buff-panel.direction-up .r20-pane.r20-template-pane {
+                border-bottom: none;
+            }
+
             .r20-panel-content {
                 display: flex;
                 flex-direction: column;

@@ -223,15 +223,25 @@ export class BuffFloatingPanel {
             if (!item) return;
 
             const charId = item.dataset.charId;
+            const buffId = item.dataset.buffId;
             const buffName = item.dataset.name;
+            const tokenId = item.dataset.tokenId;
 
-            if (charId && buffName) {
+            if (charId && buffId) {
                 const char = window.Campaign?.characters?.get(charId);
                 if (char) {
-                    await TokenBuffManager.removeBuff(char, buffName);
+                    await Pf1eBuffManager.removeBuff(char, buffId);
                     await Pf1eBuffUI.refreshAllBadges();
                     await this.renderAllPanes();
                     this.showToast("已从 " + char.get("name") + " 移除 " + buffName, "info");
+                }
+            } else if (tokenId && buffName) {
+                const token = Roll20Bridge.getTokenGraphic(tokenId);
+                if (token) {
+                    TokenBuffManager.removeBuff(token, buffName);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    await this.renderAllPanes();
+                    this.showToast("已从 Token 移除 " + buffName, "info");
                 }
             }
         });
@@ -487,15 +497,15 @@ export class BuffFloatingPanel {
             content.className = "r20-group-content";
 
             if (char) {
-                const buffs = await Pf1eBuffManager.getAllBuffs(char);
+                const buffs = await Pf1eBuffManager.getActiveBuffs(char);
                 if (buffs.length === 0) {
-                    content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(暂无Buff)</div>';
+                    content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(暂无激活Buff)</div>';
                 } else {
                     buffs.forEach(b => {
                         const item = document.createElement("div");
                         item.className = "r20-tree-item";
                         item.dataset.charId = char.id;
-                        item.dataset.buffId = b.id;
+                        item.dataset.buffId = b.rowId;
                         item.dataset.name = b.name;
                         item.title = "点击从单位身上移除";
                         item.draggable = true;
@@ -527,9 +537,79 @@ export class BuffFloatingPanel {
                         });
                     });
                 }
+            } else if (tokenItem.token) {
+                const buffs = TokenBuffManager.getTokenBuffs(tokenItem.token);
+                if (buffs.length === 0) {
+                    content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(暂无激活Buff)</div>';
+                } else {
+                    buffs.forEach(b => {
+                        const item = document.createElement("div");
+                        item.className = "r20-tree-item";
+                        item.dataset.tokenId = tokenItem.token.id;
+                        item.dataset.name = b.name;
+                        item.title = "点击从单位身上移除";
+                        item.draggable = true;
+
+                        const roundsText = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? (b.rounds + "轮") : "永久";
+
+                        item.innerHTML = `
+                            <span class="r20-item-name">${b.name}</span>
+                            <span class="r20-item-rounds" style="color:#ef5350;">${roundsText} ×</span>
+                        `;
+
+                        content.appendChild(item);
+
+                        BuffPanelDragDrop.setupItemDrag({
+                            el: item,
+                            node: b,
+                            parentList: null,
+                            index: 0,
+                            sourcePane: "unit",
+                            getDraggedContext: () => this._draggedContext,
+                            setDraggedContext: (ctx) => { this._draggedContext = ctx; },
+                            onCrossCopy: async (draggedNode) => {
+                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
+                                if (newRowId) {
+                                    await this.renderTemplatePane();
+                                }
+                            }
+                        });
+                    });
+                }
             } else {
-                content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(无关联人物卡)</div>';
+                content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(无关联数据)</div>';
             }
+
+            // 支持从模板库拖拽至单位分组直接施加 Buff
+            details.addEventListener("dragover", (e) => {
+                const dragged = this._draggedContext;
+                if (dragged && dragged.sourcePane === "template") {
+                    e.preventDefault();
+                    details.classList.add("r20-drag-container-over");
+                }
+            });
+            details.addEventListener("dragleave", (e) => {
+                if (!details.contains(e.relatedTarget)) {
+                    details.classList.remove("r20-drag-container-over");
+                }
+            });
+            details.addEventListener("drop", async (e) => {
+                const dragged = this._draggedContext;
+                if (dragged && dragged.sourcePane === "template") {
+                    e.preventDefault();
+                    details.classList.remove("r20-drag-container-over");
+                    const node = dragged.node;
+                    if (char) {
+                        await Pf1eBuffManager.applyOrRefreshBuff(char, node.name, node.rounds, node.extraAttrs);
+                    } else if (tokenItem.token) {
+                        TokenBuffManager.applyOrRefreshBuff(tokenItem.token, node.name, node.rounds, node.extraAttrs);
+                    }
+                    this._draggedContext = null;
+                    await Pf1eBuffUI.refreshAllBadges();
+                    await this.renderAllPanes();
+                    this.showToast(`✨ 已为 [${tokenName}] 施加 Buff [${node.name}]`, "success");
+                }
+            });
 
             details.appendChild(content);
             container.appendChild(details);
@@ -554,9 +634,19 @@ export class BuffFloatingPanel {
         for (const item of selected) {
             if (item.char) {
                 if (shouldApply) {
-                    await TokenBuffManager.applyBuff(item.char, buffName, rounds, extraAttrs);
+                    await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs);
                 } else {
-                    await TokenBuffManager.removeBuff(item.char, buffName);
+                    const buffs = await Pf1eBuffManager.getAllBuffs(item.char);
+                    const b = buffs.find(x => x.name === buffName && x.enabled);
+                    if (b) {
+                        await Pf1eBuffManager.removeBuff(item.char, b.rowId);
+                    }
+                }
+            } else if (item.token) {
+                if (shouldApply) {
+                    TokenBuffManager.applyOrRefreshBuff(item.token, buffName, rounds, extraAttrs);
+                } else {
+                    TokenBuffManager.removeBuff(item.token, buffName);
                 }
             }
         }
@@ -574,14 +664,17 @@ export class BuffFloatingPanel {
         if (selectedTokens.length === 0) return { activeStats };
 
         for (const item of selectedTokens) {
+            let activeBuffs = [];
             if (item.char) {
-                const buffs = await Pf1eBuffManager.getAllBuffs(item.char);
-                buffs.forEach(b => {
-                    const cur = activeStats.get(b.name) || { count: 0, total: selectedTokens.length };
-                    cur.count++;
-                    activeStats.set(b.name, cur);
-                });
+                activeBuffs = await Pf1eBuffManager.getActiveBuffs(item.char);
+            } else if (item.token) {
+                activeBuffs = TokenBuffManager.getTokenBuffs(item.token);
             }
+            activeBuffs.forEach(b => {
+                const cur = activeStats.get(b.name) || { count: 0, total: selectedTokens.length };
+                cur.count++;
+                activeStats.set(b.name, cur);
+            });
         }
         return { activeStats };
     }
