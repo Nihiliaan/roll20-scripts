@@ -270,7 +270,7 @@ export class SuiteConfigStore {
             [`${prefix}_description-show`]: 1
         };
 
-        if (extraAttrs) {
+        if (extraAttrs && typeof extraAttrs === "object") {
             Object.entries(extraAttrs).forEach(([k, v]) => {
                 if (k !== "name" && k !== "enable_toggle" && k !== "rounds" && k !== "tabcat" && k !== "tabcat2" && k !== "row_id") {
                     attrsToSet[`${prefix}_${k}`] = v;
@@ -279,6 +279,9 @@ export class SuiteConfigStore {
         }
 
         const models = character.attribs ? character.attribs.models : [];
+        const prefixWithUnderscore = `${prefix}_`;
+
+        // 1. 设置或更新所有属性
         Object.entries(attrsToSet).forEach(([attrName, attrVal]) => {
             const existing = models.find(m => m.get("name") === attrName);
             if (existing) {
@@ -290,6 +293,14 @@ export class SuiteConfigStore {
                 });
             }
         });
+
+        // 2. 清理在本次编辑中被显式删除的细目属性，保持与角色卡完全同步
+        const newKeys = new Set(Object.keys(attrsToSet));
+        const obsoleteAttrs = models.filter(m => {
+            const n = m.get("name") || "";
+            return n.startsWith(prefixWithUnderscore) && !newKeys.has(n);
+        });
+        obsoleteAttrs.forEach(a => a.destroy());
     }
 
     /**

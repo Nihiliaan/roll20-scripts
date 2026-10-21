@@ -963,8 +963,9 @@ export class BuffFloatingPanel {
 
         const currentName = isEditing ? existingNode.name : "";
         const currentRounds = isEditing && existingNode.rounds !== null && existingNode.rounds !== undefined ? existingNode.rounds : "";
-        const currentJson = isEditing && existingNode.extraAttrs ? JSON.stringify(existingNode.extraAttrs, null, 2) :
-`{
+        const currentJson = isEditing
+            ? JSON.stringify(existingNode.extraAttrs || {}, null, 2)
+            : `{
   "bufftype": "spell",
   "b1-show": 1,
   "b1_bonus": "attack",

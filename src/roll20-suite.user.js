@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.9.0
+// @version      0.9.1
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.0...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.1...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -219,6 +219,29 @@ class Pf1eBuffManager {
             const rounds = roundsAttr && roundsAttr.get("current") !== "" ? Number(roundsAttr.get("current")) : null;
             const buffType = buffTypeAttr ? buffTypeAttr.get("current") : "spell";
 
+            // 提取该原生 Buff 条目下所有存储的扩展加值与修饰细目字典 (extraAttrs)
+            const extraAttrs = {};
+            const prefixWithUnderscore = `${prefix}_`;
+            for (const attr of character.attribs.models) {
+                const attrName = attr.get("name") || "";
+                if (attrName.startsWith(prefixWithUnderscore)) {
+                    const subKey = attrName.substring(prefixWithUnderscore.length);
+                    if (
+                        subKey !== "name" &&
+                        subKey !== "enable_toggle" &&
+                        subKey !== "rounds" &&
+                        subKey !== "tabcat" &&
+                        subKey !== "tabcat2" &&
+                        subKey !== "row_id"
+                    ) {
+                        const raw = attr.get("current");
+                        if (raw !== "" && raw !== null && raw !== undefined) {
+                            extraAttrs[subKey] = (!isNaN(Number(raw)) && typeof raw !== "boolean" && String(raw).trim() !== "") ? Number(raw) : raw;
+                        }
+                    }
+                }
+            }
+
             buffs.push({
                 rowId,
                 prefix,
@@ -226,6 +249,7 @@ class Pf1eBuffManager {
                 enabled,
                 rounds: (rounds !== null && !isNaN(rounds)) ? rounds : null,
                 buffType,
+                extraAttrs: Object.keys(extraAttrs).length > 0 ? extraAttrs : null,
                 toggleAttr: toggleAttr || null,
                 roundsAttr: roundsAttr || null
             });
@@ -712,7 +736,7 @@ class SuiteConfigStore {
             [`${prefix}_description-show`]: 1
         };
 
-        if (extraAttrs) {
+        if (extraAttrs && typeof extraAttrs === "object") {
             Object.entries(extraAttrs).forEach(([k, v]) => {
                 if (k !== "name" && k !== "enable_toggle" && k !== "rounds" && k !== "tabcat" && k !== "tabcat2" && k !== "row_id") {
                     attrsToSet[`${prefix}_${k}`] = v;
@@ -721,6 +745,9 @@ class SuiteConfigStore {
         }
 
         const models = character.attribs ? character.attribs.models : [];
+        const prefixWithUnderscore = `${prefix}_`;
+
+        // 1. 设置或更新所有属性
         Object.entries(attrsToSet).forEach(([attrName, attrVal]) => {
             const existing = models.find(m => m.get("name") === attrName);
             if (existing) {
@@ -732,6 +759,14 @@ class SuiteConfigStore {
                 });
             }
         });
+
+        // 2. 清理在本次编辑中被显式删除的细目属性，保持与角色卡完全同步
+        const newKeys = new Set(Object.keys(attrsToSet));
+        const obsoleteAttrs = models.filter(m => {
+            const n = m.get("name") || "";
+            return n.startsWith(prefixWithUnderscore) && !newKeys.has(n);
+        });
+        obsoleteAttrs.forEach(a => a.destroy());
     }
 
     /**
@@ -3041,8 +3076,9 @@ class BuffFloatingPanel {
 
         const currentName = isEditing ? existingNode.name : "";
         const currentRounds = isEditing && existingNode.rounds !== null && existingNode.rounds !== undefined ? existingNode.rounds : "";
-        const currentJson = isEditing && existingNode.extraAttrs ? JSON.stringify(existingNode.extraAttrs, null, 2) :
-`{
+        const currentJson = isEditing
+            ? JSON.stringify(existingNode.extraAttrs || {}, null, 2)
+            : `{
   "bufftype": "spell",
   "b1-show": 1,
   "b1_bonus": "attack",
@@ -3300,7 +3336,7 @@ class BuffFloatingPanel {
                 console.error("[Roll20Suite] 先攻条徽章挂载失败:", uiErr);
             }
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.0 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.1 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

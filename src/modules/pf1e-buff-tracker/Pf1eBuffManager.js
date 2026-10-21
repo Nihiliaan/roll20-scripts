@@ -69,6 +69,29 @@ export class Pf1eBuffManager {
             const rounds = roundsAttr && roundsAttr.get("current") !== "" ? Number(roundsAttr.get("current")) : null;
             const buffType = buffTypeAttr ? buffTypeAttr.get("current") : "spell";
 
+            // 提取该原生 Buff 条目下所有存储的扩展加值与修饰细目字典 (extraAttrs)
+            const extraAttrs = {};
+            const prefixWithUnderscore = `${prefix}_`;
+            for (const attr of character.attribs.models) {
+                const attrName = attr.get("name") || "";
+                if (attrName.startsWith(prefixWithUnderscore)) {
+                    const subKey = attrName.substring(prefixWithUnderscore.length);
+                    if (
+                        subKey !== "name" &&
+                        subKey !== "enable_toggle" &&
+                        subKey !== "rounds" &&
+                        subKey !== "tabcat" &&
+                        subKey !== "tabcat2" &&
+                        subKey !== "row_id"
+                    ) {
+                        const raw = attr.get("current");
+                        if (raw !== "" && raw !== null && raw !== undefined) {
+                            extraAttrs[subKey] = (!isNaN(Number(raw)) && typeof raw !== "boolean" && String(raw).trim() !== "") ? Number(raw) : raw;
+                        }
+                    }
+                }
+            }
+
             buffs.push({
                 rowId,
                 prefix,
@@ -76,6 +99,7 @@ export class Pf1eBuffManager {
                 enabled,
                 rounds: (rounds !== null && !isNaN(rounds)) ? rounds : null,
                 buffType,
+                extraAttrs: Object.keys(extraAttrs).length > 0 ? extraAttrs : null,
                 toggleAttr: toggleAttr || null,
                 roundsAttr: roundsAttr || null
             });
