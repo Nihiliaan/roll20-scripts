@@ -3,8 +3,9 @@
  * 状态Buff工作台主控制器（极简具名字典模型 + 宿主原生能力驱动）
  * 1. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
  * 2. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
- * 3. 双栏抽象为对称的具名字典（文件夹->Buff / 角色->Buff），统一渲染；
- * 4. 常驻原生复选框批量删除，增设一键打开官方角色卡配置高级属性。
+ * 3. 严格遵循垂直上下排版（上栏模板库，下栏当前单位）；
+ * 4. 标题栏常驻「✏️ 编辑」模式切换，进入后才展示工具栏与复选框；
+ * 5. 完善 Firebase 异步注水自愈机制，初次加载自动秒刷。
  */
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
@@ -21,6 +22,7 @@ export class BuffFloatingPanel {
     static panelEl = null;
     static isPinned = false;
     static isCollapsed = false;
+    static isEditMode = false;
     static templates = [];
     static isInternalSaving = false;
     static _dbWatcherBound = false;
@@ -50,8 +52,18 @@ export class BuffFloatingPanel {
         this.initSelectionListeners();
         this.initDatabaseCharacterWatcher();
 
-        // 加载模板数据
+        // 初始加载模板数据并自愈补刷（应对 Firebase 异步注水延迟）
         await this.refreshTemplates(false);
+        if (this.templates.length === 0) {
+            setTimeout(async () => {
+                const dbChar = SuiteConfigStore.findDatabaseCharacter();
+                if (dbChar) await Roll20Bridge.ensureCharacterAttributes(dbChar);
+                await this.refreshTemplates(false);
+            }, 600);
+            setTimeout(async () => {
+                await this.refreshTemplates(false);
+            }, 1800);
+        }
 
         // 绑定底部放置兜底
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -78,11 +90,11 @@ export class BuffFloatingPanel {
             }
         });
 
-        console.log("[BuffFloatingPanel] 极简具名字典工作台初始化就绪");
+        console.log("[BuffFloatingPanel] 极简工作台初始化就绪 (上下排版 + 编辑模式)");
     }
 
     /**
-     * 构建极简面板主 DOM
+     * 构建极简面板主 DOM (垂直上下双栏排版)
      */
     static createPanelDOM() {
         const panel = document.createElement("div");
@@ -97,6 +109,7 @@ export class BuffFloatingPanel {
                 </div>
                 <div class="r20-panel-controls">
                     <button class="r20-btn-icon btn-toggle-pin" title="固定面板">📌</button>
+                    <button class="r20-btn-icon btn-toggle-edit" title="进入编辑模式">✏️ 编辑</button>
                     <button class="r20-btn-icon btn-minimize" title="折叠/展开">-</button>
                 </div>
             </div>
@@ -112,13 +125,13 @@ export class BuffFloatingPanel {
                     <div class="r20-panel-panes">
                         <div class="r20-pane r20-template-pane">
                             <div class="r20-pane-header">
-                                <span>📚 模板库</span>
+                                <span>📚 Buff 模板库</span>
                             </div>
                             <div class="r20-tree-container r20-template-tree"></div>
                         </div>
                         <div class="r20-pane r20-unit-pane">
                             <div class="r20-pane-header">
-                                <span>🎯 选中单位</span>
+                                <span>🎯 选中单位 Buff</span>
                             </div>
                             <div class="r20-tree-container r20-unit-tree"></div>
                         </div>
@@ -133,6 +146,7 @@ export class BuffFloatingPanel {
 
         // 绑定顶部控制
         panel.querySelector(".btn-toggle-pin").addEventListener("click", () => this.togglePin());
+        panel.querySelector(".btn-toggle-edit").addEventListener("click", () => this.toggleEditMode());
         panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
 
         // 绑定工具栏
@@ -148,7 +162,21 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 极简事件委托：行点击直接切换施加，复选框直接多选
+     * 切换编辑模式
+     */
+    static toggleEditMode() {
+        this.isEditMode = !this.isEditMode;
+        this.panelEl.classList.toggle("is-editing", this.isEditMode);
+        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
+        if (editBtn) {
+            editBtn.classList.toggle("active", this.isEditMode);
+            editBtn.textContent = this.isEditMode ? "🔒 完成" : "✏️ 编辑";
+        }
+        this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（可勾选删除/新增）" : "🔒 已退出编辑模式", "info");
+    }
+
+    /**
+     * 极简事件委托：非编辑状态点击直接切换施加；编辑状态支持勾选
      */
     static initPaneEvents() {
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -162,6 +190,16 @@ export class BuffFloatingPanel {
             const item = e.target.closest(".r20-tree-item");
             if (!item) return;
 
+            // 编辑模式下点击整行切换勾选
+            if (this.isEditMode) {
+                const cb = item.querySelector(".r20-cb-select");
+                if (cb && e.target !== cb) {
+                    cb.checked = !cb.checked;
+                }
+                return;
+            }
+
+            // 非编辑模式下点击直接施加/移除
             const name = item.dataset.name;
             const rounds = item.dataset.rounds ? parseInt(item.dataset.rounds) : null;
             const extraAttrs = item._extraAttrs || null;
@@ -176,7 +214,6 @@ export class BuffFloatingPanel {
             if (!item) return;
 
             const charId = item.dataset.charId;
-            const buffId = item.dataset.buffId;
             const buffName = item.dataset.name;
 
             if (charId && buffName) {
@@ -319,7 +356,7 @@ export class BuffFloatingPanel {
         if (!container) return;
 
         if (this.templates.length === 0) {
-            container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「+ Buff」新建</div>';
+            container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「✏️ 编辑」再点「+ Buff」新建</div>';
             return;
         }
 
@@ -588,15 +625,17 @@ export class BuffFloatingPanel {
         this._dbWatcherBound = true;
 
         const attachToChar = (char) => {
-            if (!char || !char.attribs) return;
-            char.attribs.on("add change remove reset", () => {
-                if (this.isInternalSaving) return;
-                if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
-                this._dbSyncTimer = setTimeout(async () => {
+            if (!char) return;
+            if (char.attribs) {
+                char.attribs.on("add change remove reset", () => {
                     if (this.isInternalSaving) return;
-                    await this.refreshTemplates(false);
-                }, 300);
-            });
+                    if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
+                    this._dbSyncTimer = setTimeout(async () => {
+                        if (this.isInternalSaving) return;
+                        await this.refreshTemplates(false);
+                    }, 300);
+                });
+            }
         };
 
         const dbChar = SuiteConfigStore.findDatabaseCharacter();

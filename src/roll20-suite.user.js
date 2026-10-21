@@ -1458,7 +1458,7 @@ class Pf1eBuffUI {
     // ==========================================
 /**
  * BuffPanelStyles.js
- * 状态Buff工作台样式定义：极简基准定位模型 + 原生 details/summary 具名字典折叠
+ * 状态Buff工作台样式定义：极简基准定位模型 + 上下垂直排版 + 原生 details/summary 折叠
  */
 class BuffPanelStyles {
     static STYLESHEET_ID = "r20-floating-panel-styles";
@@ -1532,8 +1532,8 @@ class BuffPanelStyles {
                 color: #ffffff;
             }
             .r20-btn-icon.active {
-                background: #1565c0;
-                color: #ffffff;
+                background: #1565c0 !important;
+                color: #ffffff !important;
             }
             .r20-btn-icon.pinned {
                 color: #ffd54f !important;
@@ -1582,44 +1582,47 @@ class BuffPanelStyles {
                 overflow: hidden;
             }
 
-            /* 工具栏 */
+            /* 工具栏（默认隐藏，点击编辑后展开） */
             .r20-panel-toolbar {
-                display: flex;
+                display: none;
                 align-items: center;
-                gap: 6px;
+                gap: 5px;
                 padding: 6px 10px;
                 background: #161a1f;
                 border-bottom: 1px solid #2d3748;
                 font-size: 11px;
                 flex-wrap: wrap;
             }
+            #r20-buff-panel.is-editing .r20-panel-toolbar {
+                display: flex;
+            }
 
-            /* 双栏主工作区分割布局 */
+            /* 双栏垂直上下排版布局 */
             .r20-panel-panes {
                 display: flex;
+                flex-direction: column;
                 flex: 1;
                 overflow: hidden;
-                min-height: 200px;
-                max-height: 60vh;
+                max-height: 70vh;
             }
 
             .r20-pane {
-                flex: 1;
                 display: flex;
                 flex-direction: column;
-                border-right: 1px solid #2d3748;
+                border-bottom: 1px solid #2d3748;
                 overflow: hidden;
-                min-width: 0;
+                min-height: 60px;
+                max-height: 35vh;
             }
             .r20-pane:last-child {
-                border-right: none;
+                border-bottom: none;
             }
 
             .r20-pane-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 6px 8px;
+                padding: 6px 10px;
                 background: #1f252e;
                 border-bottom: 1px solid #2d3748;
                 font-size: 11px;
@@ -1633,7 +1636,7 @@ class BuffPanelStyles {
                 padding: 6px;
                 display: flex;
                 flex-direction: column;
-                gap: 4px;
+                gap: 3px;
             }
 
             /* 原生 details/summary 具名字典组容器 */
@@ -1683,7 +1686,7 @@ class BuffPanelStyles {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 4px 6px;
+                padding: 4px 8px;
                 background: #20262f;
                 border-radius: 3px;
                 font-size: 11px;
@@ -1711,17 +1714,23 @@ class BuffPanelStyles {
             .r20-item-label {
                 display: flex;
                 align-items: center;
-                gap: 5px;
+                gap: 6px;
                 cursor: pointer;
                 overflow: hidden;
                 text-overflow: ellipsis;
                 white-space: nowrap;
                 flex: 1;
             }
+            /* 复选框仅在编辑模式下展现 */
             .r20-cb-select {
                 cursor: pointer;
                 margin: 0;
+                display: none !important;
             }
+            #r20-buff-panel.is-editing .r20-cb-select {
+                display: inline-block !important;
+            }
+
             .r20-item-name {
                 overflow: hidden;
                 text-overflow: ellipsis;
@@ -1757,7 +1766,7 @@ class BuffPanelStyles {
             .r20-toast.warn { border-color: #ffb74d; color: #ffe082; }
             .r20-toast.success { border-color: #81c784; color: #c8e6c9; }
             .r20-empty-placeholder {
-                padding: 16px;
+                padding: 14px;
                 text-align: center;
                 color: #78909c;
                 font-size: 11px;
@@ -1766,7 +1775,8 @@ class BuffPanelStyles {
     }
 
     static inject() {
-        if (document.querySelector(`#${this.STYLESHEET_ID}`)) return;
+        const existing = document.querySelector(`#${this.STYLESHEET_ID}`);
+        if (existing) existing.remove();
         const style = document.createElement("style");
         style.id = this.STYLESHEET_ID;
         style.textContent = this.getCss();
@@ -1973,8 +1983,9 @@ class BuffPanelDragDrop {
  * 状态Buff工作台主控制器（极简具名字典模型 + 宿主原生能力驱动）
  * 1. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
  * 2. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
- * 3. 双栏抽象为对称的具名字典（文件夹->Buff / 角色->Buff），统一渲染；
- * 4. 常驻原生复选框批量删除，增设一键打开官方角色卡配置高级属性。
+ * 3. 严格遵循垂直上下排版（上栏模板库，下栏当前单位）；
+ * 4. 标题栏常驻「✏️ 编辑」模式切换，进入后才展示工具栏与复选框；
+ * 5. 完善 Firebase 异步注水自愈机制，初次加载自动秒刷。
  */
 
 
@@ -1991,6 +2002,7 @@ class BuffFloatingPanel {
     static panelEl = null;
     static isPinned = false;
     static isCollapsed = false;
+    static isEditMode = false;
     static templates = [];
     static isInternalSaving = false;
     static _dbWatcherBound = false;
@@ -2020,8 +2032,18 @@ class BuffFloatingPanel {
         this.initSelectionListeners();
         this.initDatabaseCharacterWatcher();
 
-        // 加载模板数据
+        // 初始加载模板数据并自愈补刷（应对 Firebase 异步注水延迟）
         await this.refreshTemplates(false);
+        if (this.templates.length === 0) {
+            setTimeout(async () => {
+                const dbChar = SuiteConfigStore.findDatabaseCharacter();
+                if (dbChar) await Roll20Bridge.ensureCharacterAttributes(dbChar);
+                await this.refreshTemplates(false);
+            }, 600);
+            setTimeout(async () => {
+                await this.refreshTemplates(false);
+            }, 1800);
+        }
 
         // 绑定底部放置兜底
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -2048,11 +2070,11 @@ class BuffFloatingPanel {
             }
         });
 
-        console.log("[BuffFloatingPanel] 极简具名字典工作台初始化就绪");
+        console.log("[BuffFloatingPanel] 极简工作台初始化就绪 (上下排版 + 编辑模式)");
     }
 
     /**
-     * 构建极简面板主 DOM
+     * 构建极简面板主 DOM (垂直上下双栏排版)
      */
     static createPanelDOM() {
         const panel = document.createElement("div");
@@ -2067,6 +2089,7 @@ class BuffFloatingPanel {
                 </div>
                 <div class="r20-panel-controls">
                     <button class="r20-btn-icon btn-toggle-pin" title="固定面板">📌</button>
+                    <button class="r20-btn-icon btn-toggle-edit" title="进入编辑模式">✏️ 编辑</button>
                     <button class="r20-btn-icon btn-minimize" title="折叠/展开">-</button>
                 </div>
             </div>
@@ -2082,13 +2105,13 @@ class BuffFloatingPanel {
                     <div class="r20-panel-panes">
                         <div class="r20-pane r20-template-pane">
                             <div class="r20-pane-header">
-                                <span>📚 模板库</span>
+                                <span>📚 Buff 模板库</span>
                             </div>
                             <div class="r20-tree-container r20-template-tree"></div>
                         </div>
                         <div class="r20-pane r20-unit-pane">
                             <div class="r20-pane-header">
-                                <span>🎯 选中单位</span>
+                                <span>🎯 选中单位 Buff</span>
                             </div>
                             <div class="r20-tree-container r20-unit-tree"></div>
                         </div>
@@ -2103,6 +2126,7 @@ class BuffFloatingPanel {
 
         // 绑定顶部控制
         panel.querySelector(".btn-toggle-pin").addEventListener("click", () => this.togglePin());
+        panel.querySelector(".btn-toggle-edit").addEventListener("click", () => this.toggleEditMode());
         panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
 
         // 绑定工具栏
@@ -2118,7 +2142,21 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 极简事件委托：行点击直接切换施加，复选框直接多选
+     * 切换编辑模式
+     */
+    static toggleEditMode() {
+        this.isEditMode = !this.isEditMode;
+        this.panelEl.classList.toggle("is-editing", this.isEditMode);
+        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
+        if (editBtn) {
+            editBtn.classList.toggle("active", this.isEditMode);
+            editBtn.textContent = this.isEditMode ? "🔒 完成" : "✏️ 编辑";
+        }
+        this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（可勾选删除/新增）" : "🔒 已退出编辑模式", "info");
+    }
+
+    /**
+     * 极简事件委托：非编辑状态点击直接切换施加；编辑状态支持勾选
      */
     static initPaneEvents() {
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -2132,6 +2170,16 @@ class BuffFloatingPanel {
             const item = e.target.closest(".r20-tree-item");
             if (!item) return;
 
+            // 编辑模式下点击整行切换勾选
+            if (this.isEditMode) {
+                const cb = item.querySelector(".r20-cb-select");
+                if (cb && e.target !== cb) {
+                    cb.checked = !cb.checked;
+                }
+                return;
+            }
+
+            // 非编辑模式下点击直接施加/移除
             const name = item.dataset.name;
             const rounds = item.dataset.rounds ? parseInt(item.dataset.rounds) : null;
             const extraAttrs = item._extraAttrs || null;
@@ -2146,7 +2194,6 @@ class BuffFloatingPanel {
             if (!item) return;
 
             const charId = item.dataset.charId;
-            const buffId = item.dataset.buffId;
             const buffName = item.dataset.name;
 
             if (charId && buffName) {
@@ -2289,7 +2336,7 @@ class BuffFloatingPanel {
         if (!container) return;
 
         if (this.templates.length === 0) {
-            container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「+ Buff」新建</div>';
+            container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「✏️ 编辑」再点「+ Buff」新建</div>';
             return;
         }
 
@@ -2558,15 +2605,17 @@ class BuffFloatingPanel {
         this._dbWatcherBound = true;
 
         const attachToChar = (char) => {
-            if (!char || !char.attribs) return;
-            char.attribs.on("add change remove reset", () => {
-                if (this.isInternalSaving) return;
-                if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
-                this._dbSyncTimer = setTimeout(async () => {
+            if (!char) return;
+            if (char.attribs) {
+                char.attribs.on("add change remove reset", () => {
                     if (this.isInternalSaving) return;
-                    await this.refreshTemplates(false);
-                }, 300);
-            });
+                    if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
+                    this._dbSyncTimer = setTimeout(async () => {
+                        if (this.isInternalSaving) return;
+                        await this.refreshTemplates(false);
+                    }, 300);
+                });
+            }
         };
 
         const dbChar = SuiteConfigStore.findDatabaseCharacter();

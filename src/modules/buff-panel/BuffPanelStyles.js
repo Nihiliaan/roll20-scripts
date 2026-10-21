@@ -1,6 +1,6 @@
 /**
  * BuffPanelStyles.js
- * 状态Buff工作台样式定义：极简基准定位模型 + 原生 details/summary 具名字典折叠
+ * 状态Buff工作台样式定义：极简基准定位模型 + 上下垂直排版 + 原生 details/summary 折叠
  */
 export class BuffPanelStyles {
     static STYLESHEET_ID = "r20-floating-panel-styles";
@@ -74,8 +74,8 @@ export class BuffPanelStyles {
                 color: #ffffff;
             }
             .r20-btn-icon.active {
-                background: #1565c0;
-                color: #ffffff;
+                background: #1565c0 !important;
+                color: #ffffff !important;
             }
             .r20-btn-icon.pinned {
                 color: #ffd54f !important;
@@ -124,44 +124,47 @@ export class BuffPanelStyles {
                 overflow: hidden;
             }
 
-            /* 工具栏 */
+            /* 工具栏（默认隐藏，点击编辑后展开） */
             .r20-panel-toolbar {
-                display: flex;
+                display: none;
                 align-items: center;
-                gap: 6px;
+                gap: 5px;
                 padding: 6px 10px;
                 background: #161a1f;
                 border-bottom: 1px solid #2d3748;
                 font-size: 11px;
                 flex-wrap: wrap;
             }
+            #r20-buff-panel.is-editing .r20-panel-toolbar {
+                display: flex;
+            }
 
-            /* 双栏主工作区分割布局 */
+            /* 双栏垂直上下排版布局 */
             .r20-panel-panes {
                 display: flex;
+                flex-direction: column;
                 flex: 1;
                 overflow: hidden;
-                min-height: 200px;
-                max-height: 60vh;
+                max-height: 70vh;
             }
 
             .r20-pane {
-                flex: 1;
                 display: flex;
                 flex-direction: column;
-                border-right: 1px solid #2d3748;
+                border-bottom: 1px solid #2d3748;
                 overflow: hidden;
-                min-width: 0;
+                min-height: 60px;
+                max-height: 35vh;
             }
             .r20-pane:last-child {
-                border-right: none;
+                border-bottom: none;
             }
 
             .r20-pane-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 6px 8px;
+                padding: 6px 10px;
                 background: #1f252e;
                 border-bottom: 1px solid #2d3748;
                 font-size: 11px;
@@ -175,7 +178,7 @@ export class BuffPanelStyles {
                 padding: 6px;
                 display: flex;
                 flex-direction: column;
-                gap: 4px;
+                gap: 3px;
             }
 
             /* 原生 details/summary 具名字典组容器 */
@@ -225,7 +228,7 @@ export class BuffPanelStyles {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 4px 6px;
+                padding: 4px 8px;
                 background: #20262f;
                 border-radius: 3px;
                 font-size: 11px;
@@ -253,17 +256,23 @@ export class BuffPanelStyles {
             .r20-item-label {
                 display: flex;
                 align-items: center;
-                gap: 5px;
+                gap: 6px;
                 cursor: pointer;
                 overflow: hidden;
                 text-overflow: ellipsis;
                 white-space: nowrap;
                 flex: 1;
             }
+            /* 复选框仅在编辑模式下展现 */
             .r20-cb-select {
                 cursor: pointer;
                 margin: 0;
+                display: none !important;
             }
+            #r20-buff-panel.is-editing .r20-cb-select {
+                display: inline-block !important;
+            }
+
             .r20-item-name {
                 overflow: hidden;
                 text-overflow: ellipsis;
@@ -299,7 +308,7 @@ export class BuffPanelStyles {
             .r20-toast.warn { border-color: #ffb74d; color: #ffe082; }
             .r20-toast.success { border-color: #81c784; color: #c8e6c9; }
             .r20-empty-placeholder {
-                padding: 16px;
+                padding: 14px;
                 text-align: center;
                 color: #78909c;
                 font-size: 11px;
@@ -308,7 +317,8 @@ export class BuffPanelStyles {
     }
 
     static inject() {
-        if (document.querySelector(`#${this.STYLESHEET_ID}`)) return;
+        const existing = document.querySelector(`#${this.STYLESHEET_ID}`);
+        if (existing) existing.remove();
         const style = document.createElement("style");
         style.id = this.STYLESHEET_ID;
         style.textContent = this.getCss();
