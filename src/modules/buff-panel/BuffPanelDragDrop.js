@@ -1,12 +1,29 @@
 /**
  * BuffPanelDragDrop.js
- * 状态Buff工作台拖拽手势与交互处理器（极简标题栏拖拽、栏内排序、跨栏复制）
+ * 状态Buff工作台拖拽手势与交互处理器（宿主 jQuery UI 窗口拖拽、栏内排序、跨栏复制）
  */
 export class BuffPanelDragDrop {
     /**
-     * 初始化窗口标题栏拖拽移动（拖动主体纯粹为标题栏，绝不跳变）
+     * 初始化窗口标题栏拖拽移动（调用宿主 jQuery UI，零手写监听）
      */
     static initWindowDrag(panelEl, onDragEnd, onDragging) {
+        if (window.$ && typeof window.$.fn.draggable === "function") {
+            window.$(panelEl).draggable({
+                handle: ".r20-panel-header",
+                containment: "window",
+                drag: (event, ui) => {
+                    if (onDragging) onDragging(ui.position.left, ui.position.top);
+                },
+                stop: (event, ui) => {
+                    panelEl.style.bottom = "auto";
+                    panelEl.style.right = "auto";
+                    if (onDragEnd) onDragEnd(ui.position.left, ui.position.top);
+                }
+            });
+            return;
+        }
+
+        // 降级兜底方案
         const header = panelEl.querySelector(".r20-panel-header");
         let isDragging = false;
         let startX, startY, initialLeft, initialTop;
@@ -25,9 +42,6 @@ export class BuffPanelDragDrop {
 
             const onMouseMove = (moveEvent) => {
                 if (!isDragging) return;
-                moveEvent.stopPropagation();
-                moveEvent.preventDefault();
-
                 const dx = moveEvent.clientX - startX;
                 const dy = moveEvent.clientY - startY;
                 const newLeft = Math.max(10, Math.min(window.innerWidth - 330, initialLeft + dx));
@@ -41,16 +55,11 @@ export class BuffPanelDragDrop {
                 if (onDragging) onDragging(newLeft, newTop);
             };
 
-            const onMouseUp = (upEvent) => {
+            const onMouseUp = () => {
                 if (isDragging) {
                     isDragging = false;
                     header.style.cursor = "grab";
-                    upEvent.stopPropagation();
-                    upEvent.preventDefault();
-
-                    const finalLeft = panelEl.offsetLeft;
-                    const finalTop = panelEl.offsetTop;
-                    if (onDragEnd) onDragEnd(finalLeft, finalTop);
+                    if (onDragEnd) onDragEnd(panelEl.offsetLeft, panelEl.offsetTop);
                 }
                 document.removeEventListener("mousemove", onMouseMove, true);
                 document.removeEventListener("mouseup", onMouseUp, true);
@@ -67,12 +76,7 @@ export class BuffPanelDragDrop {
     static setupItemDrag({ el, node, parentList, index, sourcePane, getDraggedContext, setDraggedContext, onCrossCopy, onReorder }) {
         el.addEventListener("dragstart", (e) => {
             e.stopPropagation();
-            setDraggedContext({
-                node,
-                parentList,
-                index,
-                sourcePane
-            });
+            setDraggedContext({ node, parentList, index, sourcePane });
             e.dataTransfer.setData("text/plain", node.name);
             el.style.opacity = "0.5";
         });
@@ -92,7 +96,6 @@ export class BuffPanelDragDrop {
             if (node.type === "folder") {
                 const rect = el.getBoundingClientRect();
                 const offsetX = e.clientX - rect.left;
-                // 文件夹左侧 36px 范围内表示作为同级插入，右侧表示放入文件夹
                 if (offsetX < 36) {
                     el.classList.remove("r20-drag-into");
                     el.classList.add("r20-drag-over");
@@ -124,14 +127,12 @@ export class BuffPanelDragDrop {
             if (!dragged) return;
             const { node: draggedNode, parentList: sourceList, index: sourceIdx, sourcePane: fromPane } = dragged;
 
-            // 1. 跨栏拖拽：单位栏 -> 模板库 (复制另存为新模板)
             if (fromPane === "unit" && sourcePane === "template") {
                 if (onCrossCopy) await onCrossCopy(draggedNode, node, parentList, index, isPeerDrop);
                 setDraggedContext(null);
                 return;
             }
 
-            // 2. 栏内排序：模板库 -> 模板库
             if (fromPane === "template" && sourcePane === "template" && sourceList) {
                 if (draggedNode.id === node.id) return;
                 if (onReorder) await onReorder(draggedNode, sourceList, sourceIdx, node, parentList, index, isPeerDrop);
@@ -141,7 +142,7 @@ export class BuffPanelDragDrop {
     }
 
     /**
-     * 为模板树容器挂载兜底空白区放置监听（拖至末尾空白即为根目录）
+     * 为模板树容器挂载兜底空白区放置监听
      */
     static setupTreeContainerDrop({ el, getDraggedContext, setDraggedContext, onCrossCopyRoot, onReorderRoot }) {
         el.addEventListener("dragover", (e) => {

@@ -1,38 +1,31 @@
+/**
+ * BuffFloatingPanel.js
+ * 状态Buff工作台主控制器（极简具名字典模型 + 宿主原生能力驱动）
+ * 1. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
+ * 2. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
+ * 3. 双栏抽象为对称的具名字典（文件夹->Buff / 角色->Buff），统一渲染；
+ * 4. 常驻原生复选框批量删除，增设一键打开官方角色卡配置高级属性。
+ */
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
 import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
 import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
 import { Pf1eBuffUI } from "../pf1e-buff-tracker/Pf1eBuffUI.js";
 import { BuffPanelStyles } from "./BuffPanelStyles.js";
-import { BuffPanelTemplates } from "./BuffPanelTemplates.js";
 import { BuffPanelDragDrop } from "./BuffPanelDragDrop.js";
 
-/**
- * BuffFloatingPanel.js
- * 状态Buff工作台主控制器：
- * 1. 拖动主体纯粹为标题栏，内容栏以标题栏位置为基准向上或向下展示；
- * 2. 物理折叠（- 缩成只有标题栏，标号变为 +；未固定时移出 400ms 自动折叠，移入展开）；
- * 3. 完美适配 Jumpgate 现代引擎原生选区与先攻联动；
- * 4. 角色卡原生 repeating_buff2 数据源双向实时同步。
- */
 export class BuffFloatingPanel {
-    static POS_KEY = "r20_suite_panel_pos_v7";
-    static PIN_KEY = "r20_suite_panel_pinned_v7";
-    static COLLAPSE_KEY = "r20_suite_panel_collapsed_v7";
+    static POS_KEY = "r20_suite_buff_panel_pos";
+    static PIN_KEY = "r20_suite_buff_panel_pinned";
 
     static panelEl = null;
     static isPinned = false;
     static isCollapsed = false;
-    static isEditMode = false;
-    static isTemplatePaneCollapsed = false;
-    static isUnitPaneCollapsed = false;
-    static isDirectionUp = false;
-
     static templates = [];
-    static editSelectedIds = new Set();
     static isInternalSaving = false;
-    static _draggedData = null;
-    static _leaveTimer = null;
+    static _dbWatcherBound = false;
+    static _dbSyncTimer = null;
+    static _draggedContext = null;
     static _lastSelectedIdsStr = "";
 
     /**
@@ -40,435 +33,274 @@ export class BuffFloatingPanel {
      */
     static async init() {
         BuffPanelStyles.inject();
+        this.createPanelDOM();
 
         this.isPinned = localStorage.getItem(this.PIN_KEY) === "true";
-        this.isCollapsed = localStorage.getItem(this.COLLAPSE_KEY) === "true";
+        this.updatePinState();
 
-        // 从云端原生角色卡加载模板
-        this.templates = await SuiteConfigStore.loadTemplates();
+        this.restorePanelPosition();
 
-        this.createPanelDOM();
+        BuffPanelDragDrop.initWindowDrag(
+            this.panelEl,
+            () => this.savePosition(),
+            () => this.updateLayoutDirection()
+        );
+
         this.initHoverCollapse();
-        this.initDragGestures();
         this.initSelectionListeners();
         this.initDatabaseCharacterWatcher();
 
-        await this.renderAllPanes();
+        // 加载模板数据
+        await this.refreshTemplates(false);
+
+        // 绑定底部放置兜底
+        const templateTree = this.panelEl.querySelector(".r20-template-tree");
+        BuffPanelDragDrop.setupTreeContainerDrop({
+            el: templateTree,
+            getDraggedContext: () => this._draggedContext,
+            setDraggedContext: (ctx) => { this._draggedContext = ctx; },
+            onCrossCopyRoot: async (draggedNode) => {
+                this.templates.push({
+                    id: "tpl_" + Math.random().toString(36).substr(2, 9),
+                    type: "buff",
+                    name: draggedNode.name,
+                    rounds: draggedNode.rounds,
+                    extraAttrs: draggedNode.extraAttrs || null
+                });
+                await this.saveTemplates(true);
+                await this.renderTemplatePane();
+            },
+            onReorderRoot: async (draggedNode, sourceList, sourceIdx) => {
+                sourceList.splice(sourceIdx, 1);
+                this.templates.push(draggedNode);
+                await this.saveTemplates(true);
+                await this.renderTemplatePane();
+            }
+        });
+
+        console.log("[BuffFloatingPanel] 极简具名字典工作台初始化就绪");
     }
 
     /**
-     * 创建悬浮面板主 DOM
+     * 构建极简面板主 DOM
      */
     static createPanelDOM() {
-        if (document.querySelector("#r20-buff-panel")) return;
-
         const panel = document.createElement("div");
         panel.id = "r20-buff-panel";
+        panel.className = "direction-down";
 
-        panel.innerHTML = BuffPanelTemplates.getMainPanelHTML({
-            isPinned: this.isPinned,
-            isCollapsed: this.isCollapsed,
-            isTemplatePaneCollapsed: this.isTemplatePaneCollapsed,
-            isUnitPaneCollapsed: this.isUnitPaneCollapsed
-        });
+        panel.innerHTML = `
+            <div class="r20-panel-header">
+                <div class="r20-panel-title">
+                    <span>🛡️</span>
+                    <span>状态Buff工作台</span>
+                </div>
+                <div class="r20-panel-controls">
+                    <button class="r20-btn-icon btn-toggle-pin" title="固定面板">📌</button>
+                    <button class="r20-btn-icon btn-minimize" title="折叠/展开">-</button>
+                </div>
+            </div>
+            <div class="r20-panel-body">
+                <div class="r20-panel-content">
+                    <div class="r20-panel-toolbar">
+                        <button class="r20-btn-icon btn-refresh-templates" title="刷新模板">🔄 刷新</button>
+                        <button class="r20-btn-icon btn-new-buff" title="新建Buff">+ Buff</button>
+                        <button class="r20-btn-icon btn-new-folder" title="新建目录">+ 目录</button>
+                        <button class="r20-btn-icon btn-open-sheet" title="在官方角色卡中配置加值">📋 角色卡</button>
+                        <button class="r20-btn-icon danger btn-delete-selected" title="删除勾选的Buff">🗑️ 删除选中</button>
+                    </div>
+                    <div class="r20-panel-panes">
+                        <div class="r20-pane r20-template-pane">
+                            <div class="r20-pane-header">
+                                <span>📚 模板库</span>
+                            </div>
+                            <div class="r20-tree-container r20-template-tree"></div>
+                        </div>
+                        <div class="r20-pane r20-unit-pane">
+                            <div class="r20-pane-header">
+                                <span>🎯 选中单位</span>
+                            </div>
+                            <div class="r20-tree-container r20-unit-tree"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="r20-toast" id="r20-buff-toast"></div>
+        `;
 
         document.body.appendChild(panel);
         this.panelEl = panel;
 
-        // 应用初始折叠状态
-        if (this.isCollapsed) {
-            panel.classList.add("is-collapsed");
-        }
-
-        // 读取并应用持久化位置（纯 left / top）
-        this.restorePanelPosition();
-
-        // 绑定头部按钮
+        // 绑定顶部控制
         panel.querySelector(".btn-toggle-pin").addEventListener("click", () => this.togglePin());
-        panel.querySelector(".btn-toggle-edit").addEventListener("click", () => this.toggleEditMode());
         panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
 
-        // 双栏折叠监听
-        panel.querySelector(".r20-template-pane .r20-pane-header").addEventListener("click", (e) => {
-            if (e.target.tagName === "BUTTON") return;
-            this.isTemplatePaneCollapsed = !this.isTemplatePaneCollapsed;
-            panel.querySelector(".r20-template-pane .toggle-icon").textContent = this.isTemplatePaneCollapsed ? "▶" : "▼";
-            panel.querySelector(".r20-template-tree").style.display = this.isTemplatePaneCollapsed ? "none" : "flex";
-        });
+        // 绑定工具栏
+        panel.querySelector(".btn-refresh-templates").addEventListener("click", () => this.refreshTemplates(true));
+        panel.querySelector(".btn-new-buff").addEventListener("click", () => this.createBuffPrompt());
+        panel.querySelector(".btn-new-folder").addEventListener("click", () => this.createFolderPrompt());
+        panel.querySelector(".btn-open-sheet").addEventListener("click", () => this.openDatabaseSheet());
+        panel.querySelector(".btn-delete-selected").addEventListener("click", () => this.deleteSelectedTemplates());
 
-        panel.querySelector(".r20-unit-pane .r20-pane-header").addEventListener("click", (e) => {
-            if (e.target.tagName === "BUTTON") return;
-            this.isUnitPaneCollapsed = !this.isUnitPaneCollapsed;
-            panel.querySelector(".r20-unit-pane .toggle-icon").textContent = this.isUnitPaneCollapsed ? "▶" : "▼";
-            panel.querySelector(".r20-unit-tree").style.display = this.isUnitPaneCollapsed ? "none" : "flex";
-        });
-
-        // 模板工具栏
-        panel.querySelector(".btn-refresh-templates")?.addEventListener("click", async (e) => {
-            e.stopPropagation();
-            await this.refreshTemplates(true);
-        });
-        panel.querySelector(".btn-new-buff").addEventListener("click", () => this.showBuffEditorDialog());
-        panel.querySelector(".btn-new-folder").addEventListener("click", () => this.showNewFolderDialog());
-        panel.querySelector(".btn-import-buffs").addEventListener("click", () => this.showImportFromCharacterDialog());
-        panel.querySelector(".btn-batch-delete").addEventListener("click", () => this.deleteSelectedBuffs());
-
+        // 双栏事件委托监听
+        this.initPaneEvents();
         this.updateLayoutDirection();
     }
 
     /**
-     * 恢复持久化坐标（纯 left 与 top）
+     * 极简事件委托：行点击直接切换施加，复选框直接多选
      */
-    static restorePanelPosition() {
-        const savedPos = localStorage.getItem(this.POS_KEY);
-        let left = Math.max(10, window.innerWidth - 340);
-        let top = 100;
+    static initPaneEvents() {
+        const templateTree = this.panelEl.querySelector(".r20-template-tree");
+        const unitTree = this.panelEl.querySelector(".r20-unit-tree");
 
-        if (savedPos) {
-            try {
-                const pos = JSON.parse(savedPos);
-                if (pos.left !== undefined) left = Math.max(10, Math.min(window.innerWidth - 340, pos.left));
-                if (pos.top !== undefined) top = Math.max(10, Math.min(window.innerHeight - 40, pos.top));
-            } catch (e) {}
-        }
+        // 模板栏点击
+        templateTree.addEventListener("click", async (e) => {
+            // 点击复选框或折叠标题直接放行
+            if (e.target.classList.contains("r20-cb-select") || e.target.closest("summary")) return;
 
-        this.panelEl.style.left = `${left}px`;
-        this.panelEl.style.top = `${top}px`;
-        this.panelEl.style.right = "auto";
-        this.panelEl.style.bottom = "auto";
-        this.updateLayoutDirection(top);
-    }
+            const item = e.target.closest(".r20-tree-item");
+            if (!item) return;
 
-    /**
-     * 更新布局展开方向（以标题栏在屏幕上下半区为纯粹基准）
-     */
-    static updateLayoutDirection(currentTop = null) {
-        if (!this.panelEl) return;
-        const top = currentTop !== null ? currentTop : this.panelEl.offsetTop;
-        const middleY = window.innerHeight / 2;
-        this.isDirectionUp = top > middleY;
+            const name = item.dataset.name;
+            const rounds = item.dataset.rounds ? parseInt(item.dataset.rounds) : null;
+            const extraAttrs = item._extraAttrs || null;
 
-        if (this.isDirectionUp) {
-            this.panelEl.classList.add("direction-up");
-            this.panelEl.classList.remove("direction-down");
-        } else {
-            this.panelEl.classList.add("direction-down");
-            this.panelEl.classList.remove("direction-up");
-        }
-    }
-
-    /**
-     * 拖拽手势初始化
-     */
-    static initDragGestures() {
-        BuffPanelDragDrop.initWindowDrag(
-            this.panelEl,
-            (left, top) => {
-                localStorage.setItem(this.POS_KEY, JSON.stringify({ left, top }));
-                this.updateLayoutDirection(top);
-            },
-            (left, top) => {
-                this.updateLayoutDirection(top);
-            }
-        );
-    }
-
-    /**
-     * 鼠标移入展开、移出折叠（未钉住时 400ms 防抖）
-     */
-    static initHoverCollapse() {
-        this.panelEl.addEventListener("mouseenter", async () => {
-            if (this._leaveTimer) clearTimeout(this._leaveTimer);
-            if (!this.isPinned && this.isCollapsed) {
-                this.setCollapsed(false);
-            }
-            // 移入时轻量重验模板
-            this.refreshTemplates(false);
+            await this.toggleBuffOnSelected(name, rounds, extraAttrs);
         });
 
-        this.panelEl.addEventListener("mouseleave", () => {
-            if (this.isPinned) return;
-            if (this._leaveTimer) clearTimeout(this._leaveTimer);
-            this._leaveTimer = setTimeout(() => {
-                if (!this.isPinned && !this.isCollapsed) {
-                    this.setCollapsed(true);
+        // 单位栏点击（点击快速扣减或移除）
+        unitTree.addEventListener("click", async (e) => {
+            if (e.target.closest("summary")) return;
+            const item = e.target.closest(".r20-tree-item");
+            if (!item) return;
+
+            const charId = item.dataset.charId;
+            const buffId = item.dataset.buffId;
+            const buffName = item.dataset.name;
+
+            if (charId && buffName) {
+                const char = window.Campaign?.characters?.get(charId);
+                if (char) {
+                    await TokenBuffManager.removeBuff(char, buffName);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    await this.renderAllPanes();
+                    this.showToast(`已从 ${char.get("name")} 移除 ${buffName}`, "info");
                 }
-            }, 400);
+            }
         });
     }
 
     /**
-     * 设置物理折叠状态
+     * 调起官方角色卡窗口进行原汁原味的加值配置
      */
-    static setCollapsed(collapsed) {
-        this.isCollapsed = collapsed;
-        localStorage.setItem(this.COLLAPSE_KEY, String(collapsed));
-
-        const minBtn = this.panelEl.querySelector(".btn-minimize");
-        if (this.isCollapsed) {
-            this.panelEl.classList.add("is-collapsed");
-            if (minBtn) {
-                minBtn.textContent = "+";
-                minBtn.title = "展开面板";
+    static openDatabaseSheet() {
+        const dbChar = SuiteConfigStore.findDatabaseCharacter();
+        if (dbChar) {
+            const ok = Roll20Bridge.openCharacterSheet(dbChar.id);
+            if (ok) {
+                this.showToast("📋 已调起 === R20_SUITE_DATABASE === 角色卡", "success");
+            } else {
+                this.showToast("⚠️ 无法在 Journal 中定位到数据库卡", "warn");
             }
         } else {
-            this.panelEl.classList.remove("is-collapsed");
-            if (minBtn) {
-                minBtn.textContent = "-";
-                minBtn.title = "折叠面板(仅留标题)";
+            this.showToast("⚠️ 未找到战役数据库角色卡", "warn");
+        }
+    }
+
+    /**
+     * 极简新建 Buff
+     */
+    static async createBuffPrompt() {
+        const name = prompt("请输入 Buff 名称:");
+        if (!name || !name.trim()) return;
+
+        const roundsInput = prompt("请输入持续轮数 (留空为永久):", "");
+        let rounds = null;
+        if (roundsInput && !isNaN(parseInt(roundsInput))) {
+            rounds = parseInt(roundsInput);
+        }
+
+        const newBuff = {
+            id: "tpl_" + Math.random().toString(36).substr(2, 9),
+            type: "buff",
+            name: name.trim(),
+            rounds: rounds,
+            extraAttrs: {
+                bufftype: "spell",
+                "b1-show": 1,
+                b1_bonus: "attack",
+                b1_bonustype: "luck",
+                b1_val: 1
             }
-            this.updateLayoutDirection();
-            this.refreshTemplates(false);
-        }
-    }
-
-    static toggleCollapse() {
-        this.setCollapsed(!this.isCollapsed);
-    }
-
-    /**
-     * 图钉固定切换
-     */
-    static togglePin() {
-        this.isPinned = !this.isPinned;
-        localStorage.setItem(this.PIN_KEY, String(this.isPinned));
-        const btnPin = this.panelEl.querySelector(".btn-toggle-pin");
-
-        if (this.isPinned) {
-            btnPin.classList.add("pinned");
-            btnPin.title = "取消固定(移出自动折叠)";
-            if (this.isCollapsed) this.setCollapsed(false);
-            this.showToast("📌 已固定悬浮窗显示", "info");
-        } else {
-            btnPin.classList.remove("pinned");
-            btnPin.title = "固定常驻显示";
-            this.showToast("📌 已开启鼠标移出自动折叠", "info");
-        }
-    }
-
-    /**
-     * 监听 Jumpgate 画布选区变化
-     */
-    static initSelectionListeners() {
-        // 监听画布点击释放
-        document.addEventListener("pointerup", () => this.checkSelectionChanged(), true);
-        document.addEventListener("mouseup", () => this.checkSelectionChanged(), true);
-        document.addEventListener("keyup", () => this.checkSelectionChanged(), true);
-
-        // 先攻条点击联动
-        const turnTracker = document.querySelector("#initiativewindow, .turn-tracker");
-        if (turnTracker) {
-            turnTracker.addEventListener("click", () => this.checkSelectionChanged(), true);
-        }
-
-        // 轻量定时轮询保障（350ms）
-        setInterval(() => this.checkSelectionChanged(), 350);
-    }
-
-    /**
-     * 检查选区是否发生实质变化
-     */
-    static checkSelectionChanged() {
-        const tokens = this.getSelectedTokens();
-        const idsStr = tokens.map(t => t.token?.id || t.char?.id || t.name).sort().join(",");
-        if (idsStr !== this._lastSelectedIdsStr) {
-            this._lastSelectedIdsStr = idsStr;
-            this.renderAllPanes();
-        }
-    }
-
-    static _dbWatcherBound = false;
-
-    /**
-     * 监听数据库角色卡的原生属性变动（实时双向更新模板库）
-     */
-    static initDatabaseCharacterWatcher() {
-        const attachToChar = (char) => {
-            if (!char || !char.attribs) return;
-            if (char._r20SuiteWatcherBound) return;
-            char._r20SuiteWatcherBound = true;
-
-            char.attribs.on("add change remove reset", () => {
-                if (this.isInternalSaving) return;
-                if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
-                this._dbSyncTimer = setTimeout(async () => {
-                    if (this.isInternalSaving) return;
-                    await this.refreshTemplates(false);
-                }, 200);
-            });
-            console.log("[BuffFloatingPanel] 数据库角色卡属性监听已成功挂载");
         };
 
-        const existing = SuiteConfigStore.findDatabaseCharacter();
-        if (existing) {
-            attachToChar(existing);
-        }
-
-        // 无论当前是否存在，都在 Campaign.characters 上建立监听，应对异步注水或新建
-        if (window.Campaign && window.Campaign.characters && !this._dbWatcherBound) {
-            this._dbWatcherBound = true;
-            window.Campaign.characters.on("add reset", (addedChar) => {
-                const charName = (addedChar.get("name") || "").trim();
-                if (charName === SuiteConfigStore.DB_CHAR_NAME || charName.toLowerCase() === SuiteConfigStore.DB_CHAR_NAME.toLowerCase()) {
-                    attachToChar(addedChar);
-                    this.refreshTemplates(false);
-                }
-            });
-        }
-    }
-
-    /**
-     * 主动刷新模板库
-     */
-    static async refreshTemplates(notify = false) {
-        this.templates = await SuiteConfigStore.loadTemplates();
+        this.templates.push(newBuff);
+        await this.saveTemplates(true);
         await this.renderTemplatePane();
-        if (notify) this.showToast("🔄 模板库已与原生角色卡同步", "success");
+        this.showToast(`✨ Buff [${name.trim()}] 创建成功`, "success");
     }
 
     /**
-     * 获取 Jumpgate 现代架构下当前选中的 Tokens
+     * 极简新建目录
      */
-    static getSelectedTokens() {
-        const result = [];
-        const seenTokenIds = new Set();
+    static async createFolderPrompt() {
+        const folderName = prompt("请输入新目录名称:");
+        if (!folderName || !folderName.trim()) return;
 
-        // 1. Jumpgate 原生核心选区接口
-        const tt = window.Campaign?.engine?.tabletop;
-        if (tt && typeof tt.getSelection === "function") {
-            try {
-                const selection = tt.getSelection();
-                if (Array.isArray(selection) && selection.length > 0) {
-                    for (const item of selection) {
-                        const tokenId = item.id;
-                        if (!tokenId || seenTokenIds.has(tokenId)) continue;
-                        seenTokenIds.add(tokenId);
+        this.templates.push({
+            id: "f_" + Math.random().toString(36).substr(2, 6),
+            type: "folder",
+            name: folderName.trim(),
+            children: []
+        });
 
-                        // 提取 Backbone Token Model
-                        let tokenModel = item.model;
-                        if (!tokenModel) {
-                            tokenModel = Roll20Bridge.getTokenGraphic(tokenId);
-                        }
-
-                        if (tokenModel) {
-                            const charId = tokenModel.get("represents");
-                            if (charId && window.Campaign && window.Campaign.characters) {
-                                const char = window.Campaign.characters.get(charId);
-                                if (char) {
-                                    result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
-                                    continue;
-                                }
-                            }
-                            result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
-                        }
-                    }
-                    return result;
-                }
-            } catch (e) {
-                console.warn("[BuffFloatingPanel] Jumpgate getSelection 异常:", e);
-            }
-        }
-
-        // 2. 回退机制：老版 Fabric 引擎
-        if (window.d20 && window.d20.engine && window.d20.engine.canvas) {
-            try {
-                const active = window.d20.engine.canvas.getActiveObjects ? window.d20.engine.canvas.getActiveObjects() : [];
-                for (const obj of active) {
-                    if (obj.id && !seenTokenIds.has(obj.id)) {
-                        seenTokenIds.add(obj.id);
-                        const tokenModel = Roll20Bridge.getTokenGraphic(obj.id);
-                        if (tokenModel) {
-                            const charId = tokenModel.get("represents");
-                            if (charId && window.Campaign && window.Campaign.characters) {
-                                const char = window.Campaign.characters.get(charId);
-                                if (char) {
-                                    result.push({ type: "character", char, token: tokenModel, name: char.get("name") });
-                                    continue;
-                                }
-                            }
-                            result.push({ type: "token", token: tokenModel, name: tokenModel.get("name") || "未命名棋子" });
-                        }
-                    }
-                }
-            } catch (e) {}
-        }
-
-        return result;
+        await this.saveTemplates(true);
+        await this.renderTemplatePane();
+        this.showToast(`📁 目录 [${folderName.trim()}] 创建成功`, "success");
     }
 
     /**
-     * 收集选中单位的 Buff 详情
+     * 批量删除选中的模板项（物理销毁属性并同步）
      */
-    static async getBuffStatsForSelected(selectedTokens) {
-        const activeStats = new Map();
-        const allBuffRows = [];
-        if (selectedTokens.length === 0) return { activeStats, allBuffRows };
+    static async deleteSelectedTemplates() {
+        const checkboxes = Array.from(this.panelEl.querySelectorAll(".r20-template-tree .r20-cb-select:checked"));
+        if (checkboxes.length === 0) {
+            this.showToast("⚠️ 请先勾选要删除的 Buff 条目", "warn");
+            return;
+        }
 
-        for (const item of selectedTokens) {
-            let itemBuffs = [];
-            if (item.type === "character" && item.char) {
-                itemBuffs = await Pf1eBuffManager.getAllBuffs(item.char);
-            } else if (item.token) {
-                const tokenBuffs = TokenBuffManager.getTokenBuffs(item.token);
-                itemBuffs = tokenBuffs.map(b => ({
-                    name: b.name,
-                    enabled: true,
-                    rounds: b.rounds
-                }));
-            }
+        if (!confirm(`确定要彻底删除选中的 ${checkboxes.length} 个 Buff 项吗？`)) return;
 
-            const activeNames = itemBuffs.filter(b => b.enabled).map(b => b.name);
-            const uniqueActiveNames = new Set(activeNames);
-            for (const name of uniqueActiveNames) {
-                if (!activeStats.has(name)) {
-                    activeStats.set(name, { count: 1, total: selectedTokens.length });
-                } else {
-                    activeStats.get(name).count++;
-                }
-            }
+        this.isInternalSaving = true;
+        const dbChar = SuiteConfigStore.findDatabaseCharacter();
 
-            for (const b of itemBuffs) {
-                let existing = allBuffRows.find(x => x.name === b.name);
-                if (!existing) {
-                    allBuffRows.push({
-                        name: b.name,
-                        enabledCount: b.enabled ? 1 : 0,
-                        totalCount: 1,
-                        rounds: b.rounds,
-                        extraAttrs: b.extraAttrs || null
-                    });
-                } else {
-                    existing.totalCount++;
-                    if (b.enabled) existing.enabledCount++;
-                }
+        for (const cb of checkboxes) {
+            const id = cb.value;
+            this.deleteNodeById(this.templates, id);
+            if (dbChar) {
+                await Pf1eBuffManager.destroyBuff(dbChar, id);
             }
         }
 
-        return { activeStats, allBuffRows };
+        await this.saveTemplates(true);
+        this.isInternalSaving = false;
+        await this.renderTemplatePane();
+        this.showToast(`🗑️ 已彻底删除 ${checkboxes.length} 项`, "success");
     }
 
     /**
-     * 编辑模式切换
+     * 从具名字典树中递归删除指定 ID 的节点
      */
-    static async toggleEditMode() {
-        this.isEditMode = !this.isEditMode;
-        const editBtn = this.panelEl.querySelector(".btn-toggle-edit");
-        const toolbar = this.panelEl.querySelector(".r20-panel-toolbar");
-
-        if (this.isEditMode) {
-            editBtn.classList.add("active");
-            editBtn.textContent = "🔒 完成";
-            toolbar.style.display = "flex";
-            this.editSelectedIds.clear();
-            this.showToast("✏️ 已进入编辑模式：点击多选待删，支持跨栏拖拽复制", "info");
-        } else {
-            editBtn.classList.remove("active");
-            editBtn.textContent = "✏️ 编辑";
-            toolbar.style.display = "none";
-            this.editSelectedIds.clear();
+    static deleteNodeById(list, id) {
+        for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i].id === id || list[i].rowId === id) {
+                list.splice(i, 1);
+                return true;
+            }
+            if (list[i].children && this.deleteNodeById(list[i].children, id)) return true;
         }
-
-        await this.renderAllPanes();
+        return false;
     }
 
     /**
@@ -480,706 +312,460 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 渲染模板库栏
+     * 渲染模板库（基于具名字典与原生 <details><summary>）
      */
     static async renderTemplatePane() {
-        const treeEl = this.panelEl.querySelector(".r20-template-tree");
-        if (!treeEl) return;
-        treeEl.innerHTML = "";
+        const container = this.panelEl.querySelector(".r20-template-tree");
+        if (!container) return;
+
+        if (this.templates.length === 0) {
+            container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「+ Buff」新建</div>';
+            return;
+        }
 
         const selectedTokens = this.getSelectedTokens();
         const { activeStats } = await this.getBuffStatsForSelected(selectedTokens);
 
-        // 更新批量删除按钮状态与选中数量
-        const batchDeleteBtn = this.panelEl.querySelector(".btn-batch-delete");
-        if (batchDeleteBtn) {
-            const count = this.editSelectedIds.size;
-            batchDeleteBtn.textContent = count > 0 ? `🗑️ 删除选中 (${count})` : "🗑️ 批量删除";
-        }
-
-        // 挂载整个树容器空白区拖拽监听（拖到空白处放置于根目录，无需独立区域）
-        BuffPanelDragDrop.setupTreeContainerDrop({
-            el: treeEl,
-            getDraggedContext: () => this._draggedData,
-            setDraggedContext: (ctx) => { this._draggedData = ctx; },
-            onCrossCopyRoot: async (draggedNode) => {
-                const copyNode = {
-                    id: "b_" + Date.now(),
-                    type: "buff",
-                    name: draggedNode.name,
-                    rounds: draggedNode.rounds !== undefined ? draggedNode.rounds : null,
-                    extraAttrs: draggedNode.extraAttrs ? JSON.parse(JSON.stringify(draggedNode.extraAttrs)) : null
-                };
-                this.templates.push(copyNode);
-                await this.saveTemplates(true);
-                await this.renderAllPanes();
-                this.showToast(`📋 已将 [${copyNode.name}] 复制到根目录`, "success");
-            },
-            onReorderRoot: async (draggedNode, sourceList, sourceIdx) => {
-                sourceList.splice(sourceIdx, 1);
-                this.templates.push(draggedNode);
-                await this.saveTemplates(true);
-                await this.renderTemplatePane();
-            }
-        });
-
-        // 如果没有模板，呈现说明
-        if (this.templates.length === 0) {
-            const emptyEl = document.createElement("div");
-            emptyEl.className = "r20-empty-placeholder";
-            emptyEl.innerHTML = `暂无模板数据<br><span style="font-size:10px; color:#546e7a;">点击上方的「✏️ 编辑」再点「+ Buff」即可创建原生配置卡并保存模板</span>`;
-            treeEl.appendChild(emptyEl);
-            return;
-        }
-
-        this.renderTemplateNodes(this.templates, treeEl, activeStats, selectedTokens);
+        container.innerHTML = "";
+        this.renderTemplateNodes(this.templates, container, activeStats, selectedTokens);
     }
 
     /**
-     * 递归渲染模板库节点
+     * 递归将具名字典树渲染为原生 details/summary DOM
      */
     static renderTemplateNodes(nodes, container, activeStats, selectedTokens) {
         nodes.forEach((node, idx) => {
             if (node.type === "folder") {
-                const folderEl = document.createElement("div");
-                folderEl.className = "r20-tree-folder";
+                const details = document.createElement("details");
+                details.className = "r20-group";
+                details.open = true;
 
-                const allChildBuffs = this.collectFolderBuffNames(node);
-                let folderClass = "";
-                if (!this.isEditMode && selectedTokens.length > 0 && allChildBuffs.length > 0) {
-                    let totalMatches = 0;
-                    allChildBuffs.forEach(name => {
-                        const stat = activeStats.get(name);
-                        if (stat && stat.count === stat.total) totalMatches++;
-                    });
-                    if (totalMatches === allChildBuffs.length) folderClass = "full-active";
-                    else if (totalMatches > 0) folderClass = "partial-active";
-                } else if (this.isEditMode && this.editSelectedIds.has(node.id)) {
-                    folderClass = "edit-selected";
-                }
+                const summary = document.createElement("summary");
+                summary.innerHTML = `<span>📁 ${node.name}</span>`;
+                details.appendChild(summary);
 
-                const header = document.createElement("div");
-                header.className = `r20-folder-header ${folderClass}`;
-                if (this.isEditMode) header.draggable = true;
-
-                header.innerHTML = `
-                    <div class="r20-folder-title">
-                        <span class="folder-icon">${node.collapsed ? "📁" : "📂"}</span>
-                        <span>${node.name}</span>
-                    </div>
-                    <div class="r20-item-actions">
-                        ${this.isEditMode ? `
-                            <button class="r20-btn-icon btn-folder-rename" title="重命名">✏️</button>
-                        ` : ""}
-                    </div>
-                `;
-
-                BuffPanelDragDrop.setupItemDrag({
-                    el: header,
-                    node,
-                    parentList: nodes,
-                    index: idx,
-                    sourcePane: "template",
-                    getDraggedContext: () => this._draggedData,
-                    setDraggedContext: (ctx) => { this._draggedData = ctx; },
-                    onCrossCopy: async (draggedNode, targetNode, parentList, targetIdx, isPeerDrop) => {
-                        const copyNode = {
-                            id: "b_" + Date.now(),
-                            type: "buff",
-                            name: draggedNode.name,
-                            rounds: draggedNode.rounds !== undefined ? draggedNode.rounds : null,
-                            extraAttrs: draggedNode.extraAttrs ? JSON.parse(JSON.stringify(draggedNode.extraAttrs)) : null
-                        };
-                        if (isPeerDrop) {
-                            parentList.splice(targetIdx, 0, copyNode);
-                            this.showToast(`📋 已将 [${copyNode.name}] 作为同级项复制`, "success");
-                        } else {
-                            targetNode.children = targetNode.children || [];
-                            targetNode.children.push(copyNode);
-                            targetNode.collapsed = false;
-                            this.showToast(`📋 已将 [${copyNode.name}] 存入文件夹 [${targetNode.name}]`, "success");
-                        }
-                        await this.saveTemplates(true);
-                        await this.renderAllPanes();
-                    },
-                    onReorder: async (draggedNode, sourceList, sourceIdx, targetNode, parentList, targetIdx, isPeerDrop) => {
-                        sourceList.splice(sourceIdx, 1);
-                        if (isPeerDrop) {
-                            parentList.splice(targetIdx, 0, draggedNode);
-                        } else {
-                            targetNode.children = targetNode.children || [];
-                            targetNode.children.push(draggedNode);
-                            targetNode.collapsed = false;
-                        }
-                        await this.saveTemplates(true);
-                        await this.renderTemplatePane();
-                    }
-                });
-
-                header.addEventListener("click", async (e) => {
-                    if (e.target.tagName === "BUTTON") return;
-                    if (this.isEditMode) {
-                        if (this.editSelectedIds.has(node.id)) this.editSelectedIds.delete(node.id);
-                        else this.editSelectedIds.add(node.id);
-                        this.renderTemplatePane();
-                        return;
-                    }
-
-                    if (selectedTokens.length > 0) {
-                        const shouldApplyAll = folderClass !== "full-active";
-                        for (const bName of allChildBuffs) {
-                            const foundBuff = this.findBuffNodeByName(node, bName);
-                            await this.toggleBuffAction(bName, foundBuff?.rounds, foundBuff?.extraAttrs, shouldApplyAll);
-                        }
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await this.renderAllPanes();
-                    } else {
-                        node.collapsed = !node.collapsed;
-                        await this.saveTemplates(false);
-                        this.renderTemplatePane();
-                    }
-                });
-
-                if (this.isEditMode) {
-                    header.querySelector(".btn-folder-rename")?.addEventListener("click", async (e) => {
-                        e.stopPropagation();
-                        const newName = prompt("请输入新文件夹名称:", node.name);
-                        if (newName && newName.trim()) {
-                            node.name = newName.trim();
-                            await this.saveTemplates(true);
-                            this.renderTemplatePane();
-                        }
-                    });
-                }
-
-                folderEl.appendChild(header);
-
-                const childrenContainer = document.createElement("div");
-                childrenContainer.className = "r20-folder-children";
-                childrenContainer.style.display = node.collapsed ? "none" : "flex";
+                const groupContent = document.createElement("div");
+                groupContent.className = "r20-group-content";
 
                 if (node.children && node.children.length > 0) {
-                    this.renderTemplateNodes(node.children, childrenContainer, activeStats, selectedTokens);
+                    this.renderTemplateNodes(node.children, groupContent, activeStats, selectedTokens);
                 }
-                folderEl.appendChild(childrenContainer);
-                container.appendChild(folderEl);
+                details.appendChild(groupContent);
+                container.appendChild(details);
 
-            } else if (node.type === "buff") {
-                const itemEl = document.createElement("div");
-                const stat = activeStats.get(node.name);
-                const isFullActive = selectedTokens.length > 0 && stat && stat.count === selectedTokens.length;
-                const isPartialActive = selectedTokens.length > 0 && stat && stat.count > 0 && !isFullActive;
-
-                let itemClass = "";
-                if (!this.isEditMode) {
-                    if (isFullActive) itemClass = "full-active";
-                    else if (isPartialActive) itemClass = "partial-active";
-                } else if (this.editSelectedIds.has(node.id)) {
-                    itemClass = "edit-selected";
-                }
-
-                itemEl.className = `r20-tree-item ${itemClass}`;
-                if (this.isEditMode) itemEl.draggable = true;
-
-                itemEl.innerHTML = `
-                    <div class="r20-item-left">
-                        <span class="r20-item-name">${node.name}</span>
-                        <span class="r20-item-rounds">${node.rounds !== null ? node.rounds + '轮' : '永久'}</span>
-                    </div>
-                    <div class="r20-item-actions">
-                        ${this.isEditMode ? `
-                            <button class="r20-btn-icon btn-edit-buff" title="编辑细目">✏️</button>
-                            <button class="r20-btn-icon btn-clone-buff" title="复制副本">📋</button>
-                        ` : ""}
-                    </div>
-                `;
-
+                // 挂载文件夹拖拽支持
                 BuffPanelDragDrop.setupItemDrag({
-                    el: itemEl,
+                    el: details,
                     node,
                     parentList: nodes,
                     index: idx,
                     sourcePane: "template",
-                    getDraggedContext: () => this._draggedData,
-                    setDraggedContext: (ctx) => { this._draggedData = ctx; },
-                    onCrossCopy: async (draggedNode, targetNode, parentList, targetIdx) => {
-                        const copyNode = {
-                            id: "b_" + Date.now(),
-                            type: "buff",
-                            name: draggedNode.name,
-                            rounds: draggedNode.rounds,
-                            extraAttrs: draggedNode.extraAttrs ? JSON.parse(JSON.stringify(draggedNode.extraAttrs)) : null
-                        };
-                        parentList.splice(targetIdx, 0, copyNode);
-                        await this.saveTemplates(true);
-                        await this.renderAllPanes();
-                        this.showToast(`📋 已复制 [${copyNode.name}]`, "success");
-                    },
-                    onReorder: async (draggedNode, sourceList, sourceIdx, targetNode, parentList, targetIdx) => {
-                        sourceList.splice(sourceIdx, 1);
-                        parentList.splice(targetIdx, 0, draggedNode);
+                    getDraggedContext: () => this._draggedContext,
+                    setDraggedContext: (ctx) => { this._draggedContext = ctx; },
+                    onReorder: async (draggedNode, srcList, srcIdx, targetNode, tgtList, tgtIdx, isPeer) => {
+                        srcList.splice(srcIdx, 1);
+                        if (isPeer) {
+                            tgtList.splice(tgtIdx, 0, draggedNode);
+                        } else {
+                            if (!targetNode.children) targetNode.children = [];
+                            targetNode.children.push(draggedNode);
+                        }
                         await this.saveTemplates(true);
                         await this.renderTemplatePane();
                     }
                 });
+            } else {
+                const stat = activeStats.get(node.name);
+                const isFull = selectedTokens.length > 0 && stat && stat.count === stat.total;
+                const isPartial = selectedTokens.length > 0 && stat && stat.count > 0 && !isFull;
 
-                itemEl.addEventListener("click", async (e) => {
-                    if (e.target.tagName === "BUTTON") return;
-                    if (this.isEditMode) {
-                        if (this.editSelectedIds.has(node.id)) this.editSelectedIds.delete(node.id);
-                        else this.editSelectedIds.add(node.id);
-                        this.renderTemplatePane();
-                        return;
-                    }
+                const item = document.createElement("div");
+                item.className = "r20-tree-item" + (isFull ? " full-active" : isPartial ? " partial-active" : "");
+                item.dataset.name = node.name;
+                item.dataset.id = node.id || node.rowId;
+                if (node.rounds) item.dataset.rounds = node.rounds;
+                item._extraAttrs = node.extraAttrs || null;
+                item.draggable = true;
 
-                    if (selectedTokens.length > 0) {
-                        const shouldApply = !isFullActive && !isPartialActive;
-                        await this.toggleBuffAction(node.name, node.rounds, node.extraAttrs, shouldApply);
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await this.renderAllPanes();
-                    } else {
-                        this.showBuffEditorDialog(node);
+                item.innerHTML = `
+                    <label class="r20-item-label" title="${node.name}">
+                        <input type="checkbox" class="r20-cb-select" value="${node.id || node.rowId}">
+                        <span class="r20-item-name">${node.name}</span>
+                    </label>
+                    <span class="r20-item-rounds">${node.rounds ? node.rounds + '轮' : '永久'}</span>
+                `;
+
+                container.appendChild(item);
+
+                // 挂载条目拖拽支持
+                BuffPanelDragDrop.setupItemDrag({
+                    el: item,
+                    node,
+                    parentList: nodes,
+                    index: idx,
+                    sourcePane: "template",
+                    getDraggedContext: () => this._draggedContext,
+                    setDraggedContext: (ctx) => { this._draggedContext = ctx; },
+                    onReorder: async (draggedNode, srcList, srcIdx, targetNode, tgtList, tgtIdx) => {
+                        srcList.splice(srcIdx, 1);
+                        tgtList.splice(tgtIdx, 0, draggedNode);
+                        await this.saveTemplates(true);
+                        await this.renderTemplatePane();
                     }
                 });
-
-                if (this.isEditMode) {
-                    itemEl.querySelector(".btn-edit-buff")?.addEventListener("click", (e) => {
-                        e.stopPropagation();
-                        this.showBuffEditorDialog(node);
-                    });
-                    itemEl.querySelector(".btn-clone-buff")?.addEventListener("click", async (e) => {
-                        e.stopPropagation();
-                        await this.cloneBuff(node, nodes, idx);
-                    });
-                }
-
-                container.appendChild(itemEl);
             }
         });
     }
 
     /**
-     * 渲染当前单位生效 Buff 栏
+     * 渲染右侧单位栏（按 Token 原生 details 分组，直观对称）
      */
     static async renderUnitPane() {
-        const treeEl = this.panelEl.querySelector(".r20-unit-tree");
-        const summaryEl = this.panelEl.querySelector(".unit-pane-summary");
-        if (!treeEl) return;
-        treeEl.innerHTML = "";
+        const container = this.panelEl.querySelector(".r20-unit-tree");
+        if (!container) return;
 
         const selectedTokens = this.getSelectedTokens();
-
         if (selectedTokens.length === 0) {
-            summaryEl.textContent = "未选择棋子";
-            treeEl.innerHTML = `<div class="r20-empty-placeholder">点击画布选中 1 个或多个棋子<br><span style="font-size:10px; color:#546e7a;">此处将实时展示棋子身上生效及未生效的 Buff</span></div>`;
+            container.innerHTML = '<div class="r20-empty-placeholder">未选中任何地图单位<br>在画布上点击或多选 Token</div>';
             return;
         }
 
-        summaryEl.textContent = selectedTokens.length === 1 ? `已选: ${selectedTokens[0].name}` : `已选中 ${selectedTokens.length} 个单位`;
-        const { allBuffRows } = await this.getBuffStatsForSelected(selectedTokens);
+        container.innerHTML = "";
 
-        if (allBuffRows.length === 0) {
-            treeEl.innerHTML = `<div class="r20-empty-placeholder">当前选中棋子身上暂无任何 Buff<br><span style="font-size:10px; color:#546e7a;">可点击上方模板库直接点按施加</span></div>`;
-            return;
+        for (const tokenItem of selectedTokens) {
+            const char = tokenItem.char;
+            const tokenName = tokenItem.token?.get("name") || char?.get("name") || "未命名单位";
+
+            const details = document.createElement("details");
+            details.className = "r20-group";
+            details.open = true;
+
+            const summary = document.createElement("summary");
+            summary.innerHTML = `<span>🛡️ ${tokenName}</span>`;
+            details.appendChild(summary);
+
+            const content = document.createElement("div");
+            content.className = "r20-group-content";
+
+            if (char) {
+                const buffs = await Pf1eBuffManager.getAllBuffs(char);
+                if (buffs.length === 0) {
+                    content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(暂无Buff)</div>';
+                } else {
+                    buffs.forEach(b => {
+                        const item = document.createElement("div");
+                        item.className = "r20-tree-item";
+                        item.dataset.charId = char.id;
+                        item.dataset.buffId = b.id;
+                        item.dataset.name = b.name;
+                        item.title = "点击从单位身上移除";
+                        item.draggable = true;
+
+                        item.innerHTML = `
+                            <span class="r20-item-name">${b.name}</span>
+                            <span class="r20-item-rounds" style="color:#ef5350;">${b.rounds ? b.rounds + '轮' : '永久'} ×</span>
+                        `;
+
+                        content.appendChild(item);
+
+                        // 支持从单位栏反向拖拽至模板库另存为模板
+                        BuffPanelDragDrop.setupItemDrag({
+                            el: item,
+                            node: b,
+                            parentList: null,
+                            index: 0,
+                            sourcePane: "unit",
+                            getDraggedContext: () => this._draggedContext,
+                            setDraggedContext: (ctx) => { this._draggedContext = ctx; },
+                            onCrossCopy: async (draggedNode, targetNode, parentList, idx) => {
+                                const newTpl = {
+                                    id: "tpl_" + Math.random().toString(36).substr(2, 9),
+                                    type: "buff",
+                                    name: draggedNode.name,
+                                    rounds: draggedNode.rounds,
+                                    extraAttrs: draggedNode.extraAttrs || null
+                                };
+                                if (targetNode.type === "folder") {
+                                    if (!targetNode.children) targetNode.children = [];
+                                    targetNode.children.push(newTpl);
+                                } else {
+                                    parentList.splice(idx, 0, newTpl);
+                                }
+                                await this.saveTemplates(true);
+                                await this.renderTemplatePane();
+                            }
+                        });
+                    });
+                }
+            } else {
+                content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(无关联人物卡)</div>';
+            }
+
+            details.appendChild(content);
+            container.appendChild(details);
         }
-
-        allBuffRows.forEach(item => {
-            const itemEl = document.createElement("div");
-            const isFullActive = item.enabledCount === selectedTokens.length;
-            const isPartialActive = item.enabledCount > 0 && !isFullActive;
-            const isInactive = item.enabledCount === 0;
-
-            let itemClass = "";
-            if (!this.isEditMode) {
-                if (isFullActive) itemClass = "full-active";
-                else if (isPartialActive) itemClass = "partial-active";
-            } else if (this.editSelectedIds.has(`unit_${item.name}`)) {
-                itemClass = "edit-selected";
-            }
-
-            itemEl.className = `r20-tree-item ${itemClass}`;
-            if (this.isEditMode) itemEl.draggable = true;
-
-            let statusBadge = "";
-            let actionText = "";
-            if (isInactive) {
-                statusBadge = `<span style="font-size:10px; color:#90a4ae; background:rgba(255,255,255,0.06); padding:1px 4px; border-radius:3px;">○ 未启用</span>`;
-                actionText = `<span style="font-size:10px; color:#81c784;">＋ 启用</span>`;
-            } else if (isFullActive) {
-                statusBadge = `<span class="r20-item-rounds">${item.rounds !== null ? item.rounds + '轮' : '永久'}</span>`;
-                actionText = `<span style="font-size:10px; color:#ef5350;">✕ 解除</span>`;
-            } else {
-                statusBadge = `<span style="font-size:10px; color:#ffd54f;">部分(${item.enabledCount}/${selectedTokens.length})</span>`;
-                actionText = `<span style="font-size:10px; color:#ef5350;">✕ 解除</span>`;
-            }
-
-            itemEl.innerHTML = `
-                <div class="r20-item-left">
-                    <span class="r20-item-name">${item.name}</span>
-                    ${statusBadge}
-                </div>
-                ${this.isEditMode ? `<span style="font-size:10px; color:#ba68c8;">可拖至模板库复制</span>` : actionText}
-            `;
-
-            if (!this.isEditMode) {
-                itemEl.addEventListener("click", async () => {
-                    const shouldApply = isInactive;
-                    await this.toggleBuffAction(item.name, item.rounds, item.extraAttrs, shouldApply);
-                    await Pf1eBuffUI.refreshAllBadges();
-                    await this.renderAllPanes();
-                });
-            } else {
-                itemEl.addEventListener("click", () => {
-                    const idKey = `unit_${item.name}`;
-                    if (this.editSelectedIds.has(idKey)) this.editSelectedIds.delete(idKey);
-                    else this.editSelectedIds.add(idKey);
-                    this.renderUnitPane();
-                });
-
-                const nodeData = {
-                    id: "unit_" + item.name,
-                    name: item.name,
-                    rounds: item.rounds,
-                    extraAttrs: item.extraAttrs,
-                    type: "buff"
-                };
-                BuffPanelDragDrop.setupItemDrag({
-                    el: itemEl,
-                    node: nodeData,
-                    parentList: allBuffRows,
-                    index: 0,
-                    sourcePane: "unit",
-                    getDraggedContext: () => this._draggedData,
-                    setDraggedContext: (ctx) => { this._draggedData = ctx; }
-                });
-            }
-
-            treeEl.appendChild(itemEl);
-        });
     }
 
     /**
-     * 施加或解除指定 Buff
+     * 为选中的单位批量施加或移除 Buff
      */
-    static async toggleBuffAction(buffName, rounds, extraAttrs, apply) {
+    static async toggleBuffOnSelected(buffName, rounds, extraAttrs) {
         const selected = this.getSelectedTokens();
-        if (selected.length === 0) return;
+        if (selected.length === 0) {
+            this.showToast("⚠️ 请先在画布上选择目标 Token", "warn");
+            return;
+        }
+
+        const { activeStats } = await this.getBuffStatsForSelected(selected);
+        const stat = activeStats.get(buffName);
+        const isFull = stat && stat.count === stat.total;
+        const shouldApply = !isFull;
 
         for (const item of selected) {
-            if (apply) {
-                if (item.type === "character" && item.char) {
-                    await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs);
-                } else if (item.token) {
-                    TokenBuffManager.applyOrRefreshBuff(item.token, buffName, rounds, extraAttrs);
-                }
-            } else {
-                if (item.type === "character" && item.char) {
-                    const allBuffs = await Pf1eBuffManager.getAllBuffs(item.char);
-                    const target = allBuffs.find(b => b.name === buffName);
-                    if (target && target.rowId) {
-                        await Pf1eBuffManager.removeBuff(item.char, target.rowId);
-                    }
-                } else if (item.token) {
-                    TokenBuffManager.removeBuff(item.token, buffName);
+            if (item.char) {
+                if (shouldApply) {
+                    await TokenBuffManager.applyBuff(item.char, buffName, rounds, extraAttrs);
+                } else {
+                    await TokenBuffManager.removeBuff(item.char, buffName);
                 }
             }
         }
-    }
 
-    /**
-     * 批量删除选中的项目（从原生角色卡彻底物理销毁）
-     */
-    static async deleteSelectedBuffs() {
-        if (this.editSelectedIds.size === 0) {
-            this.showToast("⚠️ 请先在列表中点击要删除的项目（高亮选中）", "warn");
-            return;
-        }
-
-        const count = this.editSelectedIds.size;
-        if (!confirm(`确定要彻底删除选中的 ${count} 个项目吗？\n（此操作将从云端角色卡彻底物理销毁，绝不复活）`)) return;
-
-        // 收集所有要被删除的 Buff 的 rowId / id
-        const deletedRowIds = new Set();
-        const collectBuffRowIds = (item) => {
-            if (item.type === "buff") {
-                deletedRowIds.add(item.rowId || item.id);
-            } else if (item.type === "folder" && item.children) {
-                item.children.forEach(collectBuffRowIds);
-            }
-        };
-
-        const removeRecursive = (list) => {
-            for (let i = list.length - 1; i >= 0; i--) {
-                const item = list[i];
-                if (this.editSelectedIds.has(item.id)) {
-                    collectBuffRowIds(item);
-                    list.splice(i, 1);
-                } else if (item.children) {
-                    removeRecursive(item.children);
-                }
-            }
-        };
-
-        removeRecursive(this.templates);
-        this.editSelectedIds.clear();
-
-        // 立即物理销毁原生角色卡上的数据
-        const dbChar = SuiteConfigStore.findDatabaseCharacter();
-        if (dbChar) {
-            for (const rowId of deletedRowIds) {
-                await Pf1eBuffManager.deleteBuffRowPermanently(dbChar, rowId);
-            }
-        }
-
-        await this.saveTemplates(true);
+        await Pf1eBuffUI.refreshAllBadges();
         await this.renderAllPanes();
-        this.showToast(`🗑️ 已彻底删除 ${count} 个项目`, "success");
+        this.showToast(`${shouldApply ? "✨ 施加" : "❌ 移除"} Buff [${buffName}]`, "success");
     }
 
     /**
-     * 复制一个 Buff 模板
+     * 统计当前选中 Token 对特定 Buff 的激活覆盖率
      */
-    static async cloneBuff(node, list, index) {
-        const clone = {
-            id: "b_" + Date.now(),
-            type: "buff",
-            name: `${node.name} (副本)`,
-            rounds: node.rounds,
-            extraAttrs: node.extraAttrs ? JSON.parse(JSON.stringify(node.extraAttrs)) : null
-        };
-        list.splice(index + 1, 0, clone);
-        await this.saveTemplates(true);
-        await this.renderTemplatePane();
-    }
+    static async getBuffStatsForSelected(selectedTokens) {
+        const activeStats = new Map();
+        if (selectedTokens.length === 0) return { activeStats };
 
-    /**
-     * 新建文件夹
-     */
-    static async showNewFolderDialog() {
-        const name = prompt("请输入新文件夹名称:");
-        if (!name || !name.trim()) return;
-
-        this.templates.push({
-            id: "f_" + Date.now(),
-            type: "folder",
-            name: name.trim(),
-            collapsed: false,
-            children: []
-        });
-        await this.saveTemplates(true);
-        await this.renderTemplatePane();
-    }
-
-    /**
-     * 新建/编辑 Buff 弹窗
-     */
-    static showBuffEditorDialog(existingNode = null) {
-        const isEditing = !!existingNode;
-        const mask = document.createElement("div");
-        mask.className = "r20-dialog-mask";
-
-        const currentName = isEditing ? existingNode.name : "";
-        const currentRounds = isEditing && existingNode.rounds !== null && existingNode.rounds !== undefined ? existingNode.rounds : "";
-        const currentJson = isEditing
-            ? JSON.stringify(existingNode.extraAttrs || {}, null, 2)
-            : `{
-  "bufftype": "spell",
-  "b1-show": 1,
-  "b1_bonus": "attack",
-  "b1_bonustype": "luck",
-  "b1_val": 1
-}`;
-
-        mask.innerHTML = BuffPanelTemplates.getBuffEditorModalHTML({
-            isEditing,
-            currentName,
-            currentRounds,
-            currentJson
-        });
-
-        document.body.appendChild(mask);
-        mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
-        mask.querySelector(".btn-save").addEventListener("click", async () => {
-            const name = mask.querySelector(".input-buff-name").value.trim();
-            if (!name) { alert("请输入 Buff 名称"); return; }
-
-            const roundsVal = mask.querySelector(".input-buff-rounds").value.trim();
-            const rounds = roundsVal === "" ? null : parseInt(roundsVal, 10);
-
-            let extraAttrs = null;
-            const jsonText = mask.querySelector(".input-buff-json").value.trim();
-            if (jsonText) {
-                try { extraAttrs = JSON.parse(jsonText); }
-                catch (err) { alert("JSON 细目格式错误:\n" + err.message); return; }
-            }
-
-            if (isEditing) {
-                existingNode.name = name;
-                existingNode.rounds = rounds;
-                existingNode.extraAttrs = extraAttrs;
-            } else {
-                this.templates.push({
-                    id: "b_" + Date.now(),
-                    type: "buff",
-                    name,
-                    rounds,
-                    extraAttrs
+        for (const item of selectedTokens) {
+            if (item.char) {
+                const buffs = await Pf1eBuffManager.getAllBuffs(item.char);
+                buffs.forEach(b => {
+                    const cur = activeStats.get(b.name) || { count: 0, total: selectedTokens.length };
+                    cur.count++;
+                    activeStats.set(b.name, cur);
                 });
             }
-
-            const saved = await this.saveTemplates(true);
-            if (saved) {
-                await this.renderTemplatePane();
-                mask.remove();
-                this.showToast(`✅ 已保存 Buff [${name}] 到战役原生角色卡`, "success");
-            }
-        });
+        }
+        return { activeStats };
     }
 
     /**
-     * 从角色卡导入 Buff 弹窗
+     * 刷新并加载模板库
      */
-    static async showImportFromCharacterDialog() {
-        const selected = this.getSelectedTokens();
-        let character = null;
-
-        if (selected.length > 0) {
-            const charItem = selected.find(s => s.type === "character" && s.char);
-            if (charItem) character = charItem.char;
-        }
-
-        if (!character) {
-            if (!window.Campaign || !window.Campaign.characters || window.Campaign.characters.length === 0) {
-                this.showToast("⚠️ 战役中暂无可用的角色卡", "warn");
-                return;
-            }
-            character = window.Campaign.characters.at(0);
-        }
-
-        await Roll20Bridge.ensureCharacterAttributes(character);
-        const cardBuffs = await Pf1eBuffManager.getAllBuffs(character);
-
-        if (cardBuffs.length === 0) {
-            this.showToast(`ℹ️ 角色 [${character.get("name")}] 卡上未找到任何 Buff 条目`, "warn");
-            return;
-        }
-
-        const folders = [{ id: "root", name: "📁 根目录" }];
-        const collectFolders = (nodes, depth = 0) => {
-            nodes.forEach(n => {
-                if (n.type === "folder") {
-                    folders.push({ id: n.id, name: `${"　".repeat(depth + 1)}📁 ${n.name}`, ref: n });
-                    if (n.children) collectFolders(n.children, depth + 1);
-                }
-            });
-        };
-        collectFolders(this.templates);
-
-        const mask = document.createElement("div");
-        mask.className = "r20-dialog-mask";
-        mask.innerHTML = BuffPanelTemplates.getImportModalHTML({
-            charName: character.get("name"),
-            folders,
-            cardBuffs
-        });
-
-        document.body.appendChild(mask);
-        mask.querySelector(".cb-import-select-all").addEventListener("change", (e) => {
-            const checked = e.target.checked;
-            mask.querySelectorAll(".cb-import-item").forEach(cb => cb.checked = checked);
-        });
-
-        mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
-        mask.querySelector(".btn-confirm-import").addEventListener("click", async () => {
-            const checkedBoxes = Array.from(mask.querySelectorAll(".cb-import-item:checked"));
-            if (checkedBoxes.length === 0) { alert("请先勾选至少一个要导入的 Buff 条目"); return; }
-
-            const targetFolderId = mask.querySelector(".select-target-folder").value;
-            let targetList = this.templates;
-
-            if (targetFolderId !== "root") {
-                const targetObj = folders.find(f => f.id === targetFolderId);
-                if (targetObj && targetObj.ref) {
-                    targetObj.ref.children = targetObj.ref.children || [];
-                    targetList = targetObj.ref.children;
-                }
-            }
-
-            checkedBoxes.forEach(cb => {
-                const idx = parseInt(cb.dataset.idx, 10);
-                const b = cardBuffs[idx];
-                targetList.push({
-                    id: "b_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5),
-                    type: "buff",
-                    name: b.name,
-                    rounds: b.rounds,
-                    extraAttrs: b.extraAttrs
-                });
-            });
-
-            await this.saveTemplates(true);
-            await this.renderTemplatePane();
-            mask.remove();
-            this.showToast(`🎉 已成功导入 ${checkedBoxes.length} 项 Buff！`, "success");
-        });
-    }
-
-    /**
-     * 保存模板（带有内部互斥锁，防止删除与保存期间触发回环同步）
-     */
-    static async saveTemplates(promptIfMissing = false) {
-        this.isInternalSaving = true;
+    static async refreshTemplates(showNotice = false) {
         try {
-            return await SuiteConfigStore.saveTemplates(this.templates, promptIfMissing);
-        } finally {
-            setTimeout(() => {
-                this.isInternalSaving = false;
-            }, 300);
+            this.templates = await SuiteConfigStore.loadTemplates();
+            await this.renderAllPanes();
+            if (showNotice) this.showToast("🔄 模板库与数据库卡同步就绪", "success");
+        } catch (e) {
+            console.error("[BuffFloatingPanel] 刷新模板库失败:", e);
         }
     }
 
-    static collectFolderBuffNames(folder) {
-        const names = [];
-        const walk = (nodes) => {
-            nodes.forEach(n => {
-                if (n.type === "buff") names.push(n.name);
-                else if (n.children) walk(n.children);
+    /**
+     * 保存模板库
+     */
+    static async saveTemplates(syncToDatabase = true) {
+        try {
+            await SuiteConfigStore.saveTemplates(this.templates, syncToDatabase);
+        } catch (e) {
+            console.error("[BuffFloatingPanel] 保存模板失败:", e);
+        }
+    }
+
+    /**
+     * 监听数据库角色卡属性变动
+     */
+    static initDatabaseCharacterWatcher() {
+        if (this._dbWatcherBound) return;
+        this._dbWatcherBound = true;
+
+        const attachToChar = (char) => {
+            if (!char || !char.attribs) return;
+            char.attribs.on("add change remove reset", () => {
+                if (this.isInternalSaving) return;
+                if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
+                this._dbSyncTimer = setTimeout(async () => {
+                    if (this.isInternalSaving) return;
+                    await this.refreshTemplates(false);
+                }, 300);
             });
         };
-        walk(folder.children || []);
-        return names;
+
+        const dbChar = SuiteConfigStore.findDatabaseCharacter();
+        if (dbChar) attachToChar(dbChar);
+
+        if (window.Campaign?.characters) {
+            window.Campaign.characters.on("add", (c) => {
+                if (c.get("name") === SuiteConfigStore.DATABASE_CHARACTER_NAME) attachToChar(c);
+            });
+        }
     }
 
-    static findBuffNodeByName(container, name) {
-        let found = null;
-        const walk = (nodes) => {
-            for (const n of nodes) {
-                if (found) return;
-                if (n.type === "buff" && n.name === name) { found = n; return; }
-                if (n.children) walk(n.children);
+    /**
+     * 选区变动监听
+     */
+    static initSelectionListeners() {
+        const checkChanged = () => {
+            const tokens = this.getSelectedTokens();
+            const idsStr = tokens.map(t => t.token?.id || t.char?.id || t.name).sort().join(",");
+            if (idsStr !== this._lastSelectedIdsStr) {
+                this._lastSelectedIdsStr = idsStr;
+                this.renderAllPanes();
             }
         };
-        walk(container.children || [container]);
-        return found;
+
+        const engine = window.Campaign?.engine?.tabletop;
+        if (engine && typeof engine.on === "function") {
+            engine.on("selection:change", checkChanged);
+        }
+
+        window.addEventListener("selectionchange", checkChanged);
+        document.addEventListener("selectionchange", checkChanged);
+        setInterval(checkChanged, 600);
     }
 
-    static showToast(msg, type = "info") {
-        let toast = document.querySelector("#r20-toast-global");
-        if (!toast) {
-            toast = document.createElement("div");
-            toast.id = "r20-toast-global";
-            toast.className = "r20-toast";
-            document.body.appendChild(toast);
-        }
-        toast.className = `r20-toast ${type}`;
-        toast.textContent = msg;
-        toast.style.display = "block";
-        toast.style.opacity = "1";
+    /**
+     * 提取当前画布选中的 Token 与角色模型
+     */
+    static getSelectedTokens() {
+        const result = [];
+        const seen = new Set();
+        const tt = window.Campaign?.engine?.tabletop;
 
-        if (this._toastTimer) clearTimeout(this._toastTimer);
-        this._toastTimer = setTimeout(() => {
-            toast.style.opacity = "0";
-            setTimeout(() => toast.style.display = "none", 300);
-        }, 2200);
+        if (tt && typeof tt.getSelection === "function") {
+            const selection = tt.getSelection() || [];
+            for (const item of selection) {
+                const tokenId = item.id;
+                if (!tokenId || seen.has(tokenId)) continue;
+                seen.add(tokenId);
+
+                const tokenModel = item.model || Roll20Bridge.getTokenGraphic(tokenId);
+                if (tokenModel) {
+                    const charId = tokenModel.get("represents");
+                    const char = charId ? window.Campaign.characters.get(charId) : null;
+                    result.push({ token: tokenModel, char, name: tokenModel.get("name") || "Token" });
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 悬浮吸附收起与展开
+     */
+    static initHoverCollapse() {
+        let hoverTimer = null;
+        this.panelEl.addEventListener("mouseenter", () => {
+            if (hoverTimer) clearTimeout(hoverTimer);
+            if (!this.isPinned && this.isCollapsed) {
+                this.setCollapsed(false);
+            }
+        });
+
+        this.panelEl.addEventListener("mouseleave", () => {
+            if (!this.isPinned && !this.isCollapsed) {
+                hoverTimer = setTimeout(() => {
+                    if (!this.isPinned) this.setCollapsed(true);
+                }, 400);
+            }
+        });
+    }
+
+    /**
+     * 固定状态切换
+     */
+    static togglePin() {
+        this.isPinned = !this.isPinned;
+        localStorage.setItem(this.PIN_KEY, String(this.isPinned));
+        this.updatePinState();
+        if (this.isPinned) this.setCollapsed(false);
+    }
+
+    static updatePinState() {
+        const pinBtn = this.panelEl.querySelector(".btn-toggle-pin");
+        if (pinBtn) {
+            pinBtn.classList.toggle("pinned", this.isPinned);
+            pinBtn.title = this.isPinned ? "已固定（鼠标移开不自动收起）" : "未固定（鼠标移开后自动收起）";
+        }
+    }
+
+    /**
+     * 折叠/展开控制
+     */
+    static toggleCollapse() {
+        this.setCollapsed(!this.isCollapsed);
+    }
+
+    static setCollapsed(collapsed) {
+        this.isCollapsed = collapsed;
+        this.panelEl.classList.toggle("is-collapsed", collapsed);
+        const minBtn = this.panelEl.querySelector(".btn-minimize");
+        if (minBtn) minBtn.textContent = collapsed ? "+" : "-";
+        this.updateLayoutDirection();
+    }
+
+    /**
+     * 根据视口边界更新向上或向下生长方向
+     */
+    static updateLayoutDirection() {
+        if (!this.panelEl) return;
+        const rect = this.panelEl.getBoundingClientRect();
+        const headerTop = rect.top;
+        const windowHeight = window.innerHeight;
+
+        // 若标题栏位于屏幕下半区（离底部不足 380px 且上方空间充裕），向上展示
+        if (headerTop > windowHeight / 2 && (windowHeight - headerTop < 380)) {
+            this.panelEl.classList.remove("direction-down");
+            this.panelEl.classList.add("direction-up");
+        } else {
+            this.panelEl.classList.remove("direction-up");
+            this.panelEl.classList.add("direction-down");
+        }
+    }
+
+    /**
+     * 恢复持久化位置
+     */
+    static restorePanelPosition() {
+        const saved = localStorage.getItem(this.POS_KEY);
+        let left = Math.max(10, window.innerWidth - 340);
+        let top = 100;
+
+        if (saved) {
+            try {
+                const pos = JSON.parse(saved);
+                if (pos.left !== undefined) left = Math.max(10, Math.min(window.innerWidth - 340, pos.left));
+                if (pos.top !== undefined) top = Math.max(10, Math.min(window.innerHeight - 40, pos.top));
+            } catch (e) {}
+        }
+
+        this.panelEl.style.left = `${left}px`;
+        this.panelEl.style.top = `${top}px`;
+    }
+
+    static savePosition() {
+        const pos = { left: this.panelEl.offsetLeft, top: this.panelEl.offsetTop };
+        localStorage.setItem(this.POS_KEY, JSON.stringify(pos));
+        this.updateLayoutDirection();
+    }
+
+    /**
+     * 简易 Toast 提示条
+     */
+    static showToast(msg, type = "info") {
+        const toast = this.panelEl.querySelector("#r20-buff-toast");
+        if (!toast) return;
+        toast.textContent = msg;
+        toast.className = "r20-toast " + type;
+        toast.style.display = "block";
+        setTimeout(() => { toast.style.display = "none"; }, 2500);
     }
 }

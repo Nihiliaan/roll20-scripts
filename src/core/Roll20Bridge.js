@@ -126,4 +126,17 @@ export class Roll20Bridge {
             console.warn("[Roll20Bridge] 无法找到聊天输入组件");
         }
     }
+    /**
+     * 调起 Roll20 宿主原生的角色卡弹窗
+     * @param {string} characterId
+     */
+    static openCharacterSheet(characterId) {
+        if (!characterId) return false;
+        const el = document.querySelector('.journalitem[data-itemid="' + characterId + '"] .namecontainer');
+        if (el) {
+            el.click();
+            return true;
+        }
+        return false;
+    }
 }
