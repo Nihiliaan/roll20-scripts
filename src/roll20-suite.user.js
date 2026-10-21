@@ -506,58 +506,60 @@ class Pf1eBuffManager {
     // ==========================================
 /**
  * SuiteConfigStore.js
- * 战役级云端配置角色卡读写层：
- * 1. 约定角色卡名称：=== R20_SUITE_DATABASE ===
- * 2. 角色卡为模板库的唯一真实来源（Single Source of Truth），所有 Buff 均以原生 repeating_buff2 存储；
- * 3. 严格数据真实性：若配置卡不存在，模板库直接为空，绝不注入本地预设；
- * 4. 树形拓扑结构保存在角色卡轻量属性 r20_suite_tree_structure 中，保证与原生编辑器双向实时同步。
+ * 战役云端配置卡存储层（SSOT 单一真实数据源架构）
+ * 1. 唯一真实数据源：=== R20_SUITE_DATABASE === 角色卡上的 repeating_buff2_* 原生属性；
+ * 2. 拓扑属性 buff_tree_structure 仅记录目录层级与组织关系，绝不覆写原生属性，绝不盲目误杀卡上数据；
+ * 3. 增删改查均采用原子操作，杜绝双状态竞争。
  */
+
+
+
 class SuiteConfigStore {
-    static DB_CHAR_NAME = "=== R20_SUITE_DATABASE ===";
-    static ATTR_TREE_STRUCTURE = "r20_suite_tree_structure";
+    static DATABASE_CHARACTER_NAME = "=== R20_SUITE_DATABASE ===";
+    static DB_CHAR_NAME = this.DATABASE_CHARACTER_NAME;
+    static ATTR_TREE_STRUCTURE = "buff_tree_structure";
 
     /**
-     * 判断当前是否为 GM 身份
+     * 判断当前登录玩家是否具备 GM (裁判) 权限
      */
     static isGM() {
-        if (window.is_gm) return true;
-        const myPlayerId = window.d20_player_id;
-        if (window.Campaign && window.Campaign.players && myPlayerId) {
-            const player = window.Campaign.players.get(myPlayerId);
-            if (player && (player.get("displayname") === "GM" || player.get("is_gm"))) {
-                return true;
-            }
-        }
-        return false;
+        return window.isGM === true;
     }
 
     /**
-     * 寻找配置角色卡
+     * 查找战役中专用于存储 Suite 配置的公共人物卡
      */
     static findDatabaseCharacter() {
         if (!window.Campaign || !window.Campaign.characters) return null;
-        return window.Campaign.characters.find(c => {
-            const n = (c.get("name") || "").trim();
-            return n === this.DB_CHAR_NAME || n.toLowerCase() === this.DB_CHAR_NAME.toLowerCase();
-        }) || null;
+        return window.Campaign.characters.models.find(
+            c => c.get("name") === this.DATABASE_CHARACTER_NAME && !c.get("archived")
+        ) || null;
     }
 
     /**
-     * 创建配置角色卡（保持原生默认权限，不擅自修改可控/可见）
+     * 自动新建战役配置人物卡（仅 GM 可调用）
      */
     static async createDatabaseCharacter() {
-        if (!window.Campaign || !window.Campaign.characters) return null;
+        if (!this.isGM()) {
+            console.warn("[SuiteConfigStore] 仅 GM 裁判可创建配置角色卡");
+            return null;
+        }
+
         const newChar = window.Campaign.characters.create({
-            name: this.DB_CHAR_NAME
+            name: this.DATABASE_CHARACTER_NAME,
+            avatar: "",
+            bio: "Roll20 Suite 战役全局状态 Buff 模板库存储卡。请勿手动修改本卡名称。",
+            inplayerjournals: "all",
+            controlledby: "all"
         });
+
+        console.log("[SuiteConfigStore] 成功创建战役公共配置卡: " + this.DATABASE_CHARACTER_NAME);
         await Roll20Bridge.ensureCharacterAttributes(newChar);
-        console.log(`[SuiteConfigStore] 已创建云端配置角色卡 [${this.DB_CHAR_NAME}]`);
         return newChar;
     }
 
     /**
-     * 读取 Buff 模板数据
-     * 若配置角色卡不存在，严格返回空数组（玩家模式回退读取自己可控卡）
+     * 读取 Buff 模板数据（完全以数据库角色卡上的原生 repeating_buff2 为基准）
      */
     static async loadTemplates() {
         const isGMUser = this.isGM();
@@ -569,25 +571,25 @@ class SuiteConfigStore {
                 await dbChar.connectAttributesAndAbilities();
             }
 
-            // 1. 读取原生角色卡上的所有 repeating_buff2 条目
+            // 1. 直接读取原生卡上所有 repeating_buff2 原生 Buff 条目
             const nativeBuffs = await Pf1eBuffManager.getAllBuffs(dbChar);
             const nativeBuffMap = new Map();
             nativeBuffs.forEach(b => {
                 if (b.rowId) nativeBuffMap.set(b.rowId, b);
             });
 
-            // 2. 读取树形拓扑映射
+            // 2. 读取纯拓扑结构（仅用于目录分类排版）
             let treeStructure = null;
             const treeAttr = dbChar.attribs && dbChar.attribs.models.find(a => a.get("name") === this.ATTR_TREE_STRUCTURE);
             if (treeAttr && treeAttr.get("current")) {
                 try {
                     treeStructure = JSON.parse(treeAttr.get("current"));
                 } catch (e) {
-                    console.warn("[SuiteConfigStore] 解析拓扑结构失败，将平铺展示原生Buff:", e);
+                    console.warn("[SuiteConfigStore] 解析拓扑结构失败:", e);
                 }
             }
 
-            // 3. 根据拓扑树重建带有原生属性的模板树
+            // 3. 将原生 Buff 按照拓扑树重建组织结构
             const usedRowIds = new Set();
             const reconstructTree = (nodes) => {
                 const result = [];
@@ -624,7 +626,7 @@ class SuiteConfigStore {
                 finalTemplates = reconstructTree(treeStructure);
             }
 
-            // 4. 将在原生角色卡上直接新增、未录入拓扑树的原生 Buff 追加到根列表
+            // 4. 所有未在拓扑树中归类的原生 Buff（例如用户在官方卡上直接新增的），全部天然直接呈现在根目录下！
             nativeBuffs.forEach(b => {
                 if (!usedRowIds.has(b.rowId)) {
                     finalTemplates.push({
@@ -641,7 +643,7 @@ class SuiteConfigStore {
             return finalTemplates;
         }
 
-        // 如果是玩家且无配置卡，自动汇总玩家控制的所有角色卡上的 Buff
+        // 玩家模式回退：汇总自己控制的角色卡上的 Buff
         if (!isGMUser) {
             const playerBuffs = await this.collectPlayerControlledBuffs();
             if (playerBuffs.length > 0) {
@@ -657,71 +659,21 @@ class SuiteConfigStore {
             }
         }
 
-        // 绝不回退任何假数据或内置常量
         return [];
     }
 
     /**
-     * 保存 Buff 模板数据至原生角色卡
-     * @param {Array} templates 模板树列表
-     * @param {boolean} promptIfMissing 若找不到卡且为 GM，是否弹窗询问创建
+     * 仅保存目录拓扑结构（绝不覆写或误杀角色卡上的任何原生属性）
      */
-    static async saveTemplates(templates, promptIfMissing = false) {
-        const isGMUser = this.isGM();
+    static async saveTopology(templates) {
         let dbChar = this.findDatabaseCharacter();
-
-        if (!dbChar && isGMUser && promptIfMissing) {
-            const confirmCreate = confirm(`未检测到战役配置卡 [${this.DB_CHAR_NAME}]。\n是否立刻新建该卡以将状态 Buff 模板保存至云端原生角色卡？\n（点击【取消】将放弃本次保存）`);
-            if (confirmCreate) {
-                dbChar = await this.createDatabaseCharacter();
-            } else {
-                return false;
-            }
+        if (!dbChar && this.isGM()) {
+            dbChar = await this.createDatabaseCharacter();
         }
-
         if (!dbChar) return false;
 
         await Roll20Bridge.ensureCharacterAttributes(dbChar);
-        const existingBuffs = await Pf1eBuffManager.getAllBuffs(dbChar);
-        const existingRowMap = new Map();
-        existingBuffs.forEach(b => {
-            if (b.rowId) existingRowMap.set(b.rowId, b);
-        });
 
-        const activeRowIdsInTemplates = new Set();
-
-        // 递归同步 Buff 条目至原生 repeating_buff2 属性
-        const syncNodesToNative = async (nodes) => {
-            for (const node of nodes) {
-                if (node.type === "folder") {
-                    if (node.children) await syncNodesToNative(node.children);
-                } else if (node.type === "buff") {
-                    let rowId = node.rowId || node.id;
-                    const isExisting = rowId && existingRowMap.has(rowId);
-
-                    if (!isExisting) {
-                        // 新建原生条目
-                        rowId = window.generateUUID ? window.generateUUID() : ("-R20" + Math.random().toString(36).substr(2, 16));
-                        node.id = rowId;
-                        node.rowId = rowId;
-                    }
-
-                    activeRowIdsInTemplates.add(rowId);
-                    await this.writeNativeBuffRow(dbChar, rowId, node.name, node.rounds, node.extraAttrs);
-                }
-            }
-        };
-
-        await syncNodesToNative(templates);
-
-        // 删除在原生卡上已不存在于模板树中的 Buff（物理彻底销毁）
-        for (const [oldRowId] of existingRowMap) {
-            if (!activeRowIdsInTemplates.has(oldRowId)) {
-                await Pf1eBuffManager.deleteBuffRowPermanently(dbChar, oldRowId);
-            }
-        }
-
-        // 保存纯拓扑树映射
         const extractTopology = (nodes) => {
             return nodes.map(n => {
                 if (n.type === "folder") {
@@ -742,8 +694,9 @@ class SuiteConfigStore {
         };
 
         const topology = extractTopology(templates);
-        let treeAttr = dbChar.attribs && dbChar.attribs.models.find(a => a.get("name") === this.ATTR_TREE_STRUCTURE);
         const topoJson = JSON.stringify(topology);
+
+        let treeAttr = dbChar.attribs && dbChar.attribs.models.find(a => a.get("name") === this.ATTR_TREE_STRUCTURE);
         if (!treeAttr) {
             dbChar.attribs.create({
                 name: this.ATTR_TREE_STRUCTURE,
@@ -753,93 +706,134 @@ class SuiteConfigStore {
             treeAttr.save({ current: topoJson });
         }
 
-        console.log(`[SuiteConfigStore] 已全量同步 ${activeRowIdsInTemplates.size} 条原生 Buff 到角色卡 [${this.DB_CHAR_NAME}]`);
         return true;
+    }
+
+    /**
+     * 原子新增一个 Buff 到数据库角色卡
+     */
+    static async addBuffToDatabase(name, rounds = null, extraAttrs = null) {
+        let dbChar = this.findDatabaseCharacter();
+        if (!dbChar && this.isGM()) {
+            dbChar = await this.createDatabaseCharacter();
+        }
+        if (!dbChar) return null;
+
+        await Roll20Bridge.ensureCharacterAttributes(dbChar);
+
+        const rowId = window.generateUUID ? window.generateUUID() : ("-R20" + Math.random().toString(36).substr(2, 16));
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs);
+
+        console.log("[SuiteConfigStore] 原子创建原生 Buff [" + name + "] (rowId: " + rowId + ")");
+        return rowId;
+    }
+
+    /**
+     * 原子删除一个 Buff（彻底物理销毁）
+     */
+    static async deleteBuffFromDatabase(rowId) {
+        const dbChar = this.findDatabaseCharacter();
+        if (!dbChar || !rowId) return false;
+
+        await Roll20Bridge.ensureCharacterAttributes(dbChar);
+        await Pf1eBuffManager.deleteBuffRowPermanently(dbChar, rowId);
+
+        // 从拓扑属性中同步剔除
+        const treeAttr = dbChar.attribs && dbChar.attribs.models.find(a => a.get("name") === this.ATTR_TREE_STRUCTURE);
+        if (treeAttr && treeAttr.get("current")) {
+            try {
+                let topo = JSON.parse(treeAttr.get("current"));
+                const cleanNode = (nodes) => {
+                    for (let i = nodes.length - 1; i >= 0; i--) {
+                        if (nodes[i].type === "buff" && (nodes[i].id === rowId || nodes[i].rowId === rowId)) {
+                            nodes.splice(i, 1);
+                        } else if (nodes[i].children) {
+                            cleanNode(nodes[i].children);
+                        }
+                    }
+                };
+                cleanNode(topo);
+                treeAttr.save({ current: JSON.stringify(topo) });
+            } catch (e) {}
+        }
+
+        console.log("[SuiteConfigStore] 原子彻底销毁原生 Buff (rowId: " + rowId + ")");
+        return true;
+    }
+
+    /**
+     * 兼容别名（统一收拢至 saveTopology）
+     */
+    static async saveTemplates(templates) {
+        return this.saveTopology(templates);
     }
 
     /**
      * 将一条 Buff 写入原生 repeating_buff2_<rowId> 属性集
      */
     static async writeNativeBuffRow(character, rowId, name, rounds, extraAttrs) {
-        const prefix = `repeating_buff2_${rowId}`;
-        const attrsToSet = {
-            [`${prefix}_name`]: name || "未命名Buff",
-            [`${prefix}_enable_toggle`]: 0, // 模板卡默认不激活
-            [`${prefix}_rounds`]: rounds !== null && rounds !== undefined ? rounds : "",
-            [`${prefix}_bufftype`]: (extraAttrs && extraAttrs.bufftype) || "spell",
-            [`${prefix}_tabcat`]: "spell",
-            [`${prefix}_tabcat2`]: "1",
-            [`${prefix}_row_id`]: rowId.toLowerCase(),
-            [`${prefix}_description-show`]: 1
-        };
+        if (!character || !rowId) return false;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+
+        const prefix = "repeating_buff2_" + rowId;
+        const attrs = [
+            { name: prefix + "_name", current: name || "未命名Buff" },
+            { name: prefix + "_enable_toggle", current: 0 },
+            { name: prefix + "_tabcat2", current: "1" },
+            { name: prefix + "_rounds", current: (rounds !== null && rounds !== undefined && rounds !== "") ? rounds : "" },
+            { name: prefix + "_bufftype", current: (extraAttrs && extraAttrs.bufftype) ? extraAttrs.bufftype : "spell" },
+            { name: prefix + "_tabcat", current: (extraAttrs && extraAttrs.bufftype) ? extraAttrs.bufftype : "spell" },
+            { name: prefix + "_row_id", current: rowId.toLowerCase() },
+            { name: prefix + "_description-show", current: 1 }
+        ];
 
         if (extraAttrs && typeof extraAttrs === "object") {
-            Object.entries(extraAttrs).forEach(([k, v]) => {
-                if (k !== "name" && k !== "enable_toggle" && k !== "rounds" && k !== "tabcat" && k !== "tabcat2" && k !== "row_id") {
-                    attrsToSet[`${prefix}_${k}`] = v;
+            for (const [key, val] of Object.entries(extraAttrs)) {
+                if (key !== "name" && key !== "enable_toggle" && key !== "rounds" && key !== "bufftype" && key !== "tabcat") {
+                    attrs.push({ name: prefix + "_" + key, current: val });
                 }
-            });
+            }
         }
 
-        const models = character.attribs ? character.attribs.models : [];
-        const prefixWithUnderscore = `${prefix}_`;
-
-        // 1. 设置或更新所有属性
-        Object.entries(attrsToSet).forEach(([attrName, attrVal]) => {
-            const existing = models.find(m => m.get("name") === attrName);
-            if (existing) {
-                existing.save({ current: attrVal });
+        for (const item of attrs) {
+            let attr = character.attribs && character.attribs.models.find(a => a.get("name") === item.name);
+            if (!attr) {
+                character.attribs.create(item);
             } else {
-                character.attribs.create({
-                    name: attrName,
-                    current: attrVal
-                });
+                attr.save({ current: item.current });
             }
-        });
-
-        // 2. 清理在本次编辑中被显式删除的细目属性，保持与角色卡完全同步
-        const newKeys = new Set(Object.keys(attrsToSet));
-        const obsoleteAttrs = models.filter(m => {
-            const n = m.get("name") || "";
-            return n.startsWith(prefixWithUnderscore) && !newKeys.has(n);
-        });
-        obsoleteAttrs.forEach(a => a.destroy());
+        }
+        return true;
     }
 
     /**
-     * 玩家模式：扫描玩家有控制权的角色卡并聚合成 Buff 模板
+     * 收集玩家控制卡上的 Buff
      */
     static async collectPlayerControlledBuffs() {
-        if (!window.Campaign || !window.Campaign.characters) return [];
-        const myPlayerId = window.d20_player_id;
-        const list = [];
-        const seenNames = new Set();
+        const result = [];
+        if (!window.Campaign || !window.Campaign.characters) return result;
+        const currentUserId = window.Roll20?.getCurrentUserId?.() || "";
 
-        for (let i = 0; i < window.Campaign.characters.length; i++) {
-            const char = window.Campaign.characters.at(i);
-            const controlledBy = (char.get("controlledby") || "").split(",");
-            const canControl = controlledBy.includes("all") || controlledBy.includes(myPlayerId);
-            if (!canControl) continue;
+        for (const char of window.Campaign.characters.models) {
+            const controlledby = char.get("controlledby") || "";
+            const isControlled = controlledby.split(",").includes("all") || (currentUserId && controlledby.split(",").includes(currentUserId));
 
-            await Roll20Bridge.ensureCharacterAttributes(char);
-            if (!char.attribs || !char.attribs.models) continue;
-
-            const cardBuffs = await Pf1eBuffManager.getAllBuffs(char);
-            cardBuffs.forEach(b => {
-                if (!seenNames.has(b.name)) {
-                    seenNames.add(b.name);
-                    list.push({
-                        id: "b_player_" + Math.random().toString(36).substr(2, 7),
+            if (isControlled && char.get("name") !== this.DATABASE_CHARACTER_NAME) {
+                await Roll20Bridge.ensureCharacterAttributes(char);
+                const buffs = await Pf1eBuffManager.getAllBuffs(char);
+                buffs.forEach(b => {
+                    result.push({
+                        id: "pb_" + char.id + "_" + b.rowId,
+                        rowId: b.rowId,
                         type: "buff",
-                        name: b.name,
+                        name: b.name + " (" + char.get("name") + ")",
                         rounds: b.rounds,
-                        extraAttrs: b.extraAttrs
+                        extraAttrs: b.extraAttrs || null
                     });
-                }
-            });
+                });
+            }
         }
-
-        return list;
+        return result;
     }
 }
 
@@ -1980,12 +1974,13 @@ class BuffPanelDragDrop {
     // ==========================================
 /**
  * BuffFloatingPanel.js
- * 状态Buff工作台主控制器（极简具名字典模型 + 宿主原生能力驱动）
- * 1. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
- * 2. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
- * 3. 严格遵循垂直上下排版（上栏模板库，下栏当前单位）；
- * 4. 标题栏常驻「✏️ 编辑」模式切换，进入后才展示工具栏与复选框；
- * 5. 完善 Firebase 异步注水自愈机制，初次加载自动秒刷。
+ * 状态Buff工作台主控制器（SSOT 单一真实数据源 + 宿主原生能力驱动）
+ * 1. 唯一真实数据源：=== R20_SUITE_DATABASE === 角色卡，面板直接基于角色卡引用，绝无独立脱节内存变量；
+ * 2. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
+ * 3. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
+ * 4. 垂直上下排版（上栏模板库，下栏当前单位）；
+ * 5. 标题栏「✏️ 编辑」模式切换，进入后才展示工具栏与复选框；
+ * 6. 增删均采用原子操作，杜绝全量覆盖与误杀。
  */
 
 
@@ -2003,7 +1998,7 @@ class BuffFloatingPanel {
     static isPinned = false;
     static isCollapsed = false;
     static isEditMode = false;
-    static templates = [];
+    static currentTemplates = [];
     static isInternalSaving = false;
     static _dbWatcherBound = false;
     static _dbSyncTimer = null;
@@ -2032,49 +2027,32 @@ class BuffFloatingPanel {
         this.initSelectionListeners();
         this.initDatabaseCharacterWatcher();
 
-        // 初始加载模板数据并自愈补刷（应对 Firebase 异步注水延迟）
-        await this.refreshTemplates(false);
-        if (this.templates.length === 0) {
-            setTimeout(async () => {
-                const dbChar = SuiteConfigStore.findDatabaseCharacter();
-                if (dbChar) await Roll20Bridge.ensureCharacterAttributes(dbChar);
-                await this.refreshTemplates(false);
-            }, 600);
-            setTimeout(async () => {
-                await this.refreshTemplates(false);
-            }, 1800);
-        }
+        // 初始渲染两栏
+        await this.renderAllPanes();
 
-        // 绑定底部放置兜底
+        // 绑定底部放置兜底（移动至根目录）
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
         BuffPanelDragDrop.setupTreeContainerDrop({
             el: templateTree,
             getDraggedContext: () => this._draggedContext,
             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
             onCrossCopyRoot: async (draggedNode) => {
-                this.templates.push({
-                    id: "tpl_" + Math.random().toString(36).substr(2, 9),
-                    type: "buff",
-                    name: draggedNode.name,
-                    rounds: draggedNode.rounds,
-                    extraAttrs: draggedNode.extraAttrs || null
-                });
-                await this.saveTemplates(true);
+                await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
                 await this.renderTemplatePane();
             },
             onReorderRoot: async (draggedNode, sourceList, sourceIdx) => {
                 sourceList.splice(sourceIdx, 1);
-                this.templates.push(draggedNode);
-                await this.saveTemplates(true);
+                this.currentTemplates.push(draggedNode);
+                await SuiteConfigStore.saveTopology(this.currentTemplates);
                 await this.renderTemplatePane();
             }
         });
 
-        console.log("[BuffFloatingPanel] 极简工作台初始化就绪 (上下排版 + 编辑模式)");
+        console.log("[BuffFloatingPanel] SSOT 极简工作台初始化就绪");
     }
 
     /**
-     * 构建极简面板主 DOM (垂直上下双栏排版)
+     * 构建面板主 DOM (垂直上下双栏排版)
      */
     static createPanelDOM() {
         const panel = document.createElement("div");
@@ -2130,7 +2108,7 @@ class BuffFloatingPanel {
         panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
 
         // 绑定工具栏
-        panel.querySelector(".btn-refresh-templates").addEventListener("click", () => this.refreshTemplates(true));
+        panel.querySelector(".btn-refresh-templates").addEventListener("click", () => this.renderTemplatePane(true));
         panel.querySelector(".btn-new-buff").addEventListener("click", () => this.createBuffPrompt());
         panel.querySelector(".btn-new-folder").addEventListener("click", () => this.createFolderPrompt());
         panel.querySelector(".btn-open-sheet").addEventListener("click", () => this.openDatabaseSheet());
@@ -2156,7 +2134,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 极简事件委托：非编辑状态点击直接切换施加；编辑状态支持勾选
+     * 极简事件委托：非编辑模式直接应用；编辑模式点击切换勾选
      */
     static initPaneEvents() {
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -2164,7 +2142,6 @@ class BuffFloatingPanel {
 
         // 模板栏点击
         templateTree.addEventListener("click", async (e) => {
-            // 点击复选框或折叠标题直接放行
             if (e.target.classList.contains("r20-cb-select") || e.target.closest("summary")) return;
 
             const item = e.target.closest(".r20-tree-item");
@@ -2187,7 +2164,7 @@ class BuffFloatingPanel {
             await this.toggleBuffOnSelected(name, rounds, extraAttrs);
         });
 
-        // 单位栏点击（点击快速扣减或移除）
+        // 单位栏点击（点击从单位身上移除）
         unitTree.addEventListener("click", async (e) => {
             if (e.target.closest("summary")) return;
             const item = e.target.closest(".r20-tree-item");
@@ -2202,7 +2179,7 @@ class BuffFloatingPanel {
                     await TokenBuffManager.removeBuff(char, buffName);
                     await Pf1eBuffUI.refreshAllBadges();
                     await this.renderAllPanes();
-                    this.showToast(`已从 ${char.get("name")} 移除 ${buffName}`, "info");
+                    this.showToast("已从 " + char.get("name") + " 移除 " + buffName, "info");
                 }
             }
         });
@@ -2226,7 +2203,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 极简新建 Buff
+     * 原子创建 Buff（直接在角色卡上新建，绝无中间变量覆盖）
      */
     static async createBuffPrompt() {
         const name = prompt("请输入 Buff 名称:");
@@ -2238,47 +2215,44 @@ class BuffFloatingPanel {
             rounds = parseInt(roundsInput);
         }
 
-        const newBuff = {
-            id: "tpl_" + Math.random().toString(36).substr(2, 9),
-            type: "buff",
-            name: name.trim(),
-            rounds: rounds,
-            extraAttrs: {
-                bufftype: "spell",
-                "b1-show": 1,
-                b1_bonus: "attack",
-                b1_bonustype: "luck",
-                b1_val: 1
-            }
+        const defaultExtraAttrs = {
+            bufftype: "spell",
+            "b1-show": 1,
+            b1_bonus: "attack",
+            b1_bonustype: "luck",
+            b1_val: 1
         };
 
-        this.templates.push(newBuff);
-        await this.saveTemplates(true);
-        await this.renderTemplatePane();
-        this.showToast(`✨ Buff [${name.trim()}] 创建成功`, "success");
+        const rowId = await SuiteConfigStore.addBuffToDatabase(name.trim(), rounds, defaultExtraAttrs);
+        if (rowId) {
+            await this.renderTemplatePane();
+            this.showToast("✨ Buff [" + name.trim() + "] 已在角色卡上原子创建成功", "success");
+        } else {
+            this.showToast("⚠️ 创建 Buff 失败，请确保战役配置卡存在", "warn");
+        }
     }
 
     /**
-     * 极简新建目录
+     * 极简新建目录（保存至拓扑属性）
      */
     static async createFolderPrompt() {
         const folderName = prompt("请输入新目录名称:");
         if (!folderName || !folderName.trim()) return;
 
-        this.templates.push({
+        this.currentTemplates.push({
             id: "f_" + Math.random().toString(36).substr(2, 6),
             type: "folder",
             name: folderName.trim(),
             children: []
         });
 
-        await this.saveTemplates(true);
+        await SuiteConfigStore.saveTopology(this.currentTemplates);
         await this.renderTemplatePane();
-        this.showToast(`📁 目录 [${folderName.trim()}] 创建成功`, "success");
+        this.showToast("📁 目录 [" + folderName.trim() + "] 创建成功", "success");
     }
 
     /**
-     * 批量删除选中的模板项（物理销毁属性并同步）
+     * 原子批量删除选中的 Buff 条目（直接从卡上物理销毁，绝无复活可能）
      */
     static async deleteSelectedTemplates() {
         const checkboxes = Array.from(this.panelEl.querySelectorAll(".r20-template-tree .r20-cb-select:checked"));
@@ -2287,37 +2261,18 @@ class BuffFloatingPanel {
             return;
         }
 
-        if (!confirm(`确定要彻底删除选中的 ${checkboxes.length} 个 Buff 项吗？`)) return;
+        if (!confirm("确定要彻底销毁选中的 " + checkboxes.length + " 个 Buff 项吗？")) return;
 
         this.isInternalSaving = true;
-        const dbChar = SuiteConfigStore.findDatabaseCharacter();
 
         for (const cb of checkboxes) {
-            const id = cb.value;
-            this.deleteNodeById(this.templates, id);
-            if (dbChar) {
-                await Pf1eBuffManager.destroyBuff(dbChar, id);
-            }
+            const rowId = cb.value;
+            await SuiteConfigStore.deleteBuffFromDatabase(rowId);
         }
 
-        await this.saveTemplates(true);
         this.isInternalSaving = false;
         await this.renderTemplatePane();
-        this.showToast(`🗑️ 已彻底删除 ${checkboxes.length} 项`, "success");
-    }
-
-    /**
-     * 从具名字典树中递归删除指定 ID 的节点
-     */
-    static deleteNodeById(list, id) {
-        for (let i = list.length - 1; i >= 0; i--) {
-            if (list[i].id === id || list[i].rowId === id) {
-                list.splice(i, 1);
-                return true;
-            }
-            if (list[i].children && this.deleteNodeById(list[i].children, id)) return true;
-        }
-        return false;
+        this.showToast("🗑️ 已彻底销毁 " + checkboxes.length + " 项原生 Buff", "success");
     }
 
     /**
@@ -2329,22 +2284,32 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 渲染模板库（基于具名字典与原生 <details><summary>）
+     * 渲染模板库（现场从角色卡直接读取，SSOT 单一真实源）
      */
-    static async renderTemplatePane() {
+    static async renderTemplatePane(showNotice = false) {
         const container = this.panelEl.querySelector(".r20-template-tree");
         if (!container) return;
 
-        if (this.templates.length === 0) {
-            container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「✏️ 编辑」再点「+ Buff」新建</div>';
-            return;
+        try {
+            // 直接现场读取角色卡最新数据
+            const templates = await SuiteConfigStore.loadTemplates();
+            this.currentTemplates = templates;
+
+            if (templates.length === 0) {
+                container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「✏️ 编辑」再点「+ Buff」新建</div>';
+                return;
+            }
+
+            const selectedTokens = this.getSelectedTokens();
+            const { activeStats } = await this.getBuffStatsForSelected(selectedTokens);
+
+            container.innerHTML = "";
+            this.renderTemplateNodes(templates, container, activeStats, selectedTokens);
+
+            if (showNotice) this.showToast("🔄 模板库已与原生卡完全同步", "success");
+        } catch (e) {
+            console.error("[BuffFloatingPanel] 渲染模板库异常:", e);
         }
-
-        const selectedTokens = this.getSelectedTokens();
-        const { activeStats } = await this.getBuffStatsForSelected(selectedTokens);
-
-        container.innerHTML = "";
-        this.renderTemplateNodes(this.templates, container, activeStats, selectedTokens);
     }
 
     /**
@@ -2358,7 +2323,7 @@ class BuffFloatingPanel {
                 details.open = true;
 
                 const summary = document.createElement("summary");
-                summary.innerHTML = `<span>📁 ${node.name}</span>`;
+                summary.innerHTML = "<span>📁 " + node.name + "</span>";
                 details.appendChild(summary);
 
                 const groupContent = document.createElement("div");
@@ -2387,7 +2352,7 @@ class BuffFloatingPanel {
                             if (!targetNode.children) targetNode.children = [];
                             targetNode.children.push(draggedNode);
                         }
-                        await this.saveTemplates(true);
+                        await SuiteConfigStore.saveTopology(this.currentTemplates);
                         await this.renderTemplatePane();
                     }
                 });
@@ -2404,12 +2369,15 @@ class BuffFloatingPanel {
                 item._extraAttrs = node.extraAttrs || null;
                 item.draggable = true;
 
+                const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") ? (node.rounds + "轮") : "永久";
+                const rowId = node.rowId || node.id;
+
                 item.innerHTML = `
                     <label class="r20-item-label" title="${node.name}">
-                        <input type="checkbox" class="r20-cb-select" value="${node.id || node.rowId}">
+                        <input type="checkbox" class="r20-cb-select" value="${rowId}">
                         <span class="r20-item-name">${node.name}</span>
                     </label>
-                    <span class="r20-item-rounds">${node.rounds ? node.rounds + '轮' : '永久'}</span>
+                    <span class="r20-item-rounds">${roundsText}</span>
                 `;
 
                 container.appendChild(item);
@@ -2426,7 +2394,7 @@ class BuffFloatingPanel {
                     onReorder: async (draggedNode, srcList, srcIdx, targetNode, tgtList, tgtIdx) => {
                         srcList.splice(srcIdx, 1);
                         tgtList.splice(tgtIdx, 0, draggedNode);
-                        await this.saveTemplates(true);
+                        await SuiteConfigStore.saveTopology(this.currentTemplates);
                         await this.renderTemplatePane();
                     }
                 });
@@ -2458,7 +2426,7 @@ class BuffFloatingPanel {
             details.open = true;
 
             const summary = document.createElement("summary");
-            summary.innerHTML = `<span>🛡️ ${tokenName}</span>`;
+            summary.innerHTML = "<span>🛡️ " + tokenName + "</span>";
             details.appendChild(summary);
 
             const content = document.createElement("div");
@@ -2478,9 +2446,11 @@ class BuffFloatingPanel {
                         item.title = "点击从单位身上移除";
                         item.draggable = true;
 
+                        const roundsText = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? (b.rounds + "轮") : "永久";
+
                         item.innerHTML = `
                             <span class="r20-item-name">${b.name}</span>
-                            <span class="r20-item-rounds" style="color:#ef5350;">${b.rounds ? b.rounds + '轮' : '永久'} ×</span>
+                            <span class="r20-item-rounds" style="color:#ef5350;">${roundsText} ×</span>
                         `;
 
                         content.appendChild(item);
@@ -2495,21 +2465,10 @@ class BuffFloatingPanel {
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
                             onCrossCopy: async (draggedNode, targetNode, parentList, idx) => {
-                                const newTpl = {
-                                    id: "tpl_" + Math.random().toString(36).substr(2, 9),
-                                    type: "buff",
-                                    name: draggedNode.name,
-                                    rounds: draggedNode.rounds,
-                                    extraAttrs: draggedNode.extraAttrs || null
-                                };
-                                if (targetNode.type === "folder") {
-                                    if (!targetNode.children) targetNode.children = [];
-                                    targetNode.children.push(newTpl);
-                                } else {
-                                    parentList.splice(idx, 0, newTpl);
+                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
+                                if (newRowId) {
+                                    await this.renderTemplatePane();
                                 }
-                                await this.saveTemplates(true);
-                                await this.renderTemplatePane();
                             }
                         });
                     });
@@ -2550,7 +2509,7 @@ class BuffFloatingPanel {
 
         await Pf1eBuffUI.refreshAllBadges();
         await this.renderAllPanes();
-        this.showToast(`${shouldApply ? "✨ 施加" : "❌ 移除"} Buff [${buffName}]`, "success");
+        this.showToast((shouldApply ? "✨ 施加" : "❌ 移除") + " Buff [" + buffName + "]", "success");
     }
 
     /**
@@ -2574,31 +2533,7 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 刷新并加载模板库
-     */
-    static async refreshTemplates(showNotice = false) {
-        try {
-            this.templates = await SuiteConfigStore.loadTemplates();
-            await this.renderAllPanes();
-            if (showNotice) this.showToast("🔄 模板库与数据库卡同步就绪", "success");
-        } catch (e) {
-            console.error("[BuffFloatingPanel] 刷新模板库失败:", e);
-        }
-    }
-
-    /**
-     * 保存模板库
-     */
-    static async saveTemplates(syncToDatabase = true) {
-        try {
-            await SuiteConfigStore.saveTemplates(this.templates, syncToDatabase);
-        } catch (e) {
-            console.error("[BuffFloatingPanel] 保存模板失败:", e);
-        }
-    }
-
-    /**
-     * 监听数据库角色卡属性变动
+     * 监听数据库角色卡属性变动（实时双向联动）
      */
     static initDatabaseCharacterWatcher() {
         if (this._dbWatcherBound) return;
@@ -2606,15 +2541,21 @@ class BuffFloatingPanel {
 
         const attachToChar = (char) => {
             if (!char) return;
-            if (char.attribs) {
+            const bind = () => {
+                if (!char.attribs) return;
                 char.attribs.on("add change remove reset", () => {
                     if (this.isInternalSaving) return;
                     if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
                     this._dbSyncTimer = setTimeout(async () => {
                         if (this.isInternalSaving) return;
-                        await this.refreshTemplates(false);
-                    }, 300);
+                        await this.renderTemplatePane();
+                    }, 200);
                 });
+            };
+
+            bind();
+            if (typeof char.connectAttributesAndAbilities === "function" && (!char.attribs || char.attribs.length === 0)) {
+                char.connectAttributesAndAbilities().then(() => bind());
             }
         };
 
@@ -2740,7 +2681,6 @@ class BuffFloatingPanel {
         const headerTop = rect.top;
         const windowHeight = window.innerHeight;
 
-        // 若标题栏位于屏幕下半区（离底部不足 380px 且上方空间充裕），向上展示
         if (headerTop > windowHeight / 2 && (windowHeight - headerTop < 380)) {
             this.panelEl.classList.remove("direction-down");
             this.panelEl.classList.add("direction-up");

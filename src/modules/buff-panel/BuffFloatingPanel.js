@@ -1,11 +1,12 @@
 /**
  * BuffFloatingPanel.js
- * 状态Buff工作台主控制器（极简具名字典模型 + 宿主原生能力驱动）
- * 1. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
- * 2. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
- * 3. 严格遵循垂直上下排版（上栏模板库，下栏当前单位）；
- * 4. 标题栏常驻「✏️ 编辑」模式切换，进入后才展示工具栏与复选框；
- * 5. 完善 Firebase 异步注水自愈机制，初次加载自动秒刷。
+ * 状态Buff工作台主控制器（SSOT 单一真实数据源 + 宿主原生能力驱动）
+ * 1. 唯一真实数据源：=== R20_SUITE_DATABASE === 角色卡，面板直接基于角色卡引用，绝无独立脱节内存变量；
+ * 2. 窗口拖拽直接调用宿主 jQuery UI window.$(el).draggable()；
+ * 3. 树形折叠直接采用 HTML5 原生 <details><summary>，0 行手写监听；
+ * 4. 垂直上下排版（上栏模板库，下栏当前单位）；
+ * 5. 标题栏「✏️ 编辑」模式切换，进入后才展示工具栏与复选框；
+ * 6. 增删均采用原子操作，杜绝全量覆盖与误杀。
  */
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
@@ -23,7 +24,7 @@ export class BuffFloatingPanel {
     static isPinned = false;
     static isCollapsed = false;
     static isEditMode = false;
-    static templates = [];
+    static currentTemplates = [];
     static isInternalSaving = false;
     static _dbWatcherBound = false;
     static _dbSyncTimer = null;
@@ -52,49 +53,32 @@ export class BuffFloatingPanel {
         this.initSelectionListeners();
         this.initDatabaseCharacterWatcher();
 
-        // 初始加载模板数据并自愈补刷（应对 Firebase 异步注水延迟）
-        await this.refreshTemplates(false);
-        if (this.templates.length === 0) {
-            setTimeout(async () => {
-                const dbChar = SuiteConfigStore.findDatabaseCharacter();
-                if (dbChar) await Roll20Bridge.ensureCharacterAttributes(dbChar);
-                await this.refreshTemplates(false);
-            }, 600);
-            setTimeout(async () => {
-                await this.refreshTemplates(false);
-            }, 1800);
-        }
+        // 初始渲染两栏
+        await this.renderAllPanes();
 
-        // 绑定底部放置兜底
+        // 绑定底部放置兜底（移动至根目录）
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
         BuffPanelDragDrop.setupTreeContainerDrop({
             el: templateTree,
             getDraggedContext: () => this._draggedContext,
             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
             onCrossCopyRoot: async (draggedNode) => {
-                this.templates.push({
-                    id: "tpl_" + Math.random().toString(36).substr(2, 9),
-                    type: "buff",
-                    name: draggedNode.name,
-                    rounds: draggedNode.rounds,
-                    extraAttrs: draggedNode.extraAttrs || null
-                });
-                await this.saveTemplates(true);
+                await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
                 await this.renderTemplatePane();
             },
             onReorderRoot: async (draggedNode, sourceList, sourceIdx) => {
                 sourceList.splice(sourceIdx, 1);
-                this.templates.push(draggedNode);
-                await this.saveTemplates(true);
+                this.currentTemplates.push(draggedNode);
+                await SuiteConfigStore.saveTopology(this.currentTemplates);
                 await this.renderTemplatePane();
             }
         });
 
-        console.log("[BuffFloatingPanel] 极简工作台初始化就绪 (上下排版 + 编辑模式)");
+        console.log("[BuffFloatingPanel] SSOT 极简工作台初始化就绪");
     }
 
     /**
-     * 构建极简面板主 DOM (垂直上下双栏排版)
+     * 构建面板主 DOM (垂直上下双栏排版)
      */
     static createPanelDOM() {
         const panel = document.createElement("div");
@@ -150,7 +134,7 @@ export class BuffFloatingPanel {
         panel.querySelector(".btn-minimize").addEventListener("click", () => this.toggleCollapse());
 
         // 绑定工具栏
-        panel.querySelector(".btn-refresh-templates").addEventListener("click", () => this.refreshTemplates(true));
+        panel.querySelector(".btn-refresh-templates").addEventListener("click", () => this.renderTemplatePane(true));
         panel.querySelector(".btn-new-buff").addEventListener("click", () => this.createBuffPrompt());
         panel.querySelector(".btn-new-folder").addEventListener("click", () => this.createFolderPrompt());
         panel.querySelector(".btn-open-sheet").addEventListener("click", () => this.openDatabaseSheet());
@@ -176,7 +160,7 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 极简事件委托：非编辑状态点击直接切换施加；编辑状态支持勾选
+     * 极简事件委托：非编辑模式直接应用；编辑模式点击切换勾选
      */
     static initPaneEvents() {
         const templateTree = this.panelEl.querySelector(".r20-template-tree");
@@ -184,7 +168,6 @@ export class BuffFloatingPanel {
 
         // 模板栏点击
         templateTree.addEventListener("click", async (e) => {
-            // 点击复选框或折叠标题直接放行
             if (e.target.classList.contains("r20-cb-select") || e.target.closest("summary")) return;
 
             const item = e.target.closest(".r20-tree-item");
@@ -207,7 +190,7 @@ export class BuffFloatingPanel {
             await this.toggleBuffOnSelected(name, rounds, extraAttrs);
         });
 
-        // 单位栏点击（点击快速扣减或移除）
+        // 单位栏点击（点击从单位身上移除）
         unitTree.addEventListener("click", async (e) => {
             if (e.target.closest("summary")) return;
             const item = e.target.closest(".r20-tree-item");
@@ -222,7 +205,7 @@ export class BuffFloatingPanel {
                     await TokenBuffManager.removeBuff(char, buffName);
                     await Pf1eBuffUI.refreshAllBadges();
                     await this.renderAllPanes();
-                    this.showToast(`已从 ${char.get("name")} 移除 ${buffName}`, "info");
+                    this.showToast("已从 " + char.get("name") + " 移除 " + buffName, "info");
                 }
             }
         });
@@ -246,7 +229,7 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 极简新建 Buff
+     * 原子创建 Buff（直接在角色卡上新建，绝无中间变量覆盖）
      */
     static async createBuffPrompt() {
         const name = prompt("请输入 Buff 名称:");
@@ -258,47 +241,44 @@ export class BuffFloatingPanel {
             rounds = parseInt(roundsInput);
         }
 
-        const newBuff = {
-            id: "tpl_" + Math.random().toString(36).substr(2, 9),
-            type: "buff",
-            name: name.trim(),
-            rounds: rounds,
-            extraAttrs: {
-                bufftype: "spell",
-                "b1-show": 1,
-                b1_bonus: "attack",
-                b1_bonustype: "luck",
-                b1_val: 1
-            }
+        const defaultExtraAttrs = {
+            bufftype: "spell",
+            "b1-show": 1,
+            b1_bonus: "attack",
+            b1_bonustype: "luck",
+            b1_val: 1
         };
 
-        this.templates.push(newBuff);
-        await this.saveTemplates(true);
-        await this.renderTemplatePane();
-        this.showToast(`✨ Buff [${name.trim()}] 创建成功`, "success");
+        const rowId = await SuiteConfigStore.addBuffToDatabase(name.trim(), rounds, defaultExtraAttrs);
+        if (rowId) {
+            await this.renderTemplatePane();
+            this.showToast("✨ Buff [" + name.trim() + "] 已在角色卡上原子创建成功", "success");
+        } else {
+            this.showToast("⚠️ 创建 Buff 失败，请确保战役配置卡存在", "warn");
+        }
     }
 
     /**
-     * 极简新建目录
+     * 极简新建目录（保存至拓扑属性）
      */
     static async createFolderPrompt() {
         const folderName = prompt("请输入新目录名称:");
         if (!folderName || !folderName.trim()) return;
 
-        this.templates.push({
+        this.currentTemplates.push({
             id: "f_" + Math.random().toString(36).substr(2, 6),
             type: "folder",
             name: folderName.trim(),
             children: []
         });
 
-        await this.saveTemplates(true);
+        await SuiteConfigStore.saveTopology(this.currentTemplates);
         await this.renderTemplatePane();
-        this.showToast(`📁 目录 [${folderName.trim()}] 创建成功`, "success");
+        this.showToast("📁 目录 [" + folderName.trim() + "] 创建成功", "success");
     }
 
     /**
-     * 批量删除选中的模板项（物理销毁属性并同步）
+     * 原子批量删除选中的 Buff 条目（直接从卡上物理销毁，绝无复活可能）
      */
     static async deleteSelectedTemplates() {
         const checkboxes = Array.from(this.panelEl.querySelectorAll(".r20-template-tree .r20-cb-select:checked"));
@@ -307,37 +287,18 @@ export class BuffFloatingPanel {
             return;
         }
 
-        if (!confirm(`确定要彻底删除选中的 ${checkboxes.length} 个 Buff 项吗？`)) return;
+        if (!confirm("确定要彻底销毁选中的 " + checkboxes.length + " 个 Buff 项吗？")) return;
 
         this.isInternalSaving = true;
-        const dbChar = SuiteConfigStore.findDatabaseCharacter();
 
         for (const cb of checkboxes) {
-            const id = cb.value;
-            this.deleteNodeById(this.templates, id);
-            if (dbChar) {
-                await Pf1eBuffManager.destroyBuff(dbChar, id);
-            }
+            const rowId = cb.value;
+            await SuiteConfigStore.deleteBuffFromDatabase(rowId);
         }
 
-        await this.saveTemplates(true);
         this.isInternalSaving = false;
         await this.renderTemplatePane();
-        this.showToast(`🗑️ 已彻底删除 ${checkboxes.length} 项`, "success");
-    }
-
-    /**
-     * 从具名字典树中递归删除指定 ID 的节点
-     */
-    static deleteNodeById(list, id) {
-        for (let i = list.length - 1; i >= 0; i--) {
-            if (list[i].id === id || list[i].rowId === id) {
-                list.splice(i, 1);
-                return true;
-            }
-            if (list[i].children && this.deleteNodeById(list[i].children, id)) return true;
-        }
-        return false;
+        this.showToast("🗑️ 已彻底销毁 " + checkboxes.length + " 项原生 Buff", "success");
     }
 
     /**
@@ -349,22 +310,32 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 渲染模板库（基于具名字典与原生 <details><summary>）
+     * 渲染模板库（现场从角色卡直接读取，SSOT 单一真实源）
      */
-    static async renderTemplatePane() {
+    static async renderTemplatePane(showNotice = false) {
         const container = this.panelEl.querySelector(".r20-template-tree");
         if (!container) return;
 
-        if (this.templates.length === 0) {
-            container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「✏️ 编辑」再点「+ Buff」新建</div>';
-            return;
+        try {
+            // 直接现场读取角色卡最新数据
+            const templates = await SuiteConfigStore.loadTemplates();
+            this.currentTemplates = templates;
+
+            if (templates.length === 0) {
+                container.innerHTML = '<div class="r20-empty-placeholder">暂无模板数据<br>点击上方「✏️ 编辑」再点「+ Buff」新建</div>';
+                return;
+            }
+
+            const selectedTokens = this.getSelectedTokens();
+            const { activeStats } = await this.getBuffStatsForSelected(selectedTokens);
+
+            container.innerHTML = "";
+            this.renderTemplateNodes(templates, container, activeStats, selectedTokens);
+
+            if (showNotice) this.showToast("🔄 模板库已与原生卡完全同步", "success");
+        } catch (e) {
+            console.error("[BuffFloatingPanel] 渲染模板库异常:", e);
         }
-
-        const selectedTokens = this.getSelectedTokens();
-        const { activeStats } = await this.getBuffStatsForSelected(selectedTokens);
-
-        container.innerHTML = "";
-        this.renderTemplateNodes(this.templates, container, activeStats, selectedTokens);
     }
 
     /**
@@ -378,7 +349,7 @@ export class BuffFloatingPanel {
                 details.open = true;
 
                 const summary = document.createElement("summary");
-                summary.innerHTML = `<span>📁 ${node.name}</span>`;
+                summary.innerHTML = "<span>📁 " + node.name + "</span>";
                 details.appendChild(summary);
 
                 const groupContent = document.createElement("div");
@@ -407,7 +378,7 @@ export class BuffFloatingPanel {
                             if (!targetNode.children) targetNode.children = [];
                             targetNode.children.push(draggedNode);
                         }
-                        await this.saveTemplates(true);
+                        await SuiteConfigStore.saveTopology(this.currentTemplates);
                         await this.renderTemplatePane();
                     }
                 });
@@ -424,12 +395,15 @@ export class BuffFloatingPanel {
                 item._extraAttrs = node.extraAttrs || null;
                 item.draggable = true;
 
+                const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") ? (node.rounds + "轮") : "永久";
+                const rowId = node.rowId || node.id;
+
                 item.innerHTML = `
                     <label class="r20-item-label" title="${node.name}">
-                        <input type="checkbox" class="r20-cb-select" value="${node.id || node.rowId}">
+                        <input type="checkbox" class="r20-cb-select" value="${rowId}">
                         <span class="r20-item-name">${node.name}</span>
                     </label>
-                    <span class="r20-item-rounds">${node.rounds ? node.rounds + '轮' : '永久'}</span>
+                    <span class="r20-item-rounds">${roundsText}</span>
                 `;
 
                 container.appendChild(item);
@@ -446,7 +420,7 @@ export class BuffFloatingPanel {
                     onReorder: async (draggedNode, srcList, srcIdx, targetNode, tgtList, tgtIdx) => {
                         srcList.splice(srcIdx, 1);
                         tgtList.splice(tgtIdx, 0, draggedNode);
-                        await this.saveTemplates(true);
+                        await SuiteConfigStore.saveTopology(this.currentTemplates);
                         await this.renderTemplatePane();
                     }
                 });
@@ -478,7 +452,7 @@ export class BuffFloatingPanel {
             details.open = true;
 
             const summary = document.createElement("summary");
-            summary.innerHTML = `<span>🛡️ ${tokenName}</span>`;
+            summary.innerHTML = "<span>🛡️ " + tokenName + "</span>";
             details.appendChild(summary);
 
             const content = document.createElement("div");
@@ -498,9 +472,11 @@ export class BuffFloatingPanel {
                         item.title = "点击从单位身上移除";
                         item.draggable = true;
 
+                        const roundsText = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? (b.rounds + "轮") : "永久";
+
                         item.innerHTML = `
                             <span class="r20-item-name">${b.name}</span>
-                            <span class="r20-item-rounds" style="color:#ef5350;">${b.rounds ? b.rounds + '轮' : '永久'} ×</span>
+                            <span class="r20-item-rounds" style="color:#ef5350;">${roundsText} ×</span>
                         `;
 
                         content.appendChild(item);
@@ -515,21 +491,10 @@ export class BuffFloatingPanel {
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
                             onCrossCopy: async (draggedNode, targetNode, parentList, idx) => {
-                                const newTpl = {
-                                    id: "tpl_" + Math.random().toString(36).substr(2, 9),
-                                    type: "buff",
-                                    name: draggedNode.name,
-                                    rounds: draggedNode.rounds,
-                                    extraAttrs: draggedNode.extraAttrs || null
-                                };
-                                if (targetNode.type === "folder") {
-                                    if (!targetNode.children) targetNode.children = [];
-                                    targetNode.children.push(newTpl);
-                                } else {
-                                    parentList.splice(idx, 0, newTpl);
+                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
+                                if (newRowId) {
+                                    await this.renderTemplatePane();
                                 }
-                                await this.saveTemplates(true);
-                                await this.renderTemplatePane();
                             }
                         });
                     });
@@ -570,7 +535,7 @@ export class BuffFloatingPanel {
 
         await Pf1eBuffUI.refreshAllBadges();
         await this.renderAllPanes();
-        this.showToast(`${shouldApply ? "✨ 施加" : "❌ 移除"} Buff [${buffName}]`, "success");
+        this.showToast((shouldApply ? "✨ 施加" : "❌ 移除") + " Buff [" + buffName + "]", "success");
     }
 
     /**
@@ -594,31 +559,7 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 刷新并加载模板库
-     */
-    static async refreshTemplates(showNotice = false) {
-        try {
-            this.templates = await SuiteConfigStore.loadTemplates();
-            await this.renderAllPanes();
-            if (showNotice) this.showToast("🔄 模板库与数据库卡同步就绪", "success");
-        } catch (e) {
-            console.error("[BuffFloatingPanel] 刷新模板库失败:", e);
-        }
-    }
-
-    /**
-     * 保存模板库
-     */
-    static async saveTemplates(syncToDatabase = true) {
-        try {
-            await SuiteConfigStore.saveTemplates(this.templates, syncToDatabase);
-        } catch (e) {
-            console.error("[BuffFloatingPanel] 保存模板失败:", e);
-        }
-    }
-
-    /**
-     * 监听数据库角色卡属性变动
+     * 监听数据库角色卡属性变动（实时双向联动）
      */
     static initDatabaseCharacterWatcher() {
         if (this._dbWatcherBound) return;
@@ -626,15 +567,21 @@ export class BuffFloatingPanel {
 
         const attachToChar = (char) => {
             if (!char) return;
-            if (char.attribs) {
+            const bind = () => {
+                if (!char.attribs) return;
                 char.attribs.on("add change remove reset", () => {
                     if (this.isInternalSaving) return;
                     if (this._dbSyncTimer) clearTimeout(this._dbSyncTimer);
                     this._dbSyncTimer = setTimeout(async () => {
                         if (this.isInternalSaving) return;
-                        await this.refreshTemplates(false);
-                    }, 300);
+                        await this.renderTemplatePane();
+                    }, 200);
                 });
+            };
+
+            bind();
+            if (typeof char.connectAttributesAndAbilities === "function" && (!char.attribs || char.attribs.length === 0)) {
+                char.connectAttributesAndAbilities().then(() => bind());
             }
         };
 
@@ -760,7 +707,6 @@ export class BuffFloatingPanel {
         const headerTop = rect.top;
         const windowHeight = window.innerHeight;
 
-        // 若标题栏位于屏幕下半区（离底部不足 380px 且上方空间充裕），向上展示
         if (headerTop > windowHeight / 2 && (windowHeight - headerTop < 380)) {
             this.panelEl.classList.remove("direction-down");
             this.panelEl.classList.add("direction-up");
