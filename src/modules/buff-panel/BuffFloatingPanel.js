@@ -167,10 +167,10 @@ export class BuffFloatingPanel {
         this.selectedNodeIds.clear();
         this.updateDeleteButtonText();
 
-        // 重新渲染模板栏：编辑模式下彻底清除 Token 激活态高亮，保证编辑视图纯净
-        await this.renderTemplatePane();
+        // 重新渲染全部窗口：让模板栏与单位栏同步响应编辑模式切换
+        await this.renderAllPanes();
 
-        this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（点击条目高亮多选，可批量删除/新建）" : "🔒 已退出编辑模式", "info");
+        this.showToast(this.isEditMode ? "✏️ 已进入编辑模式（点击条目高亮多选，可批量删除/编辑）" : "🔒 已退出编辑模式", "info");
     }
 
     /**
@@ -198,15 +198,15 @@ export class BuffFloatingPanel {
             const item = e.target.closest(".r20-tree-item");
             if (!item) return;
 
-            const id = item.dataset.id;
+            const selectId = item.dataset.selectId || `t_${item.dataset.id}`;
 
             // 编辑模式下点击整行切换高亮多选
             if (this.isEditMode) {
-                if (this.selectedNodeIds.has(id)) {
-                    this.selectedNodeIds.delete(id);
+                if (this.selectedNodeIds.has(selectId)) {
+                    this.selectedNodeIds.delete(selectId);
                     item.classList.remove("selected");
                 } else {
-                    this.selectedNodeIds.add(id);
+                    this.selectedNodeIds.add(selectId);
                     item.classList.add("selected");
                 }
                 this.updateDeleteButtonText();
@@ -221,9 +221,11 @@ export class BuffFloatingPanel {
             await this.toggleBuffOnSelected(name, rounds, extraAttrs);
         });
 
-        // 单位栏点击（双向切换开关：已激活->关停，未激活->开启）
+        // 单位栏点击
         unitTree.addEventListener("click", async (e) => {
             if (e.target.closest("summary")) return;
+            if (e.target.closest(".btn-edit-buff")) return;
+
             const item = e.target.closest(".r20-tree-item");
             if (!item) return;
 
@@ -231,7 +233,24 @@ export class BuffFloatingPanel {
             const buffId = item.dataset.buffId;
             const buffName = item.dataset.name;
             const tokenId = item.dataset.tokenId;
+            const selectId = item.dataset.selectId;
 
+            // 编辑模式下用于整行高亮多选（用于批量物理删除）
+            if (this.isEditMode) {
+                if (selectId) {
+                    if (this.selectedNodeIds.has(selectId)) {
+                        this.selectedNodeIds.delete(selectId);
+                        item.classList.remove("selected");
+                    } else {
+                        this.selectedNodeIds.add(selectId);
+                        item.classList.add("selected");
+                    }
+                    this.updateDeleteButtonText();
+                }
+                return;
+            }
+
+            // 非编辑模式下日常双向开关切换（已激活->关停，未激活->开启）
             if (charId && buffId) {
                 const char = window.Campaign?.characters?.get(charId);
                 if (char) {
@@ -272,9 +291,9 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 调出 Buff 编辑/新建弹窗
+     * 调出 Buff 编辑/新建弹窗 (支持模板与角色卡原生 Buff)
      */
-    static showBuffEditorDialog(existingNode = null) {
+    static showBuffEditorDialog(existingNode = null, charTarget = null) {
         const isEditing = !!existingNode;
         const mask = document.createElement("div");
         mask.className = "r20-dialog-mask";
@@ -291,9 +310,13 @@ export class BuffFloatingPanel {
   "b1_val": 1
 }`;
 
+        const headerTitle = isEditing
+            ? (charTarget ? `编辑单位 Buff: ${charTarget.get("name")}` : "编辑 Buff 模板")
+            : "新建 Buff 模板";
+
         mask.innerHTML = `
             <div class="r20-dialog-box">
-                <div class="r20-dialog-header">${isEditing ? "编辑 Buff 模板" : "新建 Buff 模板"}</div>
+                <div class="r20-dialog-header">${headerTitle}</div>
                 <div class="r20-dialog-body">
                     <label style="font-size:11px; color:#b0bec5;">Buff 名称:</label>
                     <input type="text" class="r20-input-text input-buff-name" value="${currentName}" placeholder="例如: 神恩、加速术..." />
@@ -331,12 +354,26 @@ export class BuffFloatingPanel {
             this.isInternalSaving = true;
             try {
                 if (isEditing) {
-                    const rowId = existingNode.rowId || existingNode.id;
-                    await SuiteConfigStore.updateBuffInDatabase(rowId, name, rounds, extraAttrs);
-                    existingNode.name = name;
-                    existingNode.rounds = rounds;
-                    existingNode.extraAttrs = extraAttrs;
-                    this.showToast("✅ 已更新 Buff [" + name + "]", "success");
+                    if (charTarget) {
+                        // 1. 编辑角色卡身上的原生 Buff
+                        const rowId = existingNode.rowId || existingNode.id;
+                        await Pf1eBuffManager.updateBuffRow(charTarget, rowId, name, rounds, extraAttrs);
+                        existingNode.name = name;
+                        existingNode.rounds = rounds;
+                        existingNode.extraAttrs = extraAttrs;
+                        this.showToast("✅ 已更新 " + charTarget.get("name") + " 的 Buff [" + name + "]", "success");
+                        await Pf1eBuffUI.refreshAllBadges();
+                        await this.renderAllPanes();
+                    } else {
+                        // 2. 编辑模板库中的 Buff 模板
+                        const rowId = existingNode.rowId || existingNode.id;
+                        await SuiteConfigStore.updateBuffInDatabase(rowId, name, rounds, extraAttrs);
+                        existingNode.name = name;
+                        existingNode.rounds = rounds;
+                        existingNode.extraAttrs = extraAttrs;
+                        this.showToast("✅ 已更新 Buff 模板 [" + name + "]", "success");
+                        await this.renderTemplatePane();
+                    }
                 } else {
                     const newRowId = await SuiteConfigStore.addBuffToDatabase(name, rounds, extraAttrs);
                     if (newRowId) {
@@ -351,9 +388,9 @@ export class BuffFloatingPanel {
                         await SuiteConfigStore.saveTopology(this.currentTemplates);
                     }
                     this.showToast("✨ 已创建 Buff [" + name + "]", "success");
+                    await this.renderTemplatePane();
                 }
                 mask.remove();
-                await this.renderTemplatePane();
             } finally {
                 setTimeout(() => { this.isInternalSaving = false; }, 300);
             }
@@ -380,7 +417,7 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 原子批量删除选中的 Buff 条目（直接从卡上物理销毁，绝无复活可能）
+     * 全域原子批量物理删除选中的 Buff 条目（同时支持模板库与角色卡原生 repeating 属性彻底销毁）
      */
     static async deleteSelectedTemplates() {
         if (this.selectedNodeIds.size === 0) {
@@ -389,20 +426,52 @@ export class BuffFloatingPanel {
         }
 
         const count = this.selectedNodeIds.size;
-        if (!confirm("确定要彻底销毁选中的 " + count + " 个 Buff 项吗？")) return;
+        if (!confirm("确定要彻底销毁选中的 " + count + " 个 Buff 项吗？\n(包含角色卡身上的原生Buff也将物理彻底抹除)")) return;
 
         this.isInternalSaving = true;
 
-        for (const rowId of this.selectedNodeIds) {
-            await SuiteConfigStore.deleteBuffFromDatabase(rowId);
+        for (const selectId of this.selectedNodeIds) {
+            if (selectId.startsWith("t_")) {
+                // 模板库项: t_{rowId}
+                const rowId = selectId.substring(2);
+                await SuiteConfigStore.deleteBuffFromDatabase(rowId);
+            } else if (selectId.startsWith("u_")) {
+                // 角色卡原生 Buff: u_{charId}_{rowId}
+                const raw = selectId.substring(2);
+                const firstUnder = raw.indexOf("_");
+                if (firstUnder !== -1) {
+                    const charId = raw.substring(0, firstUnder);
+                    const rowId = raw.substring(firstUnder + 1);
+                    const char = window.Campaign?.characters?.get(charId);
+                    if (char) {
+                        await Pf1eBuffManager.deleteBuffRowPermanently(char, rowId);
+                    }
+                }
+            } else if (selectId.startsWith("k_")) {
+                // 野怪 Token 项: k_{tokenId}_{buffName}
+                const raw = selectId.substring(2);
+                const firstUnder = raw.indexOf("_");
+                if (firstUnder !== -1) {
+                    const tokenId = raw.substring(0, firstUnder);
+                    const buffName = decodeURIComponent(raw.substring(firstUnder + 1));
+                    const token = Roll20Bridge.getTokenGraphic(tokenId);
+                    if (token) {
+                        TokenBuffManager.removeBuff(token, buffName);
+                    }
+                }
+            } else {
+                // 兼容纯 rowId
+                await SuiteConfigStore.deleteBuffFromDatabase(selectId);
+            }
         }
 
         this.selectedNodeIds.clear();
         this.updateDeleteButtonText();
         this.isInternalSaving = false;
 
-        await this.renderTemplatePane();
-        this.showToast("🗑️ 已彻底销毁 " + count + " 项原生 Buff", "success");
+        await this.renderAllPanes();
+        await Pf1eBuffUI.refreshAllBadges();
+        this.showToast("🗑️ 已彻底物理销毁 " + count + " 项 Buff", "success");
     }
 
     /**
@@ -488,11 +557,12 @@ export class BuffFloatingPanel {
                 });
             } else {
                 const rowId = node.rowId || node.id;
+                const selectId = `t_${rowId}`;
                 const stat = activeStats.get(node.name);
                 // 编辑模式下不渲染 Token 激活态高亮，确保编辑视图纯净无干扰
                 const isFull = !this.isEditMode && selectedTokens.length > 0 && stat && stat.count === stat.total;
                 const isPartial = !this.isEditMode && selectedTokens.length > 0 && stat && stat.count > 0 && !isFull;
-                const isSelected = this.isEditMode && this.selectedNodeIds.has(rowId);
+                const isSelected = this.isEditMode && (this.selectedNodeIds.has(selectId) || this.selectedNodeIds.has(rowId));
 
                 const item = document.createElement("div");
                 item.className = "r20-tree-item" + 
@@ -500,6 +570,7 @@ export class BuffFloatingPanel {
                     (isFull ? " full-active" : isPartial ? " partial-active" : "");
                 item.dataset.name = node.name;
                 item.dataset.id = rowId;
+                item.dataset.selectId = selectId;
                 if (node.rounds) item.dataset.rounds = node.rounds;
                 item._extraAttrs = node.extraAttrs || null;
                 item.draggable = true;
@@ -583,11 +654,17 @@ export class BuffFloatingPanel {
                     buffs.forEach(b => {
                         const item = document.createElement("div");
                         const isEnabled = !!b.enabled;
-                        item.className = "r20-tree-item" + (isEnabled ? " full-active" : " is-inactive");
+                        const selectId = `u_${char.id}_${b.rowId}`;
+                        const isSelected = this.isEditMode && this.selectedNodeIds.has(selectId);
+
+                        item.className = "r20-tree-item" + 
+                            (isSelected ? " selected" : "") +
+                            (isEnabled ? " full-active" : " is-inactive");
                         item.dataset.charId = char.id;
                         item.dataset.buffId = b.rowId;
+                        item.dataset.selectId = selectId;
                         item.dataset.name = b.name;
-                        item.title = isEnabled ? "已激活，点击关停" : "未激活，点击开启";
+                        item.title = this.isEditMode ? "编辑模式: 点击选中/取消选中" : (isEnabled ? "已激活，点击关停" : "未激活，点击开启");
                         item.draggable = true;
 
                         const roundsText = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? (b.rounds + "轮") : "永久";
@@ -596,9 +673,21 @@ export class BuffFloatingPanel {
                             : `<span class="r20-item-rounds" style="color:#78909c;">未激活</span>`;
 
                         item.innerHTML = `
-                            <span class="r20-item-name">${b.name}</span>
-                            ${statusBadge}
+                            <div class="r20-item-left">
+                                <span class="r20-item-name">${b.name}</span>
+                                ${statusBadge}
+                            </div>
+                            <div class="r20-item-actions">
+                                ${this.isEditMode ? `<button class="r20-btn-icon btn-edit-buff" title="编辑细目">✏️</button>` : ""}
+                            </div>
                         `;
+
+                        if (this.isEditMode) {
+                            item.querySelector(".btn-edit-buff")?.addEventListener("click", (e) => {
+                                e.stopPropagation();
+                                this.showBuffEditorDialog(b, char);
+                            });
+                        }
 
                         content.appendChild(item);
 
@@ -627,18 +716,34 @@ export class BuffFloatingPanel {
                 } else {
                     buffs.forEach(b => {
                         const item = document.createElement("div");
-                        item.className = "r20-tree-item full-active";
+                        const selectId = `k_${tokenItem.token.id}_${encodeURIComponent(b.name)}`;
+                        const isSelected = this.isEditMode && this.selectedNodeIds.has(selectId);
+
+                        item.className = "r20-tree-item full-active" + (isSelected ? " selected" : "");
                         item.dataset.tokenId = tokenItem.token.id;
                         item.dataset.name = b.name;
-                        item.title = "已激活，点击移除";
+                        item.dataset.selectId = selectId;
+                        item.title = this.isEditMode ? "编辑模式: 点击选中/取消选中" : "已激活，点击移除";
                         item.draggable = true;
 
                         const roundsText = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? (b.rounds + "轮") : "永久";
 
                         item.innerHTML = `
-                            <span class="r20-item-name">${b.name}</span>
-                            <span class="r20-item-rounds" style="color:#90caf9;">${roundsText}</span>
+                            <div class="r20-item-left">
+                                <span class="r20-item-name">${b.name}</span>
+                                <span class="r20-item-rounds" style="color:#90caf9;">${roundsText}</span>
+                            </div>
+                            <div class="r20-item-actions">
+                                ${this.isEditMode ? `<button class="r20-btn-icon btn-edit-buff" title="编辑细目">✏️</button>` : ""}
+                            </div>
                         `;
+
+                        if (this.isEditMode) {
+                            item.querySelector(".btn-edit-buff")?.addEventListener("click", (e) => {
+                                e.stopPropagation();
+                                this.showBuffEditorDialog(b, null);
+                            });
+                        }
 
                         content.appendChild(item);
 

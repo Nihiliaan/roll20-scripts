@@ -18,16 +18,23 @@ export class Pf1eBuffUI {
         const style = document.createElement("style");
         style.id = "pf1e-buff-tracker-styles";
         style.textContent = `
+            #vm-turn-order li.token, .turn-tracker li.token, #initiativewindow li.token {
+                flex-wrap: wrap !important;
+                height: auto !important;
+                min-height: 38px !important;
+                padding-bottom: 4px !important;
+            }
             .r20-buff-container {
-                display: inline-flex;
-                flex-wrap: wrap;
-                max-height: 28px;
-                max-width: 160px;
-                overflow: hidden;
-                gap: 2px 4px;
-                margin-left: 6px;
-                vertical-align: middle;
-                line-height: 1;
+                display: flex !important;
+                flex-wrap: wrap !important;
+                flex-basis: 100% !important;
+                width: 100% !important;
+                max-width: calc(100% - 40px) !important;
+                margin-left: 34px !important;
+                margin-top: 2px !important;
+                gap: 2px 4px !important;
+                line-height: 1 !important;
+                overflow: hidden !important;
             }
             .r20-buff-pill-compact {
                 display: inline-flex;
@@ -53,24 +60,6 @@ export class Pf1eBuffUI {
                 background: #7f1d1d;
                 border-color: #f87171;
                 color: #fecaca;
-            }
-            .r20-add-buff-btn {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                width: 15px;
-                height: 15px;
-                background: rgba(255, 255, 255, 0.08);
-                color: #90a4ae;
-                font-size: 11px;
-                border-radius: 3px;
-                cursor: pointer;
-                margin-left: 4px;
-                vertical-align: middle;
-            }
-            .r20-add-buff-btn:hover {
-                background: #2e7d32;
-                color: #ffffff;
             }
         `;
         document.head.appendChild(style);
@@ -147,12 +136,9 @@ export class Pf1eBuffUI {
     }
 
     /**
-     * 刷新单行徽章（自适应人物卡与纯野怪 Token）
+     * 刷新单行徽章（自适应人物卡与纯野怪 Token，排列于头像/名字/数值下一行）
      */
     static async refreshRowBadge(row, tokenId) {
-        const nameEl = row.querySelector(".name");
-        if (!nameEl) return;
-
         const token = Roll20Bridge.getTokenGraphic(tokenId);
         const character = Roll20Bridge.getCharacterByToken(tokenId);
 
@@ -170,14 +156,27 @@ export class Pf1eBuffUI {
             }));
         }
 
+        // 清理任何残留的旧 + 号按钮
+        row.querySelectorAll(".r20-add-buff-btn").forEach(el => el.remove());
+
+        // 查找或创建容器，直接作为 li.token 的直属子节点（置于行末自然换行到下一行）
         let container = row.querySelector(".r20-buff-container");
         if (!container) {
-            container = document.createElement("span");
+            container = document.createElement("div");
             container.className = "r20-buff-container";
-            nameEl.appendChild(container);
+            row.appendChild(container);
+        } else if (container.parentElement !== row) {
+            // 若原先嵌套在 .name 内部，迁移为 row 的直属子节点
+            row.appendChild(container);
         }
 
         container.innerHTML = "";
+
+        if (activeBuffs.length === 0) {
+            container.style.display = "none";
+            return;
+        }
+        container.style.display = "flex";
 
         // 渲染紧凑徽章
         for (const buff of activeBuffs) {
@@ -196,21 +195,6 @@ export class Pf1eBuffUI {
             });
 
             container.appendChild(pill);
-        }
-
-        // 渲染单行快捷加号 [+]
-        let addBtn = row.querySelector(".r20-add-buff-btn");
-        if (!addBtn) {
-            addBtn = document.createElement("span");
-            addBtn.className = "r20-add-buff-btn";
-            addBtn.textContent = "+";
-            const targetName = character ? character.get("name") : (token ? token.get("name") : "单位");
-            addBtn.title = `为 [${targetName}] 快速添加新Buff`;
-            addBtn.addEventListener("click", (e) => {
-                e.stopPropagation();
-                this.showSingleAddModal(character, token, row, tokenId);
-            });
-            nameEl.appendChild(addBtn);
         }
     }
 

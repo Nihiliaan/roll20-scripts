@@ -344,11 +344,82 @@ export class Pf1eBuffManager {
     }
 
     /**
-     * 当角色行动结束时，扣减其身上所有已设置轮数的活跃 Buff
+     * 更新指定角色卡上的单行 Buff 数据（名称、轮数与细目扩展加值字典）
      */
-    static async tickBuffsOnTurnEnd(tokenId) {
-        const token = Roll20Bridge.getTokenGraphic(tokenId);
-        const character = Roll20Bridge.getCharacterByToken(tokenId);
+    static async updateBuffRow(character, rowId, name, rounds, extraAttrs) {
+        if (!character || !rowId) return false;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+
+        const prefix = `repeating_buff2_${rowId}`;
+        const prefixWithUnderscore = `${prefix}_`;
+
+        // 1. 更新名称
+        let nameAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_name`);
+        if (!nameAttr) {
+            nameAttr = character.attribs.create({ name: `${prefix}_name`, current: name });
+        } else {
+            nameAttr.save({ current: name });
+        }
+
+        // 2. 更新轮数
+        let roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+        const roundsVal = (rounds !== null && rounds !== undefined && rounds !== "") ? rounds : "";
+        if (!roundsAttr) {
+            roundsAttr = character.attribs.create({ name: `${prefix}_rounds`, current: roundsVal });
+        } else {
+            roundsAttr.save({ current: roundsVal });
+        }
+
+        // 3. 补全原生必需属性
+        this.ensureNativeRequiredAttrs(character, prefix, rowId);
+
+        // 4. 更新细目加值字典 (extraAttrs)
+        if (extraAttrs && typeof extraAttrs === "object") {
+            // 清理不在新 extraAttrs 中的旧扩展字段
+            const preservedKeys = new Set(["name", "enable_toggle", "rounds", "tabcat", "tabcat2", "row_id", "bufftype"]);
+            for (const attr of [...character.attribs.models]) {
+                const attrName = attr.get("name") || "";
+                if (attrName.startsWith(prefixWithUnderscore)) {
+                    const subKey = attrName.substring(prefixWithUnderscore.length);
+                    if (!preservedKeys.has(subKey) && !(subKey in extraAttrs)) {
+                        attr.destroy();
+                    }
+                }
+            }
+
+            // 写入或更新新的扩展字段
+            for (const [subKey, val] of Object.entries(extraAttrs)) {
+                const fullKey = `${prefix}_${subKey}`;
+                let attr = character.attribs.models.find(a => a.get("name") === fullKey);
+                if (!attr) {
+                    character.attribs.create({ name: fullKey, current: val });
+                } else {
+                    attr.save({ current: val });
+                }
+            }
+        }
+
+        console.log(`[Pf1eBuffManager] 已更新 ${character.get("name")} 的 Buff [${name}] (${rowId})`);
+        return true;
+    }
+
+    /**
+     * 正向行动结束扣减活跃 Buff 轮数 (统一入口，兼容传入 Character 模型、Token 模型或 Token ID)
+     */
+    static async decrementBuffs(tokenOrChar) {
+        let character = null;
+        let token = null;
+
+        if (typeof tokenOrChar === "string") {
+            token = Roll20Bridge.getTokenGraphic(tokenOrChar);
+            character = Roll20Bridge.getCharacterByToken(tokenOrChar);
+        } else if (tokenOrChar && tokenOrChar.attribs) {
+            character = tokenOrChar;
+        } else if (tokenOrChar && typeof tokenOrChar.get === "function") {
+            token = tokenOrChar;
+            character = Roll20Bridge.getCharacterByToken(token);
+        }
+
         if (!character) return [];
 
         const charName = character.get("name") || (token ? token.get("name") : "未知角色");
@@ -356,7 +427,7 @@ export class Pf1eBuffManager {
         const processed = [];
 
         for (const buff of activeBuffs) {
-            if (buff.rounds === null) continue;
+            if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
             const newRounds = buff.rounds - 1;
 
@@ -375,6 +446,51 @@ export class Pf1eBuffManager {
             }
         }
 
+        return processed;
+    }
+
+    /**
+     * 当角色行动结束时，扣减其身上所有已设置轮数的活跃 Buff (别名保持向前兼容)
+     */
+    static async tickBuffsOnTurnEnd(tokenId) {
+        return this.decrementBuffs(tokenId);
+    }
+
+    /**
+     * 反向倒先攻时，将被拉回排头的单位身上所有带轮数的 Buff 加回 1 轮
+     */
+    static async incrementBuffsOnTurnRevert(tokenOrChar) {
+        let character = null;
+        let token = null;
+
+        if (typeof tokenOrChar === "string") {
+            token = Roll20Bridge.getTokenGraphic(tokenOrChar);
+            character = Roll20Bridge.getCharacterByToken(tokenOrChar);
+        } else if (tokenOrChar && tokenOrChar.attribs) {
+            character = tokenOrChar;
+        } else if (tokenOrChar && typeof tokenOrChar.get === "function") {
+            token = tokenOrChar;
+            character = Roll20Bridge.getCharacterByToken(token);
+        }
+
+        if (!character) return [];
+
+        const activeBuffs = await this.getActiveBuffs(character);
+        const processed = [];
+
+        for (const buff of activeBuffs) {
+            if (buff.rounds === null || isNaN(buff.rounds)) continue;
+
+            const newRounds = buff.rounds + 1;
+            if (buff.roundsAttr) {
+                buff.roundsAttr.save({ current: newRounds });
+            } else {
+                await this.setBuffRounds(character, buff.rowId, newRounds);
+            }
+            processed.push({ name: buff.name, status: "incremented", remaining: newRounds });
+        }
+
+        console.log(`[Pf1eBuffManager] 先攻回退: 为 ${character.get("name")} 加回 Buff 轮数共 ${processed.length} 项`);
         return processed;
     }
 }

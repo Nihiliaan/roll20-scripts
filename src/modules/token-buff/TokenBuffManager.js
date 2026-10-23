@@ -132,10 +132,10 @@ export class TokenBuffManager {
 
     /**
      * 当纯 Token 行动结束时扣减 1 轮
-     * @param {string} tokenId Token ID
+     * @param {string|object} tokenOrId Token ID 或 Token 模型
      */
-    static tickBuffsOnTurnEnd(tokenId) {
-        const token = Roll20Bridge.getTokenGraphic(tokenId);
+    static decrementBuffs(tokenOrId) {
+        const token = typeof tokenOrId === "string" ? Roll20Bridge.getTokenGraphic(tokenOrId) : tokenOrId;
         if (!token) return [];
 
         const buffs = this.getTokenBuffs(token);
@@ -146,7 +146,7 @@ export class TokenBuffManager {
         const processed = [];
 
         for (const buff of buffs) {
-            if (buff.rounds === null) {
+            if (buff.rounds === null || isNaN(buff.rounds)) {
                 remainingBuffs.push(buff);
                 continue;
             }
@@ -165,6 +165,35 @@ export class TokenBuffManager {
         }
 
         this.saveTokenBuffs(token, remainingBuffs);
+        return processed;
+    }
+
+    /**
+     * 兼容别名
+     */
+    static tickBuffsOnTurnEnd(tokenId) {
+        return this.decrementBuffs(tokenId);
+    }
+
+    /**
+     * 倒先攻时，将被拉回排头的 Token 身上的 Buff 加回 1 轮
+     */
+    static incrementBuffsOnTurnRevert(tokenOrId) {
+        const token = typeof tokenOrId === "string" ? Roll20Bridge.getTokenGraphic(tokenOrId) : tokenOrId;
+        if (!token) return [];
+
+        const buffs = this.getTokenBuffs(token);
+        if (buffs.length === 0) return [];
+
+        const processed = [];
+        for (const buff of buffs) {
+            if (buff.rounds === null || isNaN(buff.rounds)) continue;
+            buff.rounds = buff.rounds + 1;
+            processed.push({ name: buff.name, status: "incremented", remaining: buff.rounds });
+        }
+
+        this.saveTokenBuffs(token, buffs);
+        console.log(`[TokenBuffManager] 先攻回退: 为 Token [${token.get("name")}] 加回 Buff 轮数共 ${processed.length} 项`);
         return processed;
     }
 }

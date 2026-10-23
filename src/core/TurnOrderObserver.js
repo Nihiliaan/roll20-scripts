@@ -94,7 +94,9 @@ export class TurnOrderObserver {
             this.emit("turnEnded", { endedTokenId, startedTokenId, oldList, newList });
             this.emit("turnStarted", { startedTokenId, endedTokenId, newList });
         } else if (isPrevTurn) {
-            console.log(`[TurnOrderObserver] 识别到先攻回退: ${oldList[0].id} <- ${newList[0].id}`);
+            const revertedTokenId = newList[0].id;
+            console.log(`[TurnOrderObserver] 识别到先攻回退: ${oldList[0].id} <- ${revertedTokenId}`);
+            this.emit("turnReverted", { revertedTokenId, oldList, newList });
         } else {
             console.log("[TurnOrderObserver] 识别到先攻排序或手动拖拽调整");
         }
