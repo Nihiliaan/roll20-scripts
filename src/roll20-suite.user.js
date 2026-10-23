@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.9.4
+// @version      0.9.5
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -1812,6 +1812,19 @@ class BuffPanelStyles {
                 border-color: #ffd54f !important;
                 color: #fff8e1 !important;
             }
+            /* 未激活态（角色卡已存在但当前关停） */
+            .r20-tree-item.is-inactive {
+                opacity: 0.65;
+                background: #181d24;
+                border: 1px dashed #37474f;
+                color: #90a4ae;
+            }
+            .r20-tree-item.is-inactive:hover {
+                opacity: 0.95;
+                background: #212934;
+                border-color: #78909c;
+                color: #cfd8dc;
+            }
             /* 编辑模式下彻底清除日常 Token 激活态高亮，保证编辑视图纯净无干扰 */
             #r20-buff-panel.is-editing .r20-tree-item.full-active,
             #r20-buff-panel.is-editing .r20-tree-item.partial-active {
@@ -2403,7 +2416,7 @@ class BuffFloatingPanel {
             await this.toggleBuffOnSelected(name, rounds, extraAttrs);
         });
 
-        // 单位栏点击（点击从单位身上移除）
+        // 单位栏点击（双向切换开关：已激活->关停，未激活->开启）
         unitTree.addEventListener("click", async (e) => {
             if (e.target.closest("summary")) return;
             const item = e.target.closest(".r20-tree-item");
@@ -2417,10 +2430,12 @@ class BuffFloatingPanel {
             if (charId && buffId) {
                 const char = window.Campaign?.characters?.get(charId);
                 if (char) {
-                    await Pf1eBuffManager.removeBuff(char, buffId);
+                    const currentlyActive = item.classList.contains("full-active");
+                    const targetState = !currentlyActive;
+                    await Pf1eBuffManager.toggleBuff(char, buffId, targetState);
                     await Pf1eBuffUI.refreshAllBadges();
                     await this.renderAllPanes();
-                    this.showToast("已从 " + char.get("name") + " 移除 " + buffName, "info");
+                    this.showToast(`已${targetState ? "✨ 激活" : "❌ 关停"} ${char.get("name")} 的 [${buffName}]`, "info");
                 }
             } else if (tokenId && buffName) {
                 const token = Roll20Bridge.getTokenGraphic(tokenId);
@@ -2428,7 +2443,7 @@ class BuffFloatingPanel {
                     TokenBuffManager.removeBuff(token, buffName);
                     await Pf1eBuffUI.refreshAllBadges();
                     await this.renderAllPanes();
-                    this.showToast("已从 Token 移除 " + buffName, "info");
+                    this.showToast("已从 Token 移除 [" + buffName + "]", "info");
                 }
             }
         });
@@ -2756,24 +2771,28 @@ class BuffFloatingPanel {
             content.className = "r20-group-content";
 
             if (char) {
-                const buffs = await Pf1eBuffManager.getActiveBuffs(char);
+                const buffs = await Pf1eBuffManager.getAllBuffs(char);
                 if (buffs.length === 0) {
-                    content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(暂无激活Buff)</div>';
+                    content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(卡上暂无配置Buff)</div>';
                 } else {
                     buffs.forEach(b => {
                         const item = document.createElement("div");
-                        item.className = "r20-tree-item";
+                        const isEnabled = !!b.enabled;
+                        item.className = "r20-tree-item" + (isEnabled ? " full-active" : " is-inactive");
                         item.dataset.charId = char.id;
                         item.dataset.buffId = b.rowId;
                         item.dataset.name = b.name;
-                        item.title = "点击从单位身上移除";
+                        item.title = isEnabled ? "已激活，点击关停" : "未激活，点击开启";
                         item.draggable = true;
 
                         const roundsText = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? (b.rounds + "轮") : "永久";
+                        const statusBadge = isEnabled
+                            ? `<span class="r20-item-rounds" style="color:#90caf9;">${roundsText}</span>`
+                            : `<span class="r20-item-rounds" style="color:#78909c;">未激活</span>`;
 
                         item.innerHTML = `
                             <span class="r20-item-name">${b.name}</span>
-                            <span class="r20-item-rounds" style="color:#ef5350;">${roundsText} ×</span>
+                            ${statusBadge}
                         `;
 
                         content.appendChild(item);
@@ -2803,17 +2822,17 @@ class BuffFloatingPanel {
                 } else {
                     buffs.forEach(b => {
                         const item = document.createElement("div");
-                        item.className = "r20-tree-item";
+                        item.className = "r20-tree-item full-active";
                         item.dataset.tokenId = tokenItem.token.id;
                         item.dataset.name = b.name;
-                        item.title = "点击从单位身上移除";
+                        item.title = "已激活，点击移除";
                         item.draggable = true;
 
                         const roundsText = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? (b.rounds + "轮") : "永久";
 
                         item.innerHTML = `
                             <span class="r20-item-name">${b.name}</span>
-                            <span class="r20-item-rounds" style="color:#ef5350;">${roundsText} ×</span>
+                            <span class="r20-item-rounds" style="color:#90caf9;">${roundsText}</span>
                         `;
 
                         content.appendChild(item);
@@ -3233,7 +3252,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.4 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.5 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

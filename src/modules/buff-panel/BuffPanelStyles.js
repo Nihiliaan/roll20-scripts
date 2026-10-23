@@ -271,6 +271,19 @@ export class BuffPanelStyles {
                 border-color: #ffd54f !important;
                 color: #fff8e1 !important;
             }
+            /* 未激活态（角色卡已存在但当前关停） */
+            .r20-tree-item.is-inactive {
+                opacity: 0.65;
+                background: #181d24;
+                border: 1px dashed #37474f;
+                color: #90a4ae;
+            }
+            .r20-tree-item.is-inactive:hover {
+                opacity: 0.95;
+                background: #212934;
+                border-color: #78909c;
+                color: #cfd8dc;
+            }
             /* 编辑模式下彻底清除日常 Token 激活态高亮，保证编辑视图纯净无干扰 */
             #r20-buff-panel.is-editing .r20-tree-item.full-active,
             #r20-buff-panel.is-editing .r20-tree-item.partial-active {
