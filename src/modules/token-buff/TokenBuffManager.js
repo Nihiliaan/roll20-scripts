@@ -153,9 +153,6 @@ export class TokenBuffManager {
 
             const nextRounds = buff.rounds - 1;
             if (nextRounds <= 0) {
-                // 广播到期消息
-                const msg = `&{template:default} {{name=Buff 持续时间结束}} {{单位=${tokenName}}} {{效果=${buff.name}}} {{状态=持续时间归零，已解除。}}`;
-                Roll20Bridge.sendChatMessage(msg);
                 processed.push({ name: buff.name, status: "expired" });
             } else {
                 buff.rounds = nextRounds;

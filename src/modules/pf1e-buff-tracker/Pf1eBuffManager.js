@@ -433,8 +433,6 @@ export class Pf1eBuffManager {
 
             if (newRounds <= 0) {
                 await this.removeBuff(character, buff.rowId);
-                const msg = `&{template:default} {{name=Buff 持续时间结束}} {{角色=${charName}}} {{效果=${buff.name}}} {{状态=持续时间归零，已自动取消生效。}}`;
-                Roll20Bridge.sendChatMessage(msg);
                 processed.push({ name: buff.name, status: "expired", remaining: 0 });
             } else {
                 if (buff.roundsAttr) {

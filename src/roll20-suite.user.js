@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.9.6
+// @version      0.9.7
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.4...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.7...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -596,8 +596,6 @@ class Pf1eBuffManager {
 
             if (newRounds <= 0) {
                 await this.removeBuff(character, buff.rowId);
-                const msg = `&{template:default} {{name=Buff 持续时间结束}} {{角色=${charName}}} {{效果=${buff.name}}} {{状态=持续时间归零，已自动取消生效。}}`;
-                Roll20Bridge.sendChatMessage(msg);
                 processed.push({ name: buff.name, status: "expired", remaining: 0 });
             } else {
                 if (buff.roundsAttr) {
@@ -1021,20 +1019,22 @@ class TurnOrderObserver {
         this.listeners = {
             turnEnded: [],
             turnStarted: [],
+            turnReverted: [],
             orderChanged: []
         };
         this.isInitialized = false;
     }
 
     /**
-     * 注册事件回调
-     * @param {"turnEnded"|"turnStarted"|"orderChanged"} event 
+     * 注册事件回调（安全按需动态创建）
+     * @param {"turnEnded"|"turnStarted"|"turnReverted"|"orderChanged"} event 
      * @param {Function} callback 
      */
     on(event, callback) {
-        if (this.listeners[event]) {
-            this.listeners[event].push(callback);
+        if (!this.listeners[event]) {
+            this.listeners[event] = [];
         }
+        this.listeners[event].push(callback);
     }
 
     /**
@@ -1290,9 +1290,6 @@ class TokenBuffManager {
 
             const nextRounds = buff.rounds - 1;
             if (nextRounds <= 0) {
-                // 广播到期消息
-                const msg = `&{template:default} {{name=Buff 持续时间结束}} {{单位=${tokenName}}} {{效果=${buff.name}}} {{状态=持续时间归零，已解除。}}`;
-                Roll20Bridge.sendChatMessage(msg);
                 processed.push({ name: buff.name, status: "expired" });
             } else {
                 buff.rounds = nextRounds;
@@ -3510,7 +3507,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.6 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.7 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

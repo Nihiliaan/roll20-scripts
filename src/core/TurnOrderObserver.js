@@ -8,20 +8,22 @@ export class TurnOrderObserver {
         this.listeners = {
             turnEnded: [],
             turnStarted: [],
+            turnReverted: [],
             orderChanged: []
         };
         this.isInitialized = false;
     }
 
     /**
-     * 注册事件回调
-     * @param {"turnEnded"|"turnStarted"|"orderChanged"} event 
+     * 注册事件回调（安全按需动态创建）
+     * @param {"turnEnded"|"turnStarted"|"turnReverted"|"orderChanged"} event 
      * @param {Function} callback 
      */
     on(event, callback) {
-        if (this.listeners[event]) {
-            this.listeners[event].push(callback);
+        if (!this.listeners[event]) {
+            this.listeners[event] = [];
         }
+        this.listeners[event].push(callback);
     }
 
     /**
