@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/nihil/roll20-scripts
-// @version      0.9.7
+// @version      0.9.8
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -1112,10 +1112,10 @@ class TurnOrderObserver {
             this.emit("turnReverted", { revertedTokenId, oldList, newList });
         } else {
             console.log("[TurnOrderObserver] 识别到先攻排序或手动拖拽调整");
+            // 仅在非前进/回退的重排（如手动拖拽或增减人员）时派发 orderChanged
+            this.emit("orderChanged", { newList, oldList });
         }
 
-        // 触发通用重排通知并更新缓存
-        this.emit("orderChanged", { newList, oldList });
         this.cachedOrder = newList;
     }
 
@@ -1358,6 +1358,7 @@ class Pf1eBuffUI {
                 padding-bottom: 4px !important;
             }
             .r20-buff-container {
+                order: 99 !important;
                 display: flex !important;
                 flex-wrap: wrap !important;
                 flex-basis: 100% !important;
@@ -1400,34 +1401,41 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 启动持久 DOM 监听器（抵御 Vue.js 列表重新渲染擦除徽章）
+     * 启动持久 DOM 监听器（仅补充挂载新加入的角色节点，不干扰原生移动）
      */
     static startObserver() {
         if (this.isObserverStarted) return;
         this.injectStyles();
 
-        // 1. 监听主窗口变动（包含 Vue 动态渲染的 #vm-turn-order 和 .turn-tracker）
+        // 1. 监听主窗口变动（优先发现全新加入先攻列表的单位）
         if (this._observer) this._observer.disconnect();
 
         this._observer = new MutationObserver((mutations) => {
-            let shouldRefresh = false;
+            let hasNewUnmountedTokens = false;
             for (const m of mutations) {
+                // 忽略自身 buff 容器引起的变动，杜绝回环震荡
+                if (m.target?.closest?.(".r20-buff-container")) continue;
+
                 if (m.type === "childList") {
                     for (const node of m.addedNodes) {
                         if (node.nodeType === 1) {
-                            if (node.matches?.("li.token") || node.querySelector?.("li.token") ||
-                                node.matches?.(".turn-tracker") || node.querySelector?.(".turn-tracker") ||
-                                node.id === "vm-turn-order") {
-                                shouldRefresh = true;
+                            if (node.matches?.("li.token") && !node.querySelector(".r20-buff-container")) {
+                                hasNewUnmountedTokens = true;
+                                break;
+                            } else if (node.querySelector?.("li.token") && !node.querySelector(".r20-buff-container")) {
+                                hasNewUnmountedTokens = true;
+                                break;
+                            } else if (node.id === "vm-turn-order" || node.matches?.(".turn-tracker")) {
+                                hasNewUnmountedTokens = true;
                                 break;
                             }
                         }
                     }
                 }
-                if (shouldRefresh) break;
+                if (hasNewUnmountedTokens) break;
             }
 
-            if (shouldRefresh) {
+            if (hasNewUnmountedTokens) {
                 if (this._debounceTimer) clearTimeout(this._debounceTimer);
                 this._debounceTimer = setTimeout(() => {
                     this.refreshAllBadges();
@@ -1439,9 +1447,9 @@ class Pf1eBuffUI {
         const targetContainer = document.getElementById("vm-turn-order") || document.body;
         this._observer.observe(targetContainer, { childList: true, subtree: true });
 
-        // 2. 联动 Roll20 先攻数据变动事件
+        // 2. 仅在先攻窗口打开/切换时初始化，绝不重复监听 change:turnorder（交由 TurnOrderObserver 统一精准调度）
         if (window.Campaign && typeof window.Campaign.on === "function") {
-            window.Campaign.on("change:turnorder change:initiativepage", () => {
+            window.Campaign.on("change:initiativepage", () => {
                 setTimeout(() => this.refreshAllBadges(), 100);
             });
         }
@@ -1452,7 +1460,7 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 刷新整个先攻条上的徽章
+     * 刷新整个先攻条上的徽章（具备签名机制，未变动的行 0 破坏、0 DOM 重绘）
      */
     static async refreshAllBadges() {
         this.injectStyles();
@@ -1469,9 +1477,21 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 刷新单行徽章（自适应人物卡与纯野怪 Token，排列于头像/名字/数值下一行）
+     * 定向精准刷新单个 Token 徽章（仅修改变动的那一个，零触碰其余行）
      */
-    static async refreshRowBadge(row, tokenId) {
+    static async refreshSingleTokenBadge(tokenId) {
+        if (!tokenId) return;
+        const selector = `#vm-turn-order li.token[data-tokenid="${tokenId}"], .turn-tracker li.token[data-tokenid="${tokenId}"], #initiativewindow li.token[data-tokenid="${tokenId}"]`;
+        const row = document.querySelector(selector);
+        if (row) {
+            await this.refreshRowBadge(row, tokenId, { force: true });
+        }
+    }
+
+    /**
+     * 刷新单行徽章（签名守卫：未发生内容变动时跳过，保留原生节点不破坏）
+     */
+    static async refreshRowBadge(row, tokenId, options = {}) {
         const token = Roll20Bridge.getTokenGraphic(tokenId);
         const character = Roll20Bridge.getCharacterByToken(tokenId);
 
@@ -1489,20 +1509,26 @@ class Pf1eBuffUI {
             }));
         }
 
+        // 计算当前 Buff 签名
+        const signature = activeBuffs.map(b => `${b.name}:${b.rounds}`).join("|");
+
         // 清理任何残留的旧 + 号按钮
         row.querySelectorAll(".r20-add-buff-btn").forEach(el => el.remove());
 
-        // 查找或创建容器，直接作为 li.token 的直属子节点（置于行末自然换行到下一行）
+        // 查找或创建容器，直接作为 li.token 的直属子节点（置于行末由 CSS order: 99 换行到下一行）
         let container = row.querySelector(".r20-buff-container");
-        if (!container) {
+        if (container) {
+            // 若未强制刷新且签名未变，直接返回，保持原生 DOM 零重绘！
+            if (!options.force && container.dataset.signature === signature) {
+                return;
+            }
+        } else {
             container = document.createElement("div");
             container.className = "r20-buff-container";
             row.appendChild(container);
-        } else if (container.parentElement !== row) {
-            // 若原先嵌套在 .name 内部，迁移为 row 的直属子节点
-            row.appendChild(container);
         }
 
+        container.dataset.signature = signature;
         container.innerHTML = "";
 
         if (activeBuffs.length === 0) {
@@ -3442,10 +3468,9 @@ class BuffFloatingPanel {
                     } catch (err) {
                         console.error("[Roll20Suite] 先攻回合结束扣减异常:", err);
                     }
-                    setTimeout(async () => {
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await BuffFloatingPanel.renderAllPanes();
-                    }, 60);
+                    // 定向单行精准刷新：仅修改移动到队尾的这一个单位，其余行零触碰零重绘
+                    await Pf1eBuffUI.refreshSingleTokenBadge(endedTokenId);
+                    await BuffFloatingPanel.renderAllPanes();
                 });
 
                 observer.on("turnReverted", async ({ revertedTokenId }) => {
@@ -3462,10 +3487,9 @@ class BuffFloatingPanel {
                     } catch (err) {
                         console.error("[Roll20Suite] 先攻回退加回轮数异常:", err);
                     }
-                    setTimeout(async () => {
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await BuffFloatingPanel.renderAllPanes();
-                    }, 60);
+                    // 定向单行精准刷新：仅修改拉回到排头的这一个单位，其余行零触碰零重绘
+                    await Pf1eBuffUI.refreshSingleTokenBadge(revertedTokenId);
+                    await BuffFloatingPanel.renderAllPanes();
                 });
 
                 observer.on("orderChanged", async () => {
@@ -3507,7 +3531,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.7 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.8 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

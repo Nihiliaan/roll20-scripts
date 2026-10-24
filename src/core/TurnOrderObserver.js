@@ -101,10 +101,10 @@ export class TurnOrderObserver {
             this.emit("turnReverted", { revertedTokenId, oldList, newList });
         } else {
             console.log("[TurnOrderObserver] 识别到先攻排序或手动拖拽调整");
+            // 仅在非前进/回退的重排（如手动拖拽或增减人员）时派发 orderChanged
+            this.emit("orderChanged", { newList, oldList });
         }
 
-        // 触发通用重排通知并更新缓存
-        this.emit("orderChanged", { newList, oldList });
         this.cachedOrder = newList;
     }
 
