@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
-// @namespace    https://github.com/nihil/roll20-scripts
+// @namespace    https://github.com/Nihiliaan/roll20-scripts
 // @version      0.9.8
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
+// @updateURL    https://raw.githubusercontent.com/Nihiliaan/roll20-scripts/master/src/roll20-suite.user.js
+// @downloadURL  https://raw.githubusercontent.com/Nihiliaan/roll20-scripts/master/src/roll20-suite.user.js
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
