@@ -6,6 +6,11 @@ import { Roll20Bridge } from "../../core/Roll20Bridge.js";
  */
 export class Pf1eBuffManager {
     /**
+     * 脚本自主修改状态锁（为 true 时抑制外部属性监听器响应）
+     */
+    static isScriptMutating = false;
+
+    /**
      * 官方内置负面状态 (Conditions) 31 项白名单（精准匹配角色卡 UI，排除能量吸取与被纠缠联动派生的被缓慢）
      */
     static CONDITION_DEFINITIONS = {
@@ -546,44 +551,51 @@ export class Pf1eBuffManager {
 
         if (!character) return [];
 
-        const charName = character.get("name") || (token ? token.get("name") : "未知角色");
-        const activeBuffs = await this.getActiveBuffs(character);
-        const processed = [];
+        this.isScriptMutating = true;
+        try {
+            const charName = character.get("name") || (token ? token.get("name") : "未知角色");
+            const activeBuffs = await this.getActiveBuffs(character);
+            const processed = [];
 
-        // 1. 扣减常规正面 Buff (大于 0 归零时自动解除)
-        for (const buff of activeBuffs) {
-            if (buff.rounds === null || isNaN(buff.rounds)) continue;
+            // 1. 扣减常规正面 Buff (大于 0 归零时自动解除)
+            for (const buff of activeBuffs) {
+                if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
-            const newRounds = buff.rounds - 1;
+                const newRounds = buff.rounds - 1;
 
-            if (newRounds <= 0) {
-                await this.removeBuff(character, buff.rowId);
-                processed.push({ name: buff.name, status: "expired", remaining: 0 });
-            } else {
-                if (buff.roundsAttr) {
-                    buff.roundsAttr.save({ current: newRounds });
+                if (newRounds <= 0) {
+                    await this.removeBuff(character, buff.rowId);
+                    processed.push({ name: buff.name, status: "expired", remaining: 0 });
                 } else {
-                    await this.setBuffRounds(character, buff.rowId, newRounds);
+                    if (buff.roundsAttr) {
+                        buff.roundsAttr.save({ current: newRounds }, { byScript: true });
+                    } else {
+                        await this.setBuffRounds(character, buff.rowId, newRounds);
+                    }
+                    processed.push({ name: buff.name, status: "decremented", remaining: newRounds });
                 }
-                processed.push({ name: buff.name, status: "decremented", remaining: newRounds });
             }
-        }
 
-        // 2. 推进负面状态轮数 (负数正计轮，rounds - 1，如 -1 -> -2)
-        const activeConditions = await this.getActiveConditions(character);
-        for (const cond of activeConditions) {
-            if (cond.rounds === null || isNaN(cond.rounds)) continue;
+            // 2. 推进负面状态轮数 (负数正计轮，rounds - 1，如 -1 -> -2)
+            const activeConditions = await this.getActiveConditions(character);
+            for (const cond of activeConditions) {
+                if (cond.rounds === null || isNaN(cond.rounds)) continue;
 
-            const newRounds = cond.rounds - 1; // 统一减法：-1 变为 -2
-            if (cond.roundsAttr) {
-                cond.roundsAttr.save({ current: newRounds });
-            } else {
-                await this.setConditionRounds(character, cond.key, newRounds);
+                const newRounds = cond.rounds - 1; // 统一减法：-1 变为 -2
+                if (cond.roundsAttr) {
+                    cond.roundsAttr.save({ current: newRounds }, { byScript: true });
+                } else {
+                    await this.setConditionRounds(character, cond.key, newRounds);
+                }
+                processed.push({ name: cond.name, status: "condition_advanced", elapsed: Math.abs(newRounds) });
             }
-            processed.push({ name: cond.name, status: "condition_advanced", elapsed: Math.abs(newRounds) });
-        }
 
-        return processed;
+            return processed;
+        } finally {
+            queueMicrotask(() => {
+                this.isScriptMutating = false;
+            });
+        }
     }
 
     /**
@@ -612,34 +624,43 @@ export class Pf1eBuffManager {
 
         if (!character) return [];
 
-        const activeBuffs = await this.getActiveBuffs(character);
-        const processed = [];
+        this.isScriptMutating = true;
+        try {
+            const activeBuffs = await this.getActiveBuffs(character);
+            const processed = [];
 
-        // 1. 加回常规正面 Buff (rounds + 1)
-        for (const buff of activeBuffs) {
-            if (buff.rounds === null || isNaN(buff.rounds)) continue;
+            // 1. 加回常规正面 Buff (rounds + 1)
+            for (const buff of activeBuffs) {
+                if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
-            const newRounds = buff.rounds + 1;
-            if (buff.roundsAttr) {
-                buff.roundsAttr.save({ current: newRounds });
-            } else {
-                await this.setBuffRounds(character, buff.rowId, newRounds);
+                const newRounds = buff.rounds + 1;
+                if (buff.roundsAttr) {
+                    buff.roundsAttr.save({ current: newRounds }, { byScript: true });
+                } else {
+                    await this.setBuffRounds(character, buff.rowId, newRounds);
+                }
+                processed.push({ name: buff.name, status: "incremented", remaining: newRounds });
             }
-            processed.push({ name: buff.name, status: "incremented", remaining: newRounds });
-        }
 
-        // 2. 回退负面状态轮数 (rounds + 1，如 -2 -> -1)
-        const activeConditions = await this.getActiveConditions(character);
-        for (const cond of activeConditions) {
-            if (cond.rounds === null || isNaN(cond.rounds)) continue;
+            // 2. 回退负面状态轮数 (rounds + 1，如 -2 -> -1)
+            const activeConditions = await this.getActiveConditions(character);
+            for (const cond of activeConditions) {
+                if (cond.rounds === null || isNaN(cond.rounds)) continue;
 
-            const newRounds = cond.rounds + 1; // 统一加法：-2 变为 -1
-            if (cond.roundsAttr) {
-                cond.roundsAttr.save({ current: newRounds });
-            } else {
-                await this.setConditionRounds(character, cond.key, newRounds);
+                const newRounds = cond.rounds + 1; // 统一加法：-2 变为 -1
+                if (cond.roundsAttr) {
+                    cond.roundsAttr.save({ current: newRounds }, { byScript: true });
+                } else {
+                    await this.setConditionRounds(character, cond.key, newRounds);
+                }
+                processed.push({ name: cond.name, status: "condition_reverted", elapsed: Math.abs(newRounds) });
             }
-            processed.push({ name: cond.name, status: "condition_reverted", elapsed: Math.abs(newRounds) });
+
+            return processed;
+        } finally {
+            queueMicrotask(() => {
+                this.isScriptMutating = false;
+            });
         }
 
         console.log(`[Pf1eBuffManager] 先攻回退: 为 ${character.get("name")} 加回 Buff 轮数共 ${processed.length} 项`);

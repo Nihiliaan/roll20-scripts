@@ -13,6 +13,43 @@ export class Pf1eBuffUI {
     static _observer = null;
     static _debounceTimer = null;
 
+    // 便签板（微任务任务合并队列，彻底消除连环触发与并发竞态）
+    static pendingTokenIds = new Set();
+    static isFlushingScheduled = false;
+
+    /**
+     * 投递刷新请求到便签板（自动去重并微任务合并）
+     * @param {string} tokenId 
+     */
+    static requestTokenRefresh(tokenId) {
+        if (!tokenId) return;
+        this.pendingTokenIds.add(tokenId);
+
+        if (!this.isFlushingScheduled) {
+            this.isFlushingScheduled = true;
+            queueMicrotask(() => {
+                this.flushPendingRefreshes();
+            });
+        }
+    }
+
+    /**
+     * 微任务检查点：批量清空便签板并单次刷新
+     */
+    static async flushPendingRefreshes() {
+        const tokenIds = Array.from(this.pendingTokenIds);
+        this.pendingTokenIds.clear();
+        this.isFlushingScheduled = false;
+
+        for (const tid of tokenIds) {
+            try {
+                await this.refreshSingleTokenBadge(tid);
+            } catch (err) {
+                console.error(`[Pf1eBuffUI] 便签板刷新 Token [${tid}] 异常:`, err);
+            }
+        }
+    }
+
     static injectStyles() {
         if (this.isStylesInjected) return;
         const style = document.createElement("style");
@@ -151,31 +188,48 @@ export class Pf1eBuffUI {
     }
 
     /**
-     * 绑定人物卡属性变动监听，实现卡片勾选/取消负面状态或修改 Buff 时，先攻栏 0 秒实时响应
+     * 判定属性名是否属于 31 项白名单负面状态
+     */
+    static isConditionAttrName(name) {
+        if (!name || !name.startsWith("condition-")) return false;
+        const cleanName = name.endsWith("_rounds") ? name.replace("_rounds", "") : name;
+        return cleanName in Pf1eBuffManager.CONDITION_DEFINITIONS;
+    }
+
+    /**
+     * 判定属性名是否属于 Buff 核心控制字段（开关、名称、轮数）
+     */
+    static isBuffCoreAttrName(name) {
+        if (!name || !name.startsWith("repeating_buff2_")) return false;
+        return name.endsWith("_enable_toggle") || name.endsWith("_name") || name.endsWith("_rounds");
+    }
+
+    /**
+     * 绑定人物卡属性变动监听，仅响应用户真人在人物卡上的手动编辑（静默过滤脚本操作）
      */
     static bindCharacterAttributeListeners() {
         if (!window.Campaign || !window.Campaign.characters) return;
 
         const boundChars = new Set();
-        const charDebounceTimers = new Map();
 
         const attachToChar = (char) => {
             if (!char || boundChars.has(char.id)) return;
             boundChars.add(char.id);
 
-            const handleAttrChange = (attrModel) => {
-                const attrName = attrModel?.get?.("name") || "";
-                if (attrName.startsWith("condition-") || attrName.startsWith("repeating_buff2_")) {
-                    // 防抖合并连环触发（如走先攻时多个属性连续 save）
-                    if (charDebounceTimers.has(char.id)) {
-                        clearTimeout(charDebounceTimers.get(char.id));
-                    }
-                    const timer = setTimeout(() => {
-                        charDebounceTimers.delete(char.id);
-                        this.refreshTokensRepresentingCharacter(char.id);
-                    }, 40);
-                    charDebounceTimers.set(char.id, timer);
+            const handleAttrChange = (attrModel, val, options) => {
+                // 1. 若为脚本自身的业务更新，或处于全局脚本变更锁中，彻底静音跳过
+                if (options?.byScript || Pf1eBuffManager.isScriptMutating) {
+                    return;
                 }
+
+                const attrName = attrModel?.get?.("name") || "";
+
+                // 2. 超精细门禁：只允许 31 项负面状态与 Buff 核心 3 大字段通过
+                const isRelevant = this.isConditionAttrName(attrName) || this.isBuffCoreAttrName(attrName);
+                if (!isRelevant) return;
+
+                // 3. 投递到便签板，由微任务统一合并刷新
+                this.scheduleTokensRepresentingCharacter(char.id);
             };
 
             if (char.attribs) {
@@ -189,9 +243,9 @@ export class Pf1eBuffUI {
     }
 
     /**
-     * 根据角色 ID 精准定位其在先攻栏中的 Token 并即时刷新
+     * 根据角色 ID 定位其在先攻栏中的 Token 并投递到便签板
      */
-    static refreshTokensRepresentingCharacter(charId) {
+    static scheduleTokensRepresentingCharacter(charId) {
         if (!charId) return;
         const rows = document.querySelectorAll("#vm-turn-order li.token, .turn-tracker li.token, #initiativewindow li.token");
         for (const row of rows) {
@@ -199,7 +253,7 @@ export class Pf1eBuffUI {
             if (tokenId) {
                 const char = Roll20Bridge.getCharacterByToken(tokenId);
                 if (char && char.id === charId) {
-                    this.refreshSingleTokenBadge(tokenId);
+                    this.requestTokenRefresh(tokenId);
                 }
             }
         }

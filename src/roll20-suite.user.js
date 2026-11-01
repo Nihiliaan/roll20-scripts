@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.14
+// @version      0.9.15
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.14...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.15...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -215,6 +215,11 @@ class Roll20Bridge {
  * 负责扫描、添加、刷新、修改与关停 PF1e 角色卡上的原生 repeating_buff2 重复列表
  */
 class Pf1eBuffManager {
+    /**
+     * 脚本自主修改状态锁（为 true 时抑制外部属性监听器响应）
+     */
+    static isScriptMutating = false;
+
     /**
      * 官方内置负面状态 (Conditions) 31 项白名单（精准匹配角色卡 UI，排除能量吸取与被纠缠联动派生的被缓慢）
      */
@@ -756,44 +761,51 @@ class Pf1eBuffManager {
 
         if (!character) return [];
 
-        const charName = character.get("name") || (token ? token.get("name") : "未知角色");
-        const activeBuffs = await this.getActiveBuffs(character);
-        const processed = [];
+        this.isScriptMutating = true;
+        try {
+            const charName = character.get("name") || (token ? token.get("name") : "未知角色");
+            const activeBuffs = await this.getActiveBuffs(character);
+            const processed = [];
 
-        // 1. 扣减常规正面 Buff (大于 0 归零时自动解除)
-        for (const buff of activeBuffs) {
-            if (buff.rounds === null || isNaN(buff.rounds)) continue;
+            // 1. 扣减常规正面 Buff (大于 0 归零时自动解除)
+            for (const buff of activeBuffs) {
+                if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
-            const newRounds = buff.rounds - 1;
+                const newRounds = buff.rounds - 1;
 
-            if (newRounds <= 0) {
-                await this.removeBuff(character, buff.rowId);
-                processed.push({ name: buff.name, status: "expired", remaining: 0 });
-            } else {
-                if (buff.roundsAttr) {
-                    buff.roundsAttr.save({ current: newRounds });
+                if (newRounds <= 0) {
+                    await this.removeBuff(character, buff.rowId);
+                    processed.push({ name: buff.name, status: "expired", remaining: 0 });
                 } else {
-                    await this.setBuffRounds(character, buff.rowId, newRounds);
+                    if (buff.roundsAttr) {
+                        buff.roundsAttr.save({ current: newRounds }, { byScript: true });
+                    } else {
+                        await this.setBuffRounds(character, buff.rowId, newRounds);
+                    }
+                    processed.push({ name: buff.name, status: "decremented", remaining: newRounds });
                 }
-                processed.push({ name: buff.name, status: "decremented", remaining: newRounds });
             }
-        }
 
-        // 2. 推进负面状态轮数 (负数正计轮，rounds - 1，如 -1 -> -2)
-        const activeConditions = await this.getActiveConditions(character);
-        for (const cond of activeConditions) {
-            if (cond.rounds === null || isNaN(cond.rounds)) continue;
+            // 2. 推进负面状态轮数 (负数正计轮，rounds - 1，如 -1 -> -2)
+            const activeConditions = await this.getActiveConditions(character);
+            for (const cond of activeConditions) {
+                if (cond.rounds === null || isNaN(cond.rounds)) continue;
 
-            const newRounds = cond.rounds - 1; // 统一减法：-1 变为 -2
-            if (cond.roundsAttr) {
-                cond.roundsAttr.save({ current: newRounds });
-            } else {
-                await this.setConditionRounds(character, cond.key, newRounds);
+                const newRounds = cond.rounds - 1; // 统一减法：-1 变为 -2
+                if (cond.roundsAttr) {
+                    cond.roundsAttr.save({ current: newRounds }, { byScript: true });
+                } else {
+                    await this.setConditionRounds(character, cond.key, newRounds);
+                }
+                processed.push({ name: cond.name, status: "condition_advanced", elapsed: Math.abs(newRounds) });
             }
-            processed.push({ name: cond.name, status: "condition_advanced", elapsed: Math.abs(newRounds) });
-        }
 
-        return processed;
+            return processed;
+        } finally {
+            queueMicrotask(() => {
+                this.isScriptMutating = false;
+            });
+        }
     }
 
     /**
@@ -822,34 +834,43 @@ class Pf1eBuffManager {
 
         if (!character) return [];
 
-        const activeBuffs = await this.getActiveBuffs(character);
-        const processed = [];
+        this.isScriptMutating = true;
+        try {
+            const activeBuffs = await this.getActiveBuffs(character);
+            const processed = [];
 
-        // 1. 加回常规正面 Buff (rounds + 1)
-        for (const buff of activeBuffs) {
-            if (buff.rounds === null || isNaN(buff.rounds)) continue;
+            // 1. 加回常规正面 Buff (rounds + 1)
+            for (const buff of activeBuffs) {
+                if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
-            const newRounds = buff.rounds + 1;
-            if (buff.roundsAttr) {
-                buff.roundsAttr.save({ current: newRounds });
-            } else {
-                await this.setBuffRounds(character, buff.rowId, newRounds);
+                const newRounds = buff.rounds + 1;
+                if (buff.roundsAttr) {
+                    buff.roundsAttr.save({ current: newRounds }, { byScript: true });
+                } else {
+                    await this.setBuffRounds(character, buff.rowId, newRounds);
+                }
+                processed.push({ name: buff.name, status: "incremented", remaining: newRounds });
             }
-            processed.push({ name: buff.name, status: "incremented", remaining: newRounds });
-        }
 
-        // 2. 回退负面状态轮数 (rounds + 1，如 -2 -> -1)
-        const activeConditions = await this.getActiveConditions(character);
-        for (const cond of activeConditions) {
-            if (cond.rounds === null || isNaN(cond.rounds)) continue;
+            // 2. 回退负面状态轮数 (rounds + 1，如 -2 -> -1)
+            const activeConditions = await this.getActiveConditions(character);
+            for (const cond of activeConditions) {
+                if (cond.rounds === null || isNaN(cond.rounds)) continue;
 
-            const newRounds = cond.rounds + 1; // 统一加法：-2 变为 -1
-            if (cond.roundsAttr) {
-                cond.roundsAttr.save({ current: newRounds });
-            } else {
-                await this.setConditionRounds(character, cond.key, newRounds);
+                const newRounds = cond.rounds + 1; // 统一加法：-2 变为 -1
+                if (cond.roundsAttr) {
+                    cond.roundsAttr.save({ current: newRounds }, { byScript: true });
+                } else {
+                    await this.setConditionRounds(character, cond.key, newRounds);
+                }
+                processed.push({ name: cond.name, status: "condition_reverted", elapsed: Math.abs(newRounds) });
             }
-            processed.push({ name: cond.name, status: "condition_reverted", elapsed: Math.abs(newRounds) });
+
+            return processed;
+        } finally {
+            queueMicrotask(() => {
+                this.isScriptMutating = false;
+            });
         }
 
         console.log(`[Pf1eBuffManager] 先攻回退: 为 ${character.get("name")} 加回 Buff 轮数共 ${processed.length} 项`);
@@ -1224,6 +1245,7 @@ class TurnOrderObserver {
             orderChanged: []
         };
         this.isInitialized = false;
+        this._lastLocalIntent = { action: null, timestamp: 0 };
     }
 
     /**
@@ -1239,7 +1261,7 @@ class TurnOrderObserver {
     }
 
     /**
-     * 开始监听先攻变动
+     * 开始监听先攻变动与本地操作意图
      */
     start() {
         if (this.isInitialized || typeof window.Campaign === "undefined") return;
@@ -1248,13 +1270,46 @@ class TurnOrderObserver {
         const rawJson = window.Campaign.get("turnorder");
         this.cachedOrder = this.parseTurnorder(rawJson);
 
-        // 绑定 Backbone 事件
+        // 1. 挂载本地用户操作捕获（委托到 document 捕获阶段，精准识别亲手点击）
+        this.bindLocalIntentListeners();
+
+        // 2. 绑定 Backbone 事件
         window.Campaign.on("change:turnorder", (campaign, newJson) => {
             this.handleTurnorderChange(newJson);
         });
 
         this.isInitialized = true;
         console.log("[TurnOrderObserver] 先攻事件监听器已就绪，当前排头:", this.getHeadTokenId());
+    }
+
+    /**
+     * 监听本地先攻条前进/后退按钮点击，精准捕获本地发起者身份
+     */
+    bindLocalIntentListeners() {
+        document.addEventListener("click", (e) => {
+            const target = e.target;
+            if (!target) return;
+
+            // 前进按钮 (Next Turn)
+            if (target.closest?.(".turn-tracker__forward, .ui-icon-seek-next, [data-action='next']")) {
+                this._lastLocalIntent = { action: "forward", timestamp: Date.now() };
+            }
+            // 后退按钮 (Previous Turn)
+            else if (target.closest?.(".turn-tracker__back, .ui-icon-seek-prev, [data-action='prev']")) {
+                this._lastLocalIntent = { action: "back", timestamp: Date.now() };
+            }
+        }, true);
+    }
+
+    /**
+     * 检查当前轮转是否由本地用户主动点击触发（1500ms 内有效）
+     */
+    checkAndConsumeLocalIntent(expectedAction) {
+        const now = Date.now();
+        const isMatch = this._lastLocalIntent.action === expectedAction && (now - this._lastLocalIntent.timestamp < 1500);
+        // 消耗标记，防止单次点击重复生效
+        this._lastLocalIntent = { action: null, timestamp: 0 };
+        return isMatch;
     }
 
     /**
@@ -1301,16 +1356,18 @@ class TurnOrderObserver {
         if (isNextTurn) {
             const endedTokenId = oldList[0].id;
             const startedTokenId = newList[0].id;
+            const isLocalUserAction = this.checkAndConsumeLocalIntent("forward");
 
-            console.log(`[TurnOrderObserver] 识别到正向回合结束: ${endedTokenId} -> 新排头: ${startedTokenId}`);
+            console.log(`[TurnOrderObserver] 识别到正向回合结束: ${endedTokenId} -> 新排头: ${startedTokenId} (本地操作: ${isLocalUserAction})`);
             
             // 派发回合结束与回合开始
-            this.emit("turnEnded", { endedTokenId, startedTokenId, oldList, newList });
-            this.emit("turnStarted", { startedTokenId, endedTokenId, newList });
+            this.emit("turnEnded", { endedTokenId, startedTokenId, oldList, newList, isLocalUserAction });
+            this.emit("turnStarted", { startedTokenId, endedTokenId, newList, isLocalUserAction });
         } else if (isPrevTurn) {
             const revertedTokenId = newList[0].id;
-            console.log(`[TurnOrderObserver] 识别到先攻回退: ${oldList[0].id} <- ${revertedTokenId}`);
-            this.emit("turnReverted", { revertedTokenId, oldList, newList });
+            const isLocalUserAction = this.checkAndConsumeLocalIntent("back");
+            console.log(`[TurnOrderObserver] 识别到先攻回退: ${oldList[0].id} <- ${revertedTokenId} (本地操作: ${isLocalUserAction})`);
+            this.emit("turnReverted", { revertedTokenId, oldList, newList, isLocalUserAction });
         } else {
             console.log("[TurnOrderObserver] 识别到先攻排序或手动拖拽调整");
             // 仅在非前进/回退的重排（如手动拖拽或增减人员）时派发 orderChanged
@@ -1547,6 +1604,43 @@ class Pf1eBuffUI {
     static _observer = null;
     static _debounceTimer = null;
 
+    // 便签板（微任务任务合并队列，彻底消除连环触发与并发竞态）
+    static pendingTokenIds = new Set();
+    static isFlushingScheduled = false;
+
+    /**
+     * 投递刷新请求到便签板（自动去重并微任务合并）
+     * @param {string} tokenId 
+     */
+    static requestTokenRefresh(tokenId) {
+        if (!tokenId) return;
+        this.pendingTokenIds.add(tokenId);
+
+        if (!this.isFlushingScheduled) {
+            this.isFlushingScheduled = true;
+            queueMicrotask(() => {
+                this.flushPendingRefreshes();
+            });
+        }
+    }
+
+    /**
+     * 微任务检查点：批量清空便签板并单次刷新
+     */
+    static async flushPendingRefreshes() {
+        const tokenIds = Array.from(this.pendingTokenIds);
+        this.pendingTokenIds.clear();
+        this.isFlushingScheduled = false;
+
+        for (const tid of tokenIds) {
+            try {
+                await this.refreshSingleTokenBadge(tid);
+            } catch (err) {
+                console.error(`[Pf1eBuffUI] 便签板刷新 Token [${tid}] 异常:`, err);
+            }
+        }
+    }
+
     static injectStyles() {
         if (this.isStylesInjected) return;
         const style = document.createElement("style");
@@ -1685,31 +1779,48 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 绑定人物卡属性变动监听，实现卡片勾选/取消负面状态或修改 Buff 时，先攻栏 0 秒实时响应
+     * 判定属性名是否属于 31 项白名单负面状态
+     */
+    static isConditionAttrName(name) {
+        if (!name || !name.startsWith("condition-")) return false;
+        const cleanName = name.endsWith("_rounds") ? name.replace("_rounds", "") : name;
+        return cleanName in Pf1eBuffManager.CONDITION_DEFINITIONS;
+    }
+
+    /**
+     * 判定属性名是否属于 Buff 核心控制字段（开关、名称、轮数）
+     */
+    static isBuffCoreAttrName(name) {
+        if (!name || !name.startsWith("repeating_buff2_")) return false;
+        return name.endsWith("_enable_toggle") || name.endsWith("_name") || name.endsWith("_rounds");
+    }
+
+    /**
+     * 绑定人物卡属性变动监听，仅响应用户真人在人物卡上的手动编辑（静默过滤脚本操作）
      */
     static bindCharacterAttributeListeners() {
         if (!window.Campaign || !window.Campaign.characters) return;
 
         const boundChars = new Set();
-        const charDebounceTimers = new Map();
 
         const attachToChar = (char) => {
             if (!char || boundChars.has(char.id)) return;
             boundChars.add(char.id);
 
-            const handleAttrChange = (attrModel) => {
-                const attrName = attrModel?.get?.("name") || "";
-                if (attrName.startsWith("condition-") || attrName.startsWith("repeating_buff2_")) {
-                    // 防抖合并连环触发（如走先攻时多个属性连续 save）
-                    if (charDebounceTimers.has(char.id)) {
-                        clearTimeout(charDebounceTimers.get(char.id));
-                    }
-                    const timer = setTimeout(() => {
-                        charDebounceTimers.delete(char.id);
-                        this.refreshTokensRepresentingCharacter(char.id);
-                    }, 40);
-                    charDebounceTimers.set(char.id, timer);
+            const handleAttrChange = (attrModel, val, options) => {
+                // 1. 若为脚本自身的业务更新，或处于全局脚本变更锁中，彻底静音跳过
+                if (options?.byScript || Pf1eBuffManager.isScriptMutating) {
+                    return;
                 }
+
+                const attrName = attrModel?.get?.("name") || "";
+
+                // 2. 超精细门禁：只允许 31 项负面状态与 Buff 核心 3 大字段通过
+                const isRelevant = this.isConditionAttrName(attrName) || this.isBuffCoreAttrName(attrName);
+                if (!isRelevant) return;
+
+                // 3. 投递到便签板，由微任务统一合并刷新
+                this.scheduleTokensRepresentingCharacter(char.id);
             };
 
             if (char.attribs) {
@@ -1723,9 +1834,9 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 根据角色 ID 精准定位其在先攻栏中的 Token 并即时刷新
+     * 根据角色 ID 定位其在先攻栏中的 Token 并投递到便签板
      */
-    static refreshTokensRepresentingCharacter(charId) {
+    static scheduleTokensRepresentingCharacter(charId) {
         if (!charId) return;
         const rows = document.querySelectorAll("#vm-turn-order li.token, .turn-tracker li.token, #initiativewindow li.token");
         for (const row of rows) {
@@ -1733,7 +1844,7 @@ class Pf1eBuffUI {
             if (tokenId) {
                 const char = Roll20Bridge.getCharacterByToken(tokenId);
                 if (char && char.id === charId) {
-                    this.refreshSingleTokenBadge(tokenId);
+                    this.requestTokenRefresh(tokenId);
                 }
             }
         }
@@ -3867,41 +3978,46 @@ class BuffFloatingPanel {
             // 1. 初始化并挂载先攻追踪器
             try {
                 const observer = new TurnOrderObserver();
-                observer.on("turnEnded", async ({ endedTokenId, startedTokenId }) => {
-                    try {
-                        const tokenGraphic = Roll20Bridge.getTokenGraphic(endedTokenId);
-                        if (tokenGraphic) {
-                            const character = Roll20Bridge.getCharacterByToken(tokenGraphic);
-                            if (character) {
-                                await Pf1eBuffManager.decrementBuffs(character);
-                            } else {
-                                TokenBuffManager.decrementBuffs(tokenGraphic);
+                observer.on("turnEnded", async ({ endedTokenId, startedTokenId, isLocalUserAction }) => {
+                    // 仅当本地是 GM 且亲手点击了先攻前进时，才执行扣减！
+                    if (Roll20Bridge.isGM() && isLocalUserAction) {
+                        try {
+                            const tokenGraphic = Roll20Bridge.getTokenGraphic(endedTokenId);
+                            if (tokenGraphic) {
+                                const character = Roll20Bridge.getCharacterByToken(tokenGraphic);
+                                if (character) {
+                                    await Pf1eBuffManager.decrementBuffs(character);
+                                } else {
+                                    TokenBuffManager.decrementBuffs(tokenGraphic);
+                                }
                             }
+                        } catch (err) {
+                            console.error("[Roll20Suite] 先攻回合结束扣减异常:", err);
                         }
-                    } catch (err) {
-                        console.error("[Roll20Suite] 先攻回合结束扣减异常:", err);
                     }
-                    // 定向单行精准刷新：仅修改移动到队尾的这一个单位，其余行零触碰零重绘
-                    await Pf1eBuffUI.refreshSingleTokenBadge(endedTokenId);
+                    // 统一通过便签板只读刷新画面（微任务合并，绝不触碰数据）
+                    Pf1eBuffUI.requestTokenRefresh(endedTokenId);
                     await BuffFloatingPanel.renderAllPanes();
                 });
 
-                observer.on("turnReverted", async ({ revertedTokenId }) => {
-                    try {
-                        const tokenGraphic = Roll20Bridge.getTokenGraphic(revertedTokenId);
-                        if (tokenGraphic) {
-                            const character = Roll20Bridge.getCharacterByToken(tokenGraphic);
-                            if (character) {
-                                await Pf1eBuffManager.incrementBuffsOnTurnRevert(character);
-                            } else {
-                                TokenBuffManager.incrementBuffsOnTurnRevert(tokenGraphic);
+                observer.on("turnReverted", async ({ revertedTokenId, isLocalUserAction }) => {
+                    // 仅当本地是 GM 且亲手点击了先攻回退时，才执行加回！
+                    if (Roll20Bridge.isGM() && isLocalUserAction) {
+                        try {
+                            const tokenGraphic = Roll20Bridge.getTokenGraphic(revertedTokenId);
+                            if (tokenGraphic) {
+                                const character = Roll20Bridge.getCharacterByToken(tokenGraphic);
+                                if (character) {
+                                    await Pf1eBuffManager.incrementBuffsOnTurnRevert(character);
+                                } else {
+                                    TokenBuffManager.incrementBuffsOnTurnRevert(tokenGraphic);
+                                }
                             }
+                        } catch (err) {
+                            console.error("[Roll20Suite] 先攻回退加回轮数异常:", err);
                         }
-                    } catch (err) {
-                        console.error("[Roll20Suite] 先攻回退加回轮数异常:", err);
                     }
-                    // 定向单行精准刷新：仅修改拉回到排头的这一个单位，其余行零触碰零重绘
-                    await Pf1eBuffUI.refreshSingleTokenBadge(revertedTokenId);
+                    Pf1eBuffUI.requestTokenRefresh(revertedTokenId);
                     await BuffFloatingPanel.renderAllPanes();
                 });
 
@@ -3944,7 +4060,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.14 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.15 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }
