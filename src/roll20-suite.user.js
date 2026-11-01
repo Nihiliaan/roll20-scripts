@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.13
+// @version      0.9.14
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.13...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.14...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -1691,6 +1691,7 @@ class Pf1eBuffUI {
         if (!window.Campaign || !window.Campaign.characters) return;
 
         const boundChars = new Set();
+        const charDebounceTimers = new Map();
 
         const attachToChar = (char) => {
             if (!char || boundChars.has(char.id)) return;
@@ -1699,8 +1700,15 @@ class Pf1eBuffUI {
             const handleAttrChange = (attrModel) => {
                 const attrName = attrModel?.get?.("name") || "";
                 if (attrName.startsWith("condition-") || attrName.startsWith("repeating_buff2_")) {
-                    // 定位当前先攻栏中所有代表此角色的 Token 行，定向单行刷新
-                    this.refreshTokensRepresentingCharacter(char.id);
+                    // 防抖合并连环触发（如走先攻时多个属性连续 save）
+                    if (charDebounceTimers.has(char.id)) {
+                        clearTimeout(charDebounceTimers.get(char.id));
+                    }
+                    const timer = setTimeout(() => {
+                        charDebounceTimers.delete(char.id);
+                        this.refreshTokensRepresentingCharacter(char.id);
+                    }, 40);
+                    charDebounceTimers.set(char.id, timer);
                 }
             };
 
@@ -1768,15 +1776,27 @@ class Pf1eBuffUI {
         // 清理任何残留的旧 + 号按钮
         row.querySelectorAll(".r20-add-buff-btn").forEach(el => el.remove());
 
-        let container = row.querySelector(".r20-buff-container");
+        // 彻底防御异步并发竞态：仅保留行内唯一一个 .r20-buff-container，清理所有多余重复容器
+        const existingContainers = Array.from(row.querySelectorAll(".r20-buff-container"));
+        let container = existingContainers.length > 0 ? existingContainers[0] : null;
+        if (existingContainers.length > 1) {
+            for (let i = 1; i < existingContainers.length; i++) {
+                existingContainers[i].remove();
+            }
+        }
+
+        // 同步就地初始化容器节点，杜绝异步 await 期间竞态二次创建
+        if (!container) {
+            container = document.createElement("div");
+            container.className = "r20-buff-container";
+            row.appendChild(container);
+        }
 
         // 1. 权限拦截脱敏守卫：如果当前用户不是 GM 且无法控制该 Token，直接隐藏且清空，严防偷看
         if (!Roll20Bridge.canControlToken(tokenId)) {
-            if (container) {
-                container.innerHTML = "";
-                container.dataset.signature = "unauthorized";
-                container.style.display = "none";
-            }
+            container.innerHTML = "";
+            container.dataset.signature = "unauthorized";
+            container.style.display = "none";
             return;
         }
 
@@ -1805,16 +1825,9 @@ class Pf1eBuffUI {
         // 计算当前签名
         const signature = activeItems.map(b => `${b.isDebuff ? 'd' : 'b'}:${b.name}:${b.rounds}`).join("|");
 
-        // 查找或创建容器，直接作为 li.token 的直属子节点（置于行末由 CSS order: 99 换行到下一行）
-        if (container) {
-            // 若未强制刷新且签名未变，直接返回，保持原生 DOM 零重绘！
-            if (!options.force && container.dataset.signature === signature) {
-                return;
-            }
-        } else {
-            container = document.createElement("div");
-            container.className = "r20-buff-container";
-            row.appendChild(container);
+        // 若未强制刷新且签名未变，直接返回，保持原生 DOM 零重绘！
+        if (!options.force && container.dataset.signature === signature) {
+            return;
         }
 
         container.dataset.signature = signature;
@@ -3931,7 +3944,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.13 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.14 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }
