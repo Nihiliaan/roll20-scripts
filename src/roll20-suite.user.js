@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.17
+// @version      0.9.18
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.17...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.18...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -662,18 +662,49 @@ class Pf1eConditionRegistry {
     }
 
     /**
-     * 将单个 markerTag 解析为简洁的原生提示词
+     * 将单个 markerTag 解析为纯中文名称（精简无英文无冒号效果）
      * @param {string} tag 例如 "Blinded::6485443" 或 "skull"
-     * @returns {string} 例如 "目盲 (Blinded): AC -2，失去敏捷加值..."
+     * @returns {string} 例如 "目盲"
      */
     static getTooltipForMarker(tag) {
         if (!tag) return "";
         const cleanTag = tag.split("::")[0];
         const def = this.find(cleanTag) || this.find(tag);
         if (def) {
-            return `${def.nameZh} (${def.nameEn}): ${def.description}`;
+            return def.nameZh;
         }
-        return cleanTag;
+
+        // 战役常见扩展 Buff/Debuff 标记纯中文映射
+        const EXTRA_ZH_MAP = {
+            "Hex": "惡咒",
+            "Poisoned": "中毒",
+            "Raging": "狂暴",
+            "Blessed": "祝福術",
+            "Hasted": "加速術",
+            "Slowed": "緩慢",
+            "Flying": "飛行",
+            "MageArmor": "法師護甲",
+            "Shield of Faith": "虔誠之盾",
+            "Bulls Strength": "公牛之力",
+            "Cats Grace": "貓之優雅",
+            "Bears Endurance": "巨熊堅韌",
+            "Foxs Cunning": "狐之狡黠",
+            "Owls Wisdom": "梟之睿智",
+            "Eagles Splendor": "鷹之光彩",
+            "Advantage": "優勢",
+            "Disadvantage": "劣勢",
+            "OnFire": "著火",
+            "Possessed": "附身",
+            "Symbio": "共生",
+            "Blink": "閃現術",
+            "Blur": "朦朧術",
+            "Mirror Image": "鏡像術",
+            "Sanctuary": "聖域術",
+            "Truesight": "真知術",
+            "Spirit Guardians": "守護之靈",
+            "DivineFavor": "神恩"
+        };
+        return EXTRA_ZH_MAP[cleanTag] || cleanTag;
     }
 
     /**
@@ -4751,7 +4782,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.17 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.18 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }
