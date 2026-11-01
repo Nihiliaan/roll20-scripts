@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.9
+// @version      0.9.10
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.9...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.10...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -2173,27 +2173,50 @@ class BuffPanelTemplates {}
  */
 class BuffPanelDragDrop {
     /**
-     * 初始化窗口标题栏拖拽移动（调用宿主 jQuery UI，零手写监听）
+     * 初始化窗口标题栏拖拽移动（严格以标题栏尺寸与视口边缘进行约束，杜绝误用整窗高度）
      */
     static initWindowDrag(panelEl, onDragEnd, onDragging) {
+        const header = panelEl.querySelector(".r20-panel-header");
+
+        // 统一以标题栏为物理边界的 Clamp 算法
+        const clampPosition = (left, top) => {
+            const headerH = header ? header.offsetHeight : 34;
+            const panelW = panelEl.offsetWidth || 320;
+            const minLeft = 10;
+            const maxLeft = Math.max(minLeft, window.innerWidth - panelW - 10);
+            const minTop = 10;
+            const maxTop = Math.max(minTop, window.innerHeight - headerH - 10);
+
+            return {
+                left: Math.max(minLeft, Math.min(maxLeft, left)),
+                top: Math.max(minTop, Math.min(maxTop, top))
+            };
+        };
+
         if (window.$ && typeof window.$.fn.draggable === "function") {
             window.$(panelEl).draggable({
                 handle: ".r20-panel-header",
-                containment: "window",
+                // 移除内置的 containment: "window"，避免其用展开后的 panel 整体高度将标题栏卡死在半空中
                 drag: (event, ui) => {
-                    if (onDragging) onDragging(ui.position.left, ui.position.top);
+                    const clamped = clampPosition(ui.position.left, ui.position.top);
+                    ui.position.left = clamped.left;
+                    ui.position.top = clamped.top;
+
+                    if (onDragging) onDragging(clamped.left, clamped.top);
                 },
                 stop: (event, ui) => {
+                    const clamped = clampPosition(ui.position.left, ui.position.top);
+                    panelEl.style.left = `${clamped.left}px`;
+                    panelEl.style.top = `${clamped.top}px`;
                     panelEl.style.bottom = "auto";
                     panelEl.style.right = "auto";
-                    if (onDragEnd) onDragEnd(ui.position.left, ui.position.top);
+                    if (onDragEnd) onDragEnd(clamped.left, clamped.top);
                 }
             });
             return;
         }
 
-        // 降级兜底方案
-        const header = panelEl.querySelector(".r20-panel-header");
+        // 降级原生 DOM 拖拽方案（同样以标题栏为边界）
         let isDragging = false;
         let startX, startY, initialLeft, initialTop;
 
@@ -2213,15 +2236,14 @@ class BuffPanelDragDrop {
                 if (!isDragging) return;
                 const dx = moveEvent.clientX - startX;
                 const dy = moveEvent.clientY - startY;
-                const newLeft = Math.max(10, Math.min(window.innerWidth - 330, initialLeft + dx));
-                const newTop = Math.max(10, Math.min(window.innerHeight - 40, initialTop + dy));
+                const clamped = clampPosition(initialLeft + dx, initialTop + dy);
 
-                panelEl.style.left = `${newLeft}px`;
-                panelEl.style.top = `${newTop}px`;
+                panelEl.style.left = `${clamped.left}px`;
+                panelEl.style.top = `${clamped.top}px`;
                 panelEl.style.bottom = "auto";
                 panelEl.style.right = "auto";
 
-                if (onDragging) onDragging(newLeft, newTop);
+                if (onDragging) onDragging(clamped.left, clamped.top);
             };
 
             const onMouseUp = () => {
@@ -3533,7 +3555,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.9 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.10 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }
