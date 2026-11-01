@@ -157,8 +157,24 @@ export class Pf1eBuffUI {
 
     /**
      * 刷新单行徽章（签名守卫：未发生内容变动时跳过，保留原生节点不破坏）
+     * 具备严格的权限脱敏检查：非 GM 玩家且无控制权的单位，绝不渲染任何 Buff，保护隐私与战争迷雾
      */
     static async refreshRowBadge(row, tokenId, options = {}) {
+        // 清理任何残留的旧 + 号按钮
+        row.querySelectorAll(".r20-add-buff-btn").forEach(el => el.remove());
+
+        let container = row.querySelector(".r20-buff-container");
+
+        // 1. 权限拦截脱敏守卫：如果当前用户不是 GM 且无法控制该 Token，直接隐藏且清空，严防偷看
+        if (!Roll20Bridge.canControlToken(tokenId)) {
+            if (container) {
+                container.innerHTML = "";
+                container.dataset.signature = "unauthorized";
+                container.style.display = "none";
+            }
+            return;
+        }
+
         const token = Roll20Bridge.getTokenGraphic(tokenId);
         const character = Roll20Bridge.getCharacterByToken(tokenId);
 
@@ -179,11 +195,7 @@ export class Pf1eBuffUI {
         // 计算当前 Buff 签名
         const signature = activeBuffs.map(b => `${b.name}:${b.rounds}`).join("|");
 
-        // 清理任何残留的旧 + 号按钮
-        row.querySelectorAll(".r20-add-buff-btn").forEach(el => el.remove());
-
         // 查找或创建容器，直接作为 li.token 的直属子节点（置于行末由 CSS order: 99 换行到下一行）
-        let container = row.querySelector(".r20-buff-container");
         if (container) {
             // 若未强制刷新且签名未变，直接返回，保持原生 DOM 零重绘！
             if (!options.force && container.dataset.signature === signature) {

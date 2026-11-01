@@ -617,15 +617,23 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 渲染右侧单位栏（按 Token 原生 details 分组，直观对称）
+     * 渲染右侧单位栏（按 Token 原生 details 分组，直观对称，严格权限过滤）
      */
     static async renderUnitPane() {
         const container = this.panelEl.querySelector(".r20-unit-tree");
         if (!container) return;
 
-        const selectedTokens = this.getSelectedTokens();
-        if (selectedTokens.length === 0) {
+        const allSelectedTokens = this.getSelectedTokens();
+        if (allSelectedTokens.length === 0) {
             container.innerHTML = '<div class="r20-empty-placeholder">未选中任何地图单位<br>在画布上点击或多选 Token</div>';
+            return;
+        }
+
+        // 严格权限过滤：非 GM 玩家只能查看和操作自己拥有控制权的 Token
+        const selectedTokens = allSelectedTokens.filter(t => Roll20Bridge.canControlToken(t.token));
+
+        if (selectedTokens.length === 0) {
+            container.innerHTML = '<div class="r20-empty-placeholder" style="color:#ef5350;">🔒 无控制权限<br>仅能查看受控角色或伙伴的 Buff</div>';
             return;
         }
 

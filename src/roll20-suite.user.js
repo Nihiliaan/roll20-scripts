@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.10
+// @version      0.9.11
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.10...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.11...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -147,6 +147,51 @@ class Roll20Bridge {
             console.warn("[Roll20Bridge] 无法找到聊天输入组件");
         }
     }
+    /**
+     * 判断当前登录用户是否具备 GM 权限
+     * @returns {boolean}
+     */
+    static isGM() {
+        return !!window.is_gm;
+    }
+
+    /**
+     * 获取当前登录玩家的唯一标识 ID
+     * @returns {string|null}
+     */
+    static getCurrentPlayerId() {
+        return window.currentPlayer ? window.currentPlayer.id : (window.d20_player_id || null);
+    }
+
+    /**
+     * 判断当前用户对特定 Token/角色卡是否拥有完全控制或查看权限
+     * （GM 拥有全域权限；普通玩家仅能控制自身或被授权全部人的单位）
+     * @param {string|object} tokenOrId Token对象或TokenID
+     * @returns {boolean}
+     */
+    static canControlToken(tokenOrId) {
+        if (this.isGM()) return true;
+
+        const token = typeof tokenOrId === "string" ? this.getTokenGraphic(tokenOrId) : tokenOrId;
+        if (!token) return false;
+
+        // 1. 若关联了人物卡，优先依据人物卡的控制权限判定
+        const character = this.getCharacterByToken(token);
+        if (character) {
+            if (typeof character.currentPlayerControls === "function") {
+                return character.currentPlayerControls();
+            }
+            const myPlayerId = this.getCurrentPlayerId();
+            const controlledBy = (character.get("controlledby") || "").split(",");
+            return controlledBy.includes(myPlayerId) || controlledBy.includes("all");
+        }
+
+        // 2. 若为纯野怪 Token，依据 Token 自身控制权判定
+        const myPlayerId = this.getCurrentPlayerId();
+        const tokenControlledBy = (token.get("controlledby") || "").split(",");
+        return tokenControlledBy.includes(myPlayerId) || tokenControlledBy.includes("all");
+    }
+
     /**
      * 调起 Roll20 宿主原生的角色卡弹窗
      * @param {string} characterId
@@ -1492,8 +1537,24 @@ class Pf1eBuffUI {
 
     /**
      * 刷新单行徽章（签名守卫：未发生内容变动时跳过，保留原生节点不破坏）
+     * 具备严格的权限脱敏检查：非 GM 玩家且无控制权的单位，绝不渲染任何 Buff，保护隐私与战争迷雾
      */
     static async refreshRowBadge(row, tokenId, options = {}) {
+        // 清理任何残留的旧 + 号按钮
+        row.querySelectorAll(".r20-add-buff-btn").forEach(el => el.remove());
+
+        let container = row.querySelector(".r20-buff-container");
+
+        // 1. 权限拦截脱敏守卫：如果当前用户不是 GM 且无法控制该 Token，直接隐藏且清空，严防偷看
+        if (!Roll20Bridge.canControlToken(tokenId)) {
+            if (container) {
+                container.innerHTML = "";
+                container.dataset.signature = "unauthorized";
+                container.style.display = "none";
+            }
+            return;
+        }
+
         const token = Roll20Bridge.getTokenGraphic(tokenId);
         const character = Roll20Bridge.getCharacterByToken(tokenId);
 
@@ -1514,11 +1575,7 @@ class Pf1eBuffUI {
         // 计算当前 Buff 签名
         const signature = activeBuffs.map(b => `${b.name}:${b.rounds}`).join("|");
 
-        // 清理任何残留的旧 + 号按钮
-        row.querySelectorAll(".r20-add-buff-btn").forEach(el => el.remove());
-
         // 查找或创建容器，直接作为 li.token 的直属子节点（置于行末由 CSS order: 99 换行到下一行）
-        let container = row.querySelector(".r20-buff-container");
         if (container) {
             // 若未强制刷新且签名未变，直接返回，保持原生 DOM 零重绘！
             if (!options.force && container.dataset.signature === signature) {
@@ -2990,15 +3047,23 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 渲染右侧单位栏（按 Token 原生 details 分组，直观对称）
+     * 渲染右侧单位栏（按 Token 原生 details 分组，直观对称，严格权限过滤）
      */
     static async renderUnitPane() {
         const container = this.panelEl.querySelector(".r20-unit-tree");
         if (!container) return;
 
-        const selectedTokens = this.getSelectedTokens();
-        if (selectedTokens.length === 0) {
+        const allSelectedTokens = this.getSelectedTokens();
+        if (allSelectedTokens.length === 0) {
             container.innerHTML = '<div class="r20-empty-placeholder">未选中任何地图单位<br>在画布上点击或多选 Token</div>';
+            return;
+        }
+
+        // 严格权限过滤：非 GM 玩家只能查看和操作自己拥有控制权的 Token
+        const selectedTokens = allSelectedTokens.filter(t => Roll20Bridge.canControlToken(t.token));
+
+        if (selectedTokens.length === 0) {
+            container.innerHTML = '<div class="r20-empty-placeholder" style="color:#ef5350;">🔒 无控制权限<br>仅能查看受控角色或伙伴的 Buff</div>';
             return;
         }
 
@@ -3555,7 +3620,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.10 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.11 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

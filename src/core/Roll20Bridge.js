@@ -127,6 +127,51 @@ export class Roll20Bridge {
         }
     }
     /**
+     * 判断当前登录用户是否具备 GM 权限
+     * @returns {boolean}
+     */
+    static isGM() {
+        return !!window.is_gm;
+    }
+
+    /**
+     * 获取当前登录玩家的唯一标识 ID
+     * @returns {string|null}
+     */
+    static getCurrentPlayerId() {
+        return window.currentPlayer ? window.currentPlayer.id : (window.d20_player_id || null);
+    }
+
+    /**
+     * 判断当前用户对特定 Token/角色卡是否拥有完全控制或查看权限
+     * （GM 拥有全域权限；普通玩家仅能控制自身或被授权全部人的单位）
+     * @param {string|object} tokenOrId Token对象或TokenID
+     * @returns {boolean}
+     */
+    static canControlToken(tokenOrId) {
+        if (this.isGM()) return true;
+
+        const token = typeof tokenOrId === "string" ? this.getTokenGraphic(tokenOrId) : tokenOrId;
+        if (!token) return false;
+
+        // 1. 若关联了人物卡，优先依据人物卡的控制权限判定
+        const character = this.getCharacterByToken(token);
+        if (character) {
+            if (typeof character.currentPlayerControls === "function") {
+                return character.currentPlayerControls();
+            }
+            const myPlayerId = this.getCurrentPlayerId();
+            const controlledBy = (character.get("controlledby") || "").split(",");
+            return controlledBy.includes(myPlayerId) || controlledBy.includes("all");
+        }
+
+        // 2. 若为纯野怪 Token，依据 Token 自身控制权判定
+        const myPlayerId = this.getCurrentPlayerId();
+        const tokenControlledBy = (token.get("controlledby") || "").split(",");
+        return tokenControlledBy.includes(myPlayerId) || tokenControlledBy.includes("all");
+    }
+
+    /**
      * 调起 Roll20 宿主原生的角色卡弹窗
      * @param {string} characterId
      */
