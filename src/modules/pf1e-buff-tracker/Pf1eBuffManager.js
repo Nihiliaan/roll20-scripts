@@ -6,9 +6,10 @@ import { Roll20Bridge } from "../../core/Roll20Bridge.js";
  */
 export class Pf1eBuffManager {
     /**
-     * 官方内置负面状态 (Conditions) 中英文标准映射表
+     * 官方内置负面状态 (Conditions) 31 项白名单（精准匹配角色卡 UI，排除能量吸取与被纠缠联动派生的被缓慢）
      */
     static CONDITION_DEFINITIONS = {
+        // 第一行 (15 项)
         "condition-Bleed": { zh: "流血", defaultTimed: true },
         "condition-Blinded": { zh: "目盲", defaultTimed: true },
         "condition-Cowering": { zh: "畏縮", defaultTimed: false },
@@ -16,33 +17,32 @@ export class Pf1eBuffManager {
         "condition-Dazzled": { zh: "目眩", defaultTimed: true },
         "condition-Dead": { zh: "死亡", defaultTimed: false },
         "condition-Deafened": { zh: "耳聾", defaultTimed: false },
-        "condition-Disabled": { zh: "殘廢", defaultTimed: false },
-        "condition_is_drained": { zh: "能量吸取", defaultTimed: false },
+        "condition-Disabled": { zh: "癱瘓", defaultTimed: false }, // UI 文本为瘫痪
         "condition-Drowning": { zh: "溺水", defaultTimed: true },
         "condition-Dying": { zh: "瀕死", defaultTimed: true },
         "condition-Entangled": { zh: "糾纏", defaultTimed: true },
         "condition-Exhausted": { zh: "力竭", defaultTimed: false },
         "condition-Fascinated": { zh: "迷魂", defaultTimed: true },
         "condition-Fatigued": { zh: "疲乏", defaultTimed: false },
-        "condition-Fear": { zh: "恐慌", defaultTimed: true },
         "condition-Flat-Footed": { zh: "措手不及", defaultTimed: false },
+
+        // 第二行 (16 项)
         "condition-Grappled": { zh: "擒抱", defaultTimed: false },
         "condition-Helpless": { zh: "無助", defaultTimed: false },
         "condition-Incorporeal": { zh: "虛體", defaultTimed: false },
         "condition-Invisible": { zh: "隱形", defaultTimed: true },
         "condition-Nauseated": { zh: "反胃", defaultTimed: true },
-        "condition-Paralyzed": { zh: "癱瘓", defaultTimed: false },
+        "condition-Paralyzed": { zh: "麻痺", defaultTimed: false }, // UI 文本为麻痹
         "condition-Petrified": { zh: "石化", defaultTimed: false },
         "condition-Pinned": { zh: "壓制", defaultTimed: false },
-        "condition-Prone": { zh: "倒地", defaultTimed: false },
-        "condition-Sickened": { zh: "惡心", defaultTimed: true },
-        "condition-Slowed": { zh: "緩慢", defaultTimed: true },
-        "condition-Stable": { zh: "傷勢穩定", defaultTimed: false },
+        "condition-Prone": { zh: "俯臥", defaultTimed: false }, // UI 文本为俯卧
+        "condition-Fear": { zh: "恐懼", defaultTimed: true }, // UI 文本为恐懼 (任意)
+        "condition-Sickened": { zh: "噁心", defaultTimed: true }, // UI 文本为噁心
+        "condition-Stable": { zh: "穩定", defaultTimed: false }, // UI 文本为稳定
         "condition-Staggered": { zh: "恍惚", defaultTimed: true },
-        "condition-Stunned": { zh: "震懾", defaultTimed: true },
+        "condition-Stunned": { zh: "Stunned", defaultTimed: true }, // UI 文本为 Stunned
         "condition-Suffocating": { zh: "窒息", defaultTimed: true },
-        "condition-Unconscious": { zh: "昏迷", defaultTimed: false },
-        "condition-Wounds": { zh: "重傷", defaultTimed: false }
+        "condition-Unconscious": { zh: "昏迷", defaultTimed: false }
     };
 
     /**

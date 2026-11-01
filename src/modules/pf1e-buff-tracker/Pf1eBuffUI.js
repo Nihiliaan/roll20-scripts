@@ -142,9 +142,59 @@ export class Pf1eBuffUI {
             });
         }
 
+        // 3. 实时响应人物卡属性变动（即时更新负面状态与 Buff，无需走动先攻！）
+        this.bindCharacterAttributeListeners();
+
         this.isObserverStarted = true;
         // 立即尝试一次初次刷新
         this.refreshAllBadges();
+    }
+
+    /**
+     * 绑定人物卡属性变动监听，实现卡片勾选/取消负面状态或修改 Buff 时，先攻栏 0 秒实时响应
+     */
+    static bindCharacterAttributeListeners() {
+        if (!window.Campaign || !window.Campaign.characters) return;
+
+        const boundChars = new Set();
+
+        const attachToChar = (char) => {
+            if (!char || boundChars.has(char.id)) return;
+            boundChars.add(char.id);
+
+            const handleAttrChange = (attrModel) => {
+                const attrName = attrModel?.get?.("name") || "";
+                if (attrName.startsWith("condition-") || attrName.startsWith("repeating_buff2_")) {
+                    // 定位当前先攻栏中所有代表此角色的 Token 行，定向单行刷新
+                    this.refreshTokensRepresentingCharacter(char.id);
+                }
+            };
+
+            if (char.attribs) {
+                char.attribs.on("change:current", handleAttrChange);
+                char.attribs.on("destroy", handleAttrChange);
+            }
+        };
+
+        window.Campaign.characters.forEach(attachToChar);
+        window.Campaign.characters.on("add", attachToChar);
+    }
+
+    /**
+     * 根据角色 ID 精准定位其在先攻栏中的 Token 并即时刷新
+     */
+    static refreshTokensRepresentingCharacter(charId) {
+        if (!charId) return;
+        const rows = document.querySelectorAll("#vm-turn-order li.token, .turn-tracker li.token, #initiativewindow li.token");
+        for (const row of rows) {
+            const tokenId = row.dataset.tokenid;
+            if (tokenId) {
+                const char = Roll20Bridge.getCharacterByToken(tokenId);
+                if (char && char.id === charId) {
+                    this.refreshSingleTokenBadge(tokenId);
+                }
+            }
+        }
     }
 
     /**

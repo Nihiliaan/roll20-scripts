@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.12
+// @version      0.9.13
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.12...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.13...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -216,9 +216,10 @@ class Roll20Bridge {
  */
 class Pf1eBuffManager {
     /**
-     * 官方内置负面状态 (Conditions) 中英文标准映射表
+     * 官方内置负面状态 (Conditions) 31 项白名单（精准匹配角色卡 UI，排除能量吸取与被纠缠联动派生的被缓慢）
      */
     static CONDITION_DEFINITIONS = {
+        // 第一行 (15 项)
         "condition-Bleed": { zh: "流血", defaultTimed: true },
         "condition-Blinded": { zh: "目盲", defaultTimed: true },
         "condition-Cowering": { zh: "畏縮", defaultTimed: false },
@@ -226,33 +227,32 @@ class Pf1eBuffManager {
         "condition-Dazzled": { zh: "目眩", defaultTimed: true },
         "condition-Dead": { zh: "死亡", defaultTimed: false },
         "condition-Deafened": { zh: "耳聾", defaultTimed: false },
-        "condition-Disabled": { zh: "殘廢", defaultTimed: false },
-        "condition_is_drained": { zh: "能量吸取", defaultTimed: false },
+        "condition-Disabled": { zh: "癱瘓", defaultTimed: false }, // UI 文本为瘫痪
         "condition-Drowning": { zh: "溺水", defaultTimed: true },
         "condition-Dying": { zh: "瀕死", defaultTimed: true },
         "condition-Entangled": { zh: "糾纏", defaultTimed: true },
         "condition-Exhausted": { zh: "力竭", defaultTimed: false },
         "condition-Fascinated": { zh: "迷魂", defaultTimed: true },
         "condition-Fatigued": { zh: "疲乏", defaultTimed: false },
-        "condition-Fear": { zh: "恐慌", defaultTimed: true },
         "condition-Flat-Footed": { zh: "措手不及", defaultTimed: false },
+
+        // 第二行 (16 项)
         "condition-Grappled": { zh: "擒抱", defaultTimed: false },
         "condition-Helpless": { zh: "無助", defaultTimed: false },
         "condition-Incorporeal": { zh: "虛體", defaultTimed: false },
         "condition-Invisible": { zh: "隱形", defaultTimed: true },
         "condition-Nauseated": { zh: "反胃", defaultTimed: true },
-        "condition-Paralyzed": { zh: "癱瘓", defaultTimed: false },
+        "condition-Paralyzed": { zh: "麻痺", defaultTimed: false }, // UI 文本为麻痹
         "condition-Petrified": { zh: "石化", defaultTimed: false },
         "condition-Pinned": { zh: "壓制", defaultTimed: false },
-        "condition-Prone": { zh: "倒地", defaultTimed: false },
-        "condition-Sickened": { zh: "惡心", defaultTimed: true },
-        "condition-Slowed": { zh: "緩慢", defaultTimed: true },
-        "condition-Stable": { zh: "傷勢穩定", defaultTimed: false },
+        "condition-Prone": { zh: "俯臥", defaultTimed: false }, // UI 文本为俯卧
+        "condition-Fear": { zh: "恐懼", defaultTimed: true }, // UI 文本为恐懼 (任意)
+        "condition-Sickened": { zh: "噁心", defaultTimed: true }, // UI 文本为噁心
+        "condition-Stable": { zh: "穩定", defaultTimed: false }, // UI 文本为稳定
         "condition-Staggered": { zh: "恍惚", defaultTimed: true },
-        "condition-Stunned": { zh: "震懾", defaultTimed: true },
+        "condition-Stunned": { zh: "Stunned", defaultTimed: true }, // UI 文本为 Stunned
         "condition-Suffocating": { zh: "窒息", defaultTimed: true },
-        "condition-Unconscious": { zh: "昏迷", defaultTimed: false },
-        "condition-Wounds": { zh: "重傷", defaultTimed: false }
+        "condition-Unconscious": { zh: "昏迷", defaultTimed: false }
     };
 
     /**
@@ -1676,9 +1676,59 @@ class Pf1eBuffUI {
             });
         }
 
+        // 3. 实时响应人物卡属性变动（即时更新负面状态与 Buff，无需走动先攻！）
+        this.bindCharacterAttributeListeners();
+
         this.isObserverStarted = true;
         // 立即尝试一次初次刷新
         this.refreshAllBadges();
+    }
+
+    /**
+     * 绑定人物卡属性变动监听，实现卡片勾选/取消负面状态或修改 Buff 时，先攻栏 0 秒实时响应
+     */
+    static bindCharacterAttributeListeners() {
+        if (!window.Campaign || !window.Campaign.characters) return;
+
+        const boundChars = new Set();
+
+        const attachToChar = (char) => {
+            if (!char || boundChars.has(char.id)) return;
+            boundChars.add(char.id);
+
+            const handleAttrChange = (attrModel) => {
+                const attrName = attrModel?.get?.("name") || "";
+                if (attrName.startsWith("condition-") || attrName.startsWith("repeating_buff2_")) {
+                    // 定位当前先攻栏中所有代表此角色的 Token 行，定向单行刷新
+                    this.refreshTokensRepresentingCharacter(char.id);
+                }
+            };
+
+            if (char.attribs) {
+                char.attribs.on("change:current", handleAttrChange);
+                char.attribs.on("destroy", handleAttrChange);
+            }
+        };
+
+        window.Campaign.characters.forEach(attachToChar);
+        window.Campaign.characters.on("add", attachToChar);
+    }
+
+    /**
+     * 根据角色 ID 精准定位其在先攻栏中的 Token 并即时刷新
+     */
+    static refreshTokensRepresentingCharacter(charId) {
+        if (!charId) return;
+        const rows = document.querySelectorAll("#vm-turn-order li.token, .turn-tracker li.token, #initiativewindow li.token");
+        for (const row of rows) {
+            const tokenId = row.dataset.tokenid;
+            if (tokenId) {
+                const char = Roll20Bridge.getCharacterByToken(tokenId);
+                if (char && char.id === charId) {
+                    this.refreshSingleTokenBadge(tokenId);
+                }
+            }
+        }
     }
 
     /**
@@ -3881,7 +3931,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.12 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.13 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }
