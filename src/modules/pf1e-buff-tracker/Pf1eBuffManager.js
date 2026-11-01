@@ -6,8 +6,132 @@ import { Roll20Bridge } from "../../core/Roll20Bridge.js";
  */
 export class Pf1eBuffManager {
     /**
-     * 生成合乎 Roll20 标准的唯一 RowID（20 位 Base64 带时间戳，杜绝小写冲突）
+     * 官方内置负面状态 (Conditions) 中英文标准映射表
      */
+    static CONDITION_DEFINITIONS = {
+        "condition-Bleed": { zh: "流血", defaultTimed: true },
+        "condition-Blinded": { zh: "目盲", defaultTimed: true },
+        "condition-Cowering": { zh: "畏縮", defaultTimed: false },
+        "condition-Dazed": { zh: "暈眩", defaultTimed: true },
+        "condition-Dazzled": { zh: "目眩", defaultTimed: true },
+        "condition-Dead": { zh: "死亡", defaultTimed: false },
+        "condition-Deafened": { zh: "耳聾", defaultTimed: false },
+        "condition-Disabled": { zh: "殘廢", defaultTimed: false },
+        "condition_is_drained": { zh: "能量吸取", defaultTimed: false },
+        "condition-Drowning": { zh: "溺水", defaultTimed: true },
+        "condition-Dying": { zh: "瀕死", defaultTimed: true },
+        "condition-Entangled": { zh: "糾纏", defaultTimed: true },
+        "condition-Exhausted": { zh: "力竭", defaultTimed: false },
+        "condition-Fascinated": { zh: "迷魂", defaultTimed: true },
+        "condition-Fatigued": { zh: "疲乏", defaultTimed: false },
+        "condition-Fear": { zh: "恐慌", defaultTimed: true },
+        "condition-Flat-Footed": { zh: "措手不及", defaultTimed: false },
+        "condition-Grappled": { zh: "擒抱", defaultTimed: false },
+        "condition-Helpless": { zh: "無助", defaultTimed: false },
+        "condition-Incorporeal": { zh: "虛體", defaultTimed: false },
+        "condition-Invisible": { zh: "隱形", defaultTimed: true },
+        "condition-Nauseated": { zh: "反胃", defaultTimed: true },
+        "condition-Paralyzed": { zh: "癱瘓", defaultTimed: false },
+        "condition-Petrified": { zh: "石化", defaultTimed: false },
+        "condition-Pinned": { zh: "壓制", defaultTimed: false },
+        "condition-Prone": { zh: "倒地", defaultTimed: false },
+        "condition-Sickened": { zh: "惡心", defaultTimed: true },
+        "condition-Slowed": { zh: "緩慢", defaultTimed: true },
+        "condition-Stable": { zh: "傷勢穩定", defaultTimed: false },
+        "condition-Staggered": { zh: "恍惚", defaultTimed: true },
+        "condition-Stunned": { zh: "震懾", defaultTimed: true },
+        "condition-Suffocating": { zh: "窒息", defaultTimed: true },
+        "condition-Unconscious": { zh: "昏迷", defaultTimed: false },
+        "condition-Wounds": { zh: "重傷", defaultTimed: false }
+    };
+
+    /**
+     * 获取指定角色卡上所有当前处于激活状态的负面状态 (Conditions)
+     * 负数轮数表示正计轮（已经过的轮数，如 -1 为第 1 轮，-2 为第 2 轮）
+     * @param {object} character 
+     * @returns {Promise<Array>}
+     */
+    static async getActiveConditions(character) {
+        if (!character) return [];
+        await Roll20Bridge.ensureCharacterAttributes(character);
+        if (!character.attribs || !character.attribs.models) return [];
+
+        const conditions = [];
+
+        for (const [condKey, def] of Object.entries(this.CONDITION_DEFINITIONS)) {
+            const attr = character.attribs.models.find(a => a.get("name") === condKey);
+            if (!attr) continue;
+
+            const val = attr.get("current");
+            const isActive = val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
+
+            if (isActive) {
+                const roundsKey = `${condKey}_rounds`;
+                const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+                let rounds = null;
+
+                if (roundsAttr && roundsAttr.get("current") !== "" && roundsAttr.get("current") !== null) {
+                    const rVal = Number(roundsAttr.get("current"));
+                    if (!isNaN(rVal)) {
+                        rounds = rVal;
+                    }
+                }
+
+                conditions.push({
+                    key: condKey,
+                    name: def.zh,
+                    isCondition: true,
+                    isDebuff: true,
+                    rounds,
+                    roundsKey,
+                    condAttr: attr,
+                    roundsAttr
+                });
+            }
+        }
+
+        return conditions;
+    }
+
+    /**
+     * 设置或更新指定负面状态的已过轮数（负数存储）
+     */
+    static async setConditionRounds(character, condKey, rounds) {
+        if (!character) return;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+        const roundsKey = `${condKey}_rounds`;
+        let roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+
+        if (rounds === null || rounds === "" || isNaN(rounds)) {
+            if (roundsAttr) roundsAttr.destroy();
+            return;
+        }
+
+        // 统一负数正计轮规范：若用户传入 2，存为 -2
+        const storedVal = -Math.abs(Number(rounds));
+        if (roundsAttr) {
+            roundsAttr.save({ current: storedVal });
+        } else {
+            character.attribs.create({ name: roundsKey, current: storedVal });
+        }
+    }
+
+    /**
+     * 关闭/解除指定负面状态
+     */
+    static async removeCondition(character, condKey) {
+        if (!character) return;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+        const attr = character.attribs.models.find(a => a.get("name") === condKey);
+        if (attr) {
+            attr.save({ current: "0" });
+        }
+        const roundsKey = `${condKey}_rounds`;
+        const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+        if (roundsAttr) {
+            roundsAttr.destroy();
+        }
+    }
     static generateStandardRowId() {
         if (typeof window.generateUUID === "function") {
             return window.generateUUID();
@@ -426,6 +550,7 @@ export class Pf1eBuffManager {
         const activeBuffs = await this.getActiveBuffs(character);
         const processed = [];
 
+        // 1. 扣减常规正面 Buff (大于 0 归零时自动解除)
         for (const buff of activeBuffs) {
             if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
@@ -442,6 +567,20 @@ export class Pf1eBuffManager {
                 }
                 processed.push({ name: buff.name, status: "decremented", remaining: newRounds });
             }
+        }
+
+        // 2. 推进负面状态轮数 (负数正计轮，rounds - 1，如 -1 -> -2)
+        const activeConditions = await this.getActiveConditions(character);
+        for (const cond of activeConditions) {
+            if (cond.rounds === null || isNaN(cond.rounds)) continue;
+
+            const newRounds = cond.rounds - 1; // 统一减法：-1 变为 -2
+            if (cond.roundsAttr) {
+                cond.roundsAttr.save({ current: newRounds });
+            } else {
+                await this.setConditionRounds(character, cond.key, newRounds);
+            }
+            processed.push({ name: cond.name, status: "condition_advanced", elapsed: Math.abs(newRounds) });
         }
 
         return processed;
@@ -476,6 +615,7 @@ export class Pf1eBuffManager {
         const activeBuffs = await this.getActiveBuffs(character);
         const processed = [];
 
+        // 1. 加回常规正面 Buff (rounds + 1)
         for (const buff of activeBuffs) {
             if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
@@ -486,6 +626,20 @@ export class Pf1eBuffManager {
                 await this.setBuffRounds(character, buff.rowId, newRounds);
             }
             processed.push({ name: buff.name, status: "incremented", remaining: newRounds });
+        }
+
+        // 2. 回退负面状态轮数 (rounds + 1，如 -2 -> -1)
+        const activeConditions = await this.getActiveConditions(character);
+        for (const cond of activeConditions) {
+            if (cond.rounds === null || isNaN(cond.rounds)) continue;
+
+            const newRounds = cond.rounds + 1; // 统一加法：-2 变为 -1
+            if (cond.roundsAttr) {
+                cond.roundsAttr.save({ current: newRounds });
+            } else {
+                await this.setConditionRounds(character, cond.key, newRounds);
+            }
+            processed.push({ name: cond.name, status: "condition_reverted", elapsed: Math.abs(newRounds) });
         }
 
         console.log(`[Pf1eBuffManager] 先攻回退: 为 ${character.get("name")} 加回 Buff 轮数共 ${processed.length} 项`);

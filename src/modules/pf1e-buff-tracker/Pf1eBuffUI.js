@@ -62,6 +62,27 @@ export class Pf1eBuffUI {
                 border-color: #f87171;
                 color: #fecaca;
             }
+            .r20-buff-pill-debuff {
+                display: inline-flex;
+                align-items: center;
+                background: #881337 !important;
+                border-color: #f43f5e !important;
+                color: #ffe4e6 !important;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 1px 5px;
+                border-radius: 3px;
+                cursor: pointer;
+                user-select: none;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                white-space: nowrap;
+                transition: background 0.15s, border-color 0.15s;
+            }
+            .r20-buff-pill-debuff:hover {
+                background: #be123c !important;
+                border-color: #fda4af !important;
+                color: #ffffff !important;
+            }
         `;
         document.head.appendChild(style);
         this.isStylesInjected = true;
@@ -178,13 +199,18 @@ export class Pf1eBuffUI {
         const token = Roll20Bridge.getTokenGraphic(tokenId);
         const character = Roll20Bridge.getCharacterByToken(tokenId);
 
-        let activeBuffs = [];
+        let activeItems = [];
         const isCharacter = !!character;
 
         if (isCharacter) {
-            activeBuffs = await Pf1eBuffManager.getActiveBuffs(character);
+            // 1. 优先提取负面状态 (排在所有 Buff 之前)
+            const conditions = await Pf1eBuffManager.getActiveConditions(character);
+            // 2. 提取常规 Buff
+            const buffs = await Pf1eBuffManager.getActiveBuffs(character);
+            // 负面状态严格排在所有正面 Buff 之前
+            activeItems = [...conditions, ...buffs];
         } else if (token) {
-            activeBuffs = TokenBuffManager.getTokenBuffs(token).map(b => ({
+            activeItems = TokenBuffManager.getTokenBuffs(token).map(b => ({
                 name: b.name,
                 rounds: b.rounds,
                 rowId: null,
@@ -192,8 +218,8 @@ export class Pf1eBuffUI {
             }));
         }
 
-        // 计算当前 Buff 签名
-        const signature = activeBuffs.map(b => `${b.name}:${b.rounds}`).join("|");
+        // 计算当前签名
+        const signature = activeItems.map(b => `${b.isDebuff ? 'd' : 'b'}:${b.name}:${b.rounds}`).join("|");
 
         // 查找或创建容器，直接作为 li.token 的直属子节点（置于行末由 CSS order: 99 换行到下一行）
         if (container) {
@@ -210,26 +236,50 @@ export class Pf1eBuffUI {
         container.dataset.signature = signature;
         container.innerHTML = "";
 
-        if (activeBuffs.length === 0) {
+        if (activeItems.length === 0) {
             container.style.display = "none";
             return;
         }
         container.style.display = "flex";
 
-        // 渲染紧凑徽章
-        for (const buff of activeBuffs) {
+        // 渲染徽章（负面状态排在所有正面 Buff 之前）
+        for (const item of activeItems) {
             const pill = document.createElement("span");
-            const isExpiring = buff.rounds !== null && buff.rounds <= 1;
-            const showRounds = buff.rounds !== null && buff.rounds <= 100;
-            const text = showRounds ? `${buff.name} ${buff.rounds}` : buff.name;
+            const isDebuff = !!item.isDebuff;
 
-            pill.className = `r20-buff-pill-compact ${isExpiring ? "expiring" : ""}`;
-            pill.title = `${buff.name} (剩余 ${buff.rounds !== null ? buff.rounds + '轮' : '常驻'})，点击修改或解除`;
+            let text = item.name;
+            let title = "";
+
+            if (isDebuff) {
+                // 负面状态徽章样式
+                pill.className = "r20-buff-pill-debuff";
+                if (item.rounds !== null && item.rounds < 0) {
+                    const elapsed = Math.abs(item.rounds);
+                    text = `${item.name} +${elapsed}`;
+                    title = `${item.name} (已持续 ${elapsed} 轮)，点击修改或解除`;
+                } else {
+                    text = item.name;
+                    title = `${item.name} (常驻/战术状态)，点击修改或解除`;
+                }
+            } else {
+                // 正面 Buff 徽章样式
+                const isExpiring = item.rounds !== null && item.rounds <= 1;
+                const showRounds = item.rounds !== null && item.rounds <= 100;
+                text = showRounds ? `${item.name} ${item.rounds}` : item.name;
+                pill.className = `r20-buff-pill-compact ${isExpiring ? "expiring" : ""}`;
+                title = `${item.name} (剩余 ${item.rounds !== null ? item.rounds + '轮' : '常驻'})，点击修改或解除`;
+            }
+
+            pill.title = title;
             pill.textContent = text;
 
             pill.addEventListener("click", (e) => {
                 e.stopPropagation();
-                this.showBuffEditModal(character, token, buff, row, tokenId);
+                if (isDebuff) {
+                    this.showConditionEditModal(character, token, item, row, tokenId);
+                } else {
+                    this.showBuffEditModal(character, token, item, row, tokenId);
+                }
             });
 
             container.appendChild(pill);
@@ -249,6 +299,63 @@ export class Pf1eBuffUI {
         } catch (e) {
             console.warn("[Pf1eBuffUI] 联动工作台刷新略过:", e);
         }
+    }
+
+    /**
+     * 单个负面状态 (Condition) 点击快捷编辑已过轮数或解除弹窗
+     */
+    static showConditionEditModal(character, token, cond, row, tokenId) {
+        const mask = document.createElement("div");
+        mask.className = "r20-dialog-mask";
+
+        const currentElapsedStr = (cond.rounds !== null && cond.rounds < 0) ? String(Math.abs(cond.rounds)) : "";
+
+        mask.innerHTML = `
+            <div class="r20-dialog-box" style="width: 320px;">
+                <div class="r20-dialog-header" style="color:#f43f5e;">负面状态: ${cond.name}</div>
+                <div class="r20-dialog-body">
+                    <label style="font-size:11px; color:#b0bec5;">已持续轮数 (正计轮，留空为常驻):</label>
+                    <input type="number" class="r20-input-text input-rounds" value="${currentElapsedStr}" placeholder="如 1, 2, 3..." />
+                </div>
+                <div class="r20-dialog-footer">
+                    <button class="r20-btn-icon danger btn-delete" style="padding:6px 12px; margin-right:auto;">✕ 解除状态</button>
+                    <button class="r20-btn-icon btn-cancel" style="padding:6px 12px;">取消</button>
+                    <button class="r20-btn-apply btn-save" style="padding:6px 14px;">保存</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(mask);
+        mask.querySelector(".btn-cancel").addEventListener("click", () => mask.remove());
+
+        // 解除负面状态
+        mask.querySelector(".btn-delete").addEventListener("click", async () => {
+            try {
+                if (character) {
+                    await Pf1eBuffManager.removeCondition(character, cond.key);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 解除 Condition 异常:", err);
+            }
+            mask.remove();
+            await this.refreshRowBadge(row, tokenId);
+        });
+
+        // 保存已过轮数
+        mask.querySelector(".btn-save").addEventListener("click", async () => {
+            try {
+                const val = mask.querySelector(".input-rounds").value.trim();
+                const rounds = val === "" ? null : parseInt(val, 10);
+
+                if (character) {
+                    await Pf1eBuffManager.setConditionRounds(character, cond.key, rounds);
+                }
+            } catch (err) {
+                console.error("[Pf1eBuffUI] 保存 Condition 轮数异常:", err);
+            }
+            mask.remove();
+            await this.refreshRowBadge(row, tokenId);
+        });
     }
 
     /**
