@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.19
+// @version      0.9.20
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.19...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.20...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -668,51 +668,75 @@ class Pf1eConditionRegistry {
      */
     static getTooltipForMarker(tag) {
         if (!tag) return "";
-        const cleanTag = tag.split("::")[0];
-        const def = this.find(cleanTag) || this.find(tag);
+        const cleanTag = tag.split("::")[0].trim();
+        const normalizedTag = cleanTag.replace(/_/g, " ");
+
+        // 1. 尝试从 34 项核心状态注册表中匹配
+        const def = this.find(cleanTag) || this.find(normalizedTag) || this.find(tag);
         if (def) {
             return def.nameZh;
         }
 
-        // 战役常见扩展 Buff/Debuff 标记纯中文映射
+        // 2. 战役常见扩展 Buff/Debuff、官方经典图标与自定义包纯中文映射字典
         const EXTRA_ZH_MAP = {
-            "red": "紅",
-            "blue": "藍",
-            "green": "綠",
-            "brown": "棕",
-            "purple": "紫",
-            "pink": "粉",
-            "yellow": "黃",
-            "dead": "死亡",
-            "Hex": "惡咒",
-            "Poisoned": "中毒",
-            "Raging": "狂暴",
-            "Blessed": "祝福術",
-            "Hasted": "加速術",
-            "Slowed": "緩慢",
-            "Flying": "飛行",
-            "MageArmor": "法師護甲",
-            "Shield of Faith": "虔誠之盾",
-            "Bulls Strength": "公牛之力",
-            "Cats Grace": "貓之優雅",
-            "Bears Endurance": "巨熊堅韌",
-            "Foxs Cunning": "狐之狡黠",
-            "Owls Wisdom": "梟之睿智",
-            "Eagles Splendor": "鷹之光彩",
-            "Advantage": "優勢",
-            "Disadvantage": "劣勢",
-            "OnFire": "著火",
-            "Possessed": "附身",
-            "Symbio": "共生",
-            "Blink": "閃現術",
-            "Blur": "朦朧術",
-            "Mirror Image": "鏡像術",
-            "Sanctuary": "聖域術",
-            "Truesight": "真知術",
-            "Spirit Guardians": "守護之靈",
-            "DivineFavor": "神恩"
+            // 基础颜色球
+            "red": "紅", "blue": "藍", "green": "綠", "brown": "棕",
+            "purple": "紫", "pink": "粉", "yellow": "黃", "dead": "死亡",
+
+            // 战役常见状态与法术 (支持驼峰与下划线)
+            "Hex": "惡咒", "Poisoned": "中毒", "Raging": "狂暴", "Blessed": "祝福術",
+            "Hasted": "加速術", "Slowed": "緩慢", "Flying": "飛行", "MageArmor": "法師護甲",
+            "Shield of Faith": "虔誠之盾", "Shield_of_Faith": "虔誠之盾",
+            "Bulls Strength": "公牛之力", "Bulls_Strength": "公牛之力",
+            "Cats Grace": "貓之優雅", "Cats_Grace": "貓之優雅",
+            "Bears Endurance": "巨熊堅韌", "Bears_Endurance": "巨熊堅韌",
+            "Foxs Cunning": "狐之狡黠", "Foxs_Cunning": "狐之狡黠",
+            "Owls Wisdom": "梟之睿智", "Owls_Wisdom": "梟之睿智",
+            "Eagles Splendor": "鷹之光彩", "Eagles_Splendor": "鷹之光彩",
+            "Advantage": "優勢", "Disadvantage": "劣勢",
+            "OnFire": "著火", "Possessed": "附身", "Symbio": "共生",
+            "Blink": "閃現術", "Blur": "朦朧術", "Mirror Image": "鏡像術", "Mirror_Image": "鏡像術",
+            "Sanctuary": "聖域術", "Truesight": "真知術",
+            "Spirit Guardians": "守護之靈", "Spirit_Guardians": "守護之靈",
+            "DivineFavor": "神恩", "Stabilized": "傷勢穩定", "Unconcious": "昏迷",
+            "Cause_of_Fear": "恐懼", "Cause of Fear": "恐懼",
+            "Bleeding_Out": "瀕死流血", "Bleeding Out": "瀕死流血",
+            "Concentration": "專注", "Petrified": "石化",
+            "Slayers_Prey": "獵手印記", "Slayers Prey": "獵手印記",
+            "Warding_Bond": "守護之鏈", "Warding Bond": "守護之鏈",
+            "Shifted": "變形", "Natural_Armor": "天生防禦", "Natural Armor": "天生防禦",
+            "Incorporeal": "虛體", "Gaze": "凝視", "Highlighted": "高亮", "Inspired": "激勵",
+            "Reaction_Used": "已反應", "Reaction Used": "已反應",
+            "Dodge_Action": "全迴避", "Dodge Action": "全迴避",
+            "Hexblades_Curse": "咒刃詛咒", "Hexblades Curse": "咒刃詛咒",
+            "Baned": "破滅術", "Mark": "標記", "cobweb": "蛛網", "flying-flag": "戰旗",
+            "strong": "強韌", "bolt-shield": "護盾", "drink-me": "藥劑",
+
+            // Roll20 原生内置经典图标
+            "skull": "顱骨", "sleepy": "沉睡", "half-heart": "半心", "half-haze": "迷濛",
+            "interdiction": "禁制", "snail": "緩慢", "lightning-helix": "閃電", "spanner": "扳手",
+            "chained-heart": "鎖心", "chemical-bolt": "化學箭", "death-zone": "死亡領域",
+            "edge-crack": "碎裂", "ninja-mask": "忍者面罩", "stopwatch": "碼錶", "fishing-net": "漁網",
+            "overdrive": "超載", "fist": "重拳", "padlock": "鎖具", "three-leaves": "三葉",
+            "fluffy-wing": "羽翼", "pummeled": "痛擊", "tread": "踐踏", "arrowed": "中箭",
+            "aura": "光環", "back-pain": "背痛", "black-flag": "黑旗", "bleeding-eye": "流血之眼",
+            "broken-heart": "碎心", "broken-shield": "破盾", "radioactive": "輻射", "trophy": "獎盃",
+            "broken-skull": "碎顱", "frozen-orb": "冰球", "rolling-bomb": "炸彈", "white-tower": "白塔",
+            "grab": "擒拿", "screaming": "尖叫", "grenade": "手榴彈", "sentry-gun": "哨戒砲",
+            "all-for-one": "萬眾一心", "angel-outfit": "天使", "archery-target": "箭靶"
         };
-        return EXTRA_ZH_MAP[cleanTag] || cleanTag;
+
+        if (EXTRA_ZH_MAP[cleanTag]) return EXTRA_ZH_MAP[cleanTag];
+        if (EXTRA_ZH_MAP[normalizedTag]) return EXTRA_ZH_MAP[normalizedTag];
+
+        // 3. 自定义编号前缀处理 (如 403-Attack-Debuff -> 攻擊減值)
+        if (cleanTag.includes("-")) {
+            const stripped = cleanTag.replace(/^\d+-/, "");
+            if (EXTRA_ZH_MAP[stripped]) return EXTRA_ZH_MAP[stripped];
+        }
+
+        // 绝不回退到 className 或 statusicon，仅返回最干净的可读名称
+        return cleanTag;
     }
 
     /**
@@ -802,9 +826,16 @@ class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
         if (!character.attribs || !character.attribs.models) return [];
 
+        // 确保挂载属性变更监听，实现角色卡 Debuff 开关的实时捕获
+        this.bindCharacterAttributeListeners(character);
+
         const conditions = [];
 
-        for (const [condKey, def] of Object.entries(this.CONDITION_DEFINITIONS)) {
+        // 全面遍历 PF1E_CONDITIONS 34 项状态注册表
+        for (const def of Object.values(PF1E_CONDITIONS)) {
+            const condKey = def.attrKey;
+            if (!condKey) continue;
+
             const attr = character.attribs.models.find(a => a.get("name") === condKey);
             if (!attr) continue;
 
@@ -812,7 +843,7 @@ class Pf1eBuffManager {
             const isActive = val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
 
             if (isActive) {
-                const roundsKey = `${condKey}_rounds`;
+                const roundsKey = def.roundsKey || `${condKey}_rounds`;
                 const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
                 let rounds = null;
 
@@ -825,7 +856,7 @@ class Pf1eBuffManager {
 
                 conditions.push({
                     key: condKey,
-                    name: def.zh,
+                    name: def.nameZh,
                     isCondition: true,
                     isDebuff: true,
                     rounds,
@@ -837,6 +868,40 @@ class Pf1eBuffManager {
         }
 
         return conditions;
+    }
+
+    /**
+     * 为指定角色绑定属性变动监听，捕获角色卡上开关 Debuff 的动作，单端静默同步棋子标记与先攻徽章
+     */
+    static bindCharacterAttributeListeners(character) {
+        if (!character || !character.attribs || character._pf1eAttribsBound) return;
+        character._pf1eAttribsBound = true;
+
+        character.attribs.on("change:current", async (attr, options) => {
+            // 忽略脚本自主更新或正在批量修改，彻底切断震荡回路
+            if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
+
+            const attrName = attr.get("name") || "";
+            // 仅对 condition- 开头的状态属性响应
+            if (!attrName.startsWith("condition-")) return;
+            // 忽略轮数属性本身的变动，仅关注开关值变动
+            if (attrName.endsWith("_rounds")) return;
+
+            console.log(`[Pf1eBuffManager] 捕获到角色 ${character.get("name")} 的 Debuff 开关变动: ${attrName} = ${attr.get("current")}`);
+
+            // 1. 同步棋子标记 (单端管辖，仅修改本地 token 模型与 Jumpgate 渲染，不发网络通知)
+            await Pf1eBuffManager.syncTokenStatusmarkers(character);
+
+            // 2. 刷新代表该角色的先攻条徽章
+            const page = Roll20Bridge.getCurrentPage();
+            if (page && page.thegraphics) {
+                page.thegraphics.each(g => {
+                    if (g.get("represents") === character.id) {
+                        Pf1eBuffUI.requestTokenRefresh(g.id);
+                    }
+                });
+            }
+        });
     }
 
     /**
@@ -860,7 +925,7 @@ class Pf1eBuffManager {
         } else {
             character.attribs.create({ name: roundsKey, current: storedVal });
         }
-        this.syncTokenStatusmarkers(character);
+        await this.syncTokenStatusmarkers(character);
     }
 
     /**
@@ -878,7 +943,7 @@ class Pf1eBuffManager {
         if (roundsAttr) {
             roundsAttr.destroy();
         }
-        this.syncTokenStatusmarkers(character);
+        await this.syncTokenStatusmarkers(character);
     }
 
     /**
@@ -907,7 +972,7 @@ class Pf1eBuffManager {
     }
 
     /**
-     * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (绝不添加数字，纯图标)
+     * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (单端管辖，纯图标绝不带数字)
      */
     static async syncTokenStatusmarkers(character, token = null) {
         if (!character) return;
@@ -952,7 +1017,8 @@ class Pf1eBuffManager {
 
             const newStr = Array.from(merged).join(",");
             if (currentStr !== newStr) {
-                t.save({ statusmarkers: newStr }, { byScript: true });
+                // 单端管辖：使用 token.set 更新本地模型与画布渲染，绝不向 Firebase 发送 save 网络广播
+                t.set({ statusmarkers: newStr }, { byScript: true });
             }
         }
     }
@@ -2859,45 +2925,55 @@ class CanvasMarkerHoverObserver {
         if (!page || !page.thegraphics) return;
 
         const boundTokens = new Set();
+        const tokenLastStatusMarkers = new Map();
 
         const attachToToken = (token) => {
             if (!token || boundTokens.has(token.id)) return;
             boundTokens.add(token.id);
 
+            // 记录初始标记
+            tokenLastStatusMarkers.set(token.id, token.get("statusmarkers") || "");
+
             token.on("change:statusmarkers", async (t, newSM, options) => {
+                const prevKnown = tokenLastStatusMarkers.get(t.id) ?? t.previous("statusmarkers") ?? "";
+                tokenLastStatusMarkers.set(t.id, newSM || "");
+
                 // 若为脚本自主同步，彻底静音跳过，防止回路震荡
                 if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
 
                 const character = Roll20Bridge.getCharacterByToken(t);
                 if (!character) return;
 
-                const oldSM = t.previous("statusmarkers") || "";
-                const oldTags = new Set(oldSM.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
+                const oldTags = new Set(prevKnown.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
                 const newTags = new Set((newSM || "").split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
 
-                // 1. 查找新增的 tags
+                // 1. 查找新增的 tags (玩家手动在棋子上点击添加标记)
                 for (const tag of newTags) {
                     if (!oldTags.has(tag)) {
-                        const baseName = tag.split("::")[0];
-                        const def = Pf1eConditionRegistry.find(baseName) || Pf1eConditionRegistry.find(tag);
+                        const cleanTag = tag.split("::")[0];
+                        const normalized = cleanTag.replace(/_/g, " ");
+                        const def = Pf1eConditionRegistry.find(cleanTag) || Pf1eConditionRegistry.find(normalized) || Pf1eConditionRegistry.find(tag);
                         if (def) {
+                            console.log(`[CanvasMarkerHoverObserver] 检测到棋子新增标记 [${tag}]，反向激活角色卡 Debuff: ${def.nameZh}`);
                             await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1);
                         }
                     }
                 }
 
-                // 2. 查找移除的 tags
+                // 2. 查找移除的 tags (玩家手动在棋子上点击移除标记)
                 for (const tag of oldTags) {
                     if (!newTags.has(tag)) {
-                        const baseName = tag.split("::")[0];
-                        const def = Pf1eConditionRegistry.find(baseName) || Pf1eConditionRegistry.find(tag);
+                        const cleanTag = tag.split("::")[0];
+                        const normalized = cleanTag.replace(/_/g, " ");
+                        const def = Pf1eConditionRegistry.find(cleanTag) || Pf1eConditionRegistry.find(normalized) || Pf1eConditionRegistry.find(tag);
                         if (def) {
+                            console.log(`[CanvasMarkerHoverObserver] 检测到棋子移除标记 [${tag}]，反向解除角色卡 Debuff: ${def.nameZh}`);
                             await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id);
                         }
                     }
                 }
 
-                // 刷新先攻栏
+                // 刷新先攻栏对应徽章
                 Pf1eBuffUI.requestTokenRefresh(t.id);
             });
         };
@@ -2968,31 +3044,59 @@ class CanvasMarkerHoverObserver {
     }
 
     /**
-     * 自动为选中的棋子标记选择菜单 (Marker Menu) 中的小图标注入原生 title 中文提示
+     * 自动为选中的棋子标记选择菜单 (Marker Menu) 中的小图标注入原生 title 纯中文提示
+     * 并彻底清洗历史遗留的 "statusicon" 错误污染
      */
     static bindMarkerPickerEnhancer() {
+        const enhanceItem = (el) => {
+            if (!el) return;
+
+            // 优先从 data-status-id 提取准确的 marker 标识（绝不读取 className 兜底）
+            let statusId = el.dataset.statusId || "";
+            if (!statusId && el.dataset.actionType) {
+                statusId = el.dataset.actionType.replace(/^toggle_status_/, "");
+            }
+
+            if (statusId) {
+                const tooltip = Pf1eConditionRegistry.getTooltipForMarker(statusId);
+                if (tooltip && el.title !== tooltip) {
+                    el.title = tooltip;
+                }
+            } else if (el.title && el.title.includes("statusicon")) {
+                // 清理历史残留的错误污染
+                el.title = "";
+            }
+        };
+
+        // 1. 鼠标悬停事件委托（极速响应单项）
         document.addEventListener("mouseover", (e) => {
             const target = e.target;
             if (!target) return;
 
             // 匹配标记选择菜单中的各个图标项 (Roll20 属性为 data-status-id 或 data-action-type)
             const markerItem = target.closest?.(".markermenu .statusicon, .markermenu div[data-status-id], .markermenu [data-action-type]");
-            if (!markerItem || markerItem.dataset.titleInjected) return;
-
-            // 优先从 data-status-id 提取准确的 marker 标识（绝不读取 className 兜底）
-            let statusId = markerItem.dataset.statusId || "";
-            if (!statusId && markerItem.dataset.actionType) {
-                statusId = markerItem.dataset.actionType.replace(/^toggle_status_/, "");
-            }
-
-            if (statusId) {
-                const tooltip = Pf1eConditionRegistry.getTooltipForMarker(statusId);
-                if (tooltip) {
-                    markerItem.title = tooltip;
-                    markerItem.dataset.titleInjected = "true";
-                }
+            if (markerItem) {
+                enhanceItem(markerItem);
             }
         }, true);
+
+        // 2. 观察 DOM 变化，当 .markermenu 展开时一次性批量清洗全部图标 title
+        const menuObserver = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                for (const node of m.addedNodes) {
+                    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+                    if (node.classList?.contains("markermenu") || node.querySelector?.(".markermenu")) {
+                        const items = node.querySelectorAll?.(".statusicon, div[data-status-id], [data-action-type]") || [];
+                        items.forEach(enhanceItem);
+                    }
+                }
+            }
+        });
+
+        menuObserver.observe(document.body, { childList: true, subtree: true });
+
+        // 对页面当前已存在的 markermenu 图标立即执行一次清洗
+        document.querySelectorAll(".markermenu .statusicon, .markermenu div[data-status-id]").forEach(enhanceItem);
     }
 }
 

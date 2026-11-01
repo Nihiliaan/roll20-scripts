@@ -62,9 +62,16 @@ export class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
         if (!character.attribs || !character.attribs.models) return [];
 
+        // 确保挂载属性变更监听，实现角色卡 Debuff 开关的实时捕获
+        this.bindCharacterAttributeListeners(character);
+
         const conditions = [];
 
-        for (const [condKey, def] of Object.entries(this.CONDITION_DEFINITIONS)) {
+        // 全面遍历 PF1E_CONDITIONS 34 项状态注册表
+        for (const def of Object.values(PF1E_CONDITIONS)) {
+            const condKey = def.attrKey;
+            if (!condKey) continue;
+
             const attr = character.attribs.models.find(a => a.get("name") === condKey);
             if (!attr) continue;
 
@@ -72,7 +79,7 @@ export class Pf1eBuffManager {
             const isActive = val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
 
             if (isActive) {
-                const roundsKey = `${condKey}_rounds`;
+                const roundsKey = def.roundsKey || `${condKey}_rounds`;
                 const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
                 let rounds = null;
 
@@ -85,7 +92,7 @@ export class Pf1eBuffManager {
 
                 conditions.push({
                     key: condKey,
-                    name: def.zh,
+                    name: def.nameZh,
                     isCondition: true,
                     isDebuff: true,
                     rounds,
@@ -97,6 +104,40 @@ export class Pf1eBuffManager {
         }
 
         return conditions;
+    }
+
+    /**
+     * 为指定角色绑定属性变动监听，捕获角色卡上开关 Debuff 的动作，单端静默同步棋子标记与先攻徽章
+     */
+    static bindCharacterAttributeListeners(character) {
+        if (!character || !character.attribs || character._pf1eAttribsBound) return;
+        character._pf1eAttribsBound = true;
+
+        character.attribs.on("change:current", async (attr, options) => {
+            // 忽略脚本自主更新或正在批量修改，彻底切断震荡回路
+            if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
+
+            const attrName = attr.get("name") || "";
+            // 仅对 condition- 开头的状态属性响应
+            if (!attrName.startsWith("condition-")) return;
+            // 忽略轮数属性本身的变动，仅关注开关值变动
+            if (attrName.endsWith("_rounds")) return;
+
+            console.log(`[Pf1eBuffManager] 捕获到角色 ${character.get("name")} 的 Debuff 开关变动: ${attrName} = ${attr.get("current")}`);
+
+            // 1. 同步棋子标记 (单端管辖，仅修改本地 token 模型与 Jumpgate 渲染，不发网络通知)
+            await Pf1eBuffManager.syncTokenStatusmarkers(character);
+
+            // 2. 刷新代表该角色的先攻条徽章
+            const page = Roll20Bridge.getCurrentPage();
+            if (page && page.thegraphics) {
+                page.thegraphics.each(g => {
+                    if (g.get("represents") === character.id) {
+                        Pf1eBuffUI.requestTokenRefresh(g.id);
+                    }
+                });
+            }
+        });
     }
 
     /**
@@ -120,7 +161,7 @@ export class Pf1eBuffManager {
         } else {
             character.attribs.create({ name: roundsKey, current: storedVal });
         }
-        this.syncTokenStatusmarkers(character);
+        await this.syncTokenStatusmarkers(character);
     }
 
     /**
@@ -138,7 +179,7 @@ export class Pf1eBuffManager {
         if (roundsAttr) {
             roundsAttr.destroy();
         }
-        this.syncTokenStatusmarkers(character);
+        await this.syncTokenStatusmarkers(character);
     }
 
     /**
@@ -167,7 +208,7 @@ export class Pf1eBuffManager {
     }
 
     /**
-     * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (绝不添加数字，纯图标)
+     * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (单端管辖，纯图标绝不带数字)
      */
     static async syncTokenStatusmarkers(character, token = null) {
         if (!character) return;
@@ -212,7 +253,8 @@ export class Pf1eBuffManager {
 
             const newStr = Array.from(merged).join(",");
             if (currentStr !== newStr) {
-                t.save({ statusmarkers: newStr }, { byScript: true });
+                // 单端管辖：使用 token.set 更新本地模型与画布渲染，绝不向 Firebase 发送 save 网络广播
+                t.set({ statusmarkers: newStr }, { byScript: true });
             }
         }
     }

@@ -456,51 +456,75 @@ export class Pf1eConditionRegistry {
      */
     static getTooltipForMarker(tag) {
         if (!tag) return "";
-        const cleanTag = tag.split("::")[0];
-        const def = this.find(cleanTag) || this.find(tag);
+        const cleanTag = tag.split("::")[0].trim();
+        const normalizedTag = cleanTag.replace(/_/g, " ");
+
+        // 1. 尝试从 34 项核心状态注册表中匹配
+        const def = this.find(cleanTag) || this.find(normalizedTag) || this.find(tag);
         if (def) {
             return def.nameZh;
         }
 
-        // 战役常见扩展 Buff/Debuff 标记纯中文映射
+        // 2. 战役常见扩展 Buff/Debuff、官方经典图标与自定义包纯中文映射字典
         const EXTRA_ZH_MAP = {
-            "red": "紅",
-            "blue": "藍",
-            "green": "綠",
-            "brown": "棕",
-            "purple": "紫",
-            "pink": "粉",
-            "yellow": "黃",
-            "dead": "死亡",
-            "Hex": "惡咒",
-            "Poisoned": "中毒",
-            "Raging": "狂暴",
-            "Blessed": "祝福術",
-            "Hasted": "加速術",
-            "Slowed": "緩慢",
-            "Flying": "飛行",
-            "MageArmor": "法師護甲",
-            "Shield of Faith": "虔誠之盾",
-            "Bulls Strength": "公牛之力",
-            "Cats Grace": "貓之優雅",
-            "Bears Endurance": "巨熊堅韌",
-            "Foxs Cunning": "狐之狡黠",
-            "Owls Wisdom": "梟之睿智",
-            "Eagles Splendor": "鷹之光彩",
-            "Advantage": "優勢",
-            "Disadvantage": "劣勢",
-            "OnFire": "著火",
-            "Possessed": "附身",
-            "Symbio": "共生",
-            "Blink": "閃現術",
-            "Blur": "朦朧術",
-            "Mirror Image": "鏡像術",
-            "Sanctuary": "聖域術",
-            "Truesight": "真知術",
-            "Spirit Guardians": "守護之靈",
-            "DivineFavor": "神恩"
+            // 基础颜色球
+            "red": "紅", "blue": "藍", "green": "綠", "brown": "棕",
+            "purple": "紫", "pink": "粉", "yellow": "黃", "dead": "死亡",
+
+            // 战役常见状态与法术 (支持驼峰与下划线)
+            "Hex": "惡咒", "Poisoned": "中毒", "Raging": "狂暴", "Blessed": "祝福術",
+            "Hasted": "加速術", "Slowed": "緩慢", "Flying": "飛行", "MageArmor": "法師護甲",
+            "Shield of Faith": "虔誠之盾", "Shield_of_Faith": "虔誠之盾",
+            "Bulls Strength": "公牛之力", "Bulls_Strength": "公牛之力",
+            "Cats Grace": "貓之優雅", "Cats_Grace": "貓之優雅",
+            "Bears Endurance": "巨熊堅韌", "Bears_Endurance": "巨熊堅韌",
+            "Foxs Cunning": "狐之狡黠", "Foxs_Cunning": "狐之狡黠",
+            "Owls Wisdom": "梟之睿智", "Owls_Wisdom": "梟之睿智",
+            "Eagles Splendor": "鷹之光彩", "Eagles_Splendor": "鷹之光彩",
+            "Advantage": "優勢", "Disadvantage": "劣勢",
+            "OnFire": "著火", "Possessed": "附身", "Symbio": "共生",
+            "Blink": "閃現術", "Blur": "朦朧術", "Mirror Image": "鏡像術", "Mirror_Image": "鏡像術",
+            "Sanctuary": "聖域術", "Truesight": "真知術",
+            "Spirit Guardians": "守護之靈", "Spirit_Guardians": "守護之靈",
+            "DivineFavor": "神恩", "Stabilized": "傷勢穩定", "Unconcious": "昏迷",
+            "Cause_of_Fear": "恐懼", "Cause of Fear": "恐懼",
+            "Bleeding_Out": "瀕死流血", "Bleeding Out": "瀕死流血",
+            "Concentration": "專注", "Petrified": "石化",
+            "Slayers_Prey": "獵手印記", "Slayers Prey": "獵手印記",
+            "Warding_Bond": "守護之鏈", "Warding Bond": "守護之鏈",
+            "Shifted": "變形", "Natural_Armor": "天生防禦", "Natural Armor": "天生防禦",
+            "Incorporeal": "虛體", "Gaze": "凝視", "Highlighted": "高亮", "Inspired": "激勵",
+            "Reaction_Used": "已反應", "Reaction Used": "已反應",
+            "Dodge_Action": "全迴避", "Dodge Action": "全迴避",
+            "Hexblades_Curse": "咒刃詛咒", "Hexblades Curse": "咒刃詛咒",
+            "Baned": "破滅術", "Mark": "標記", "cobweb": "蛛網", "flying-flag": "戰旗",
+            "strong": "強韌", "bolt-shield": "護盾", "drink-me": "藥劑",
+
+            // Roll20 原生内置经典图标
+            "skull": "顱骨", "sleepy": "沉睡", "half-heart": "半心", "half-haze": "迷濛",
+            "interdiction": "禁制", "snail": "緩慢", "lightning-helix": "閃電", "spanner": "扳手",
+            "chained-heart": "鎖心", "chemical-bolt": "化學箭", "death-zone": "死亡領域",
+            "edge-crack": "碎裂", "ninja-mask": "忍者面罩", "stopwatch": "碼錶", "fishing-net": "漁網",
+            "overdrive": "超載", "fist": "重拳", "padlock": "鎖具", "three-leaves": "三葉",
+            "fluffy-wing": "羽翼", "pummeled": "痛擊", "tread": "踐踏", "arrowed": "中箭",
+            "aura": "光環", "back-pain": "背痛", "black-flag": "黑旗", "bleeding-eye": "流血之眼",
+            "broken-heart": "碎心", "broken-shield": "破盾", "radioactive": "輻射", "trophy": "獎盃",
+            "broken-skull": "碎顱", "frozen-orb": "冰球", "rolling-bomb": "炸彈", "white-tower": "白塔",
+            "grab": "擒拿", "screaming": "尖叫", "grenade": "手榴彈", "sentry-gun": "哨戒砲",
+            "all-for-one": "萬眾一心", "angel-outfit": "天使", "archery-target": "箭靶"
         };
-        return EXTRA_ZH_MAP[cleanTag] || cleanTag;
+
+        if (EXTRA_ZH_MAP[cleanTag]) return EXTRA_ZH_MAP[cleanTag];
+        if (EXTRA_ZH_MAP[normalizedTag]) return EXTRA_ZH_MAP[normalizedTag];
+
+        // 3. 自定义编号前缀处理 (如 403-Attack-Debuff -> 攻擊減值)
+        if (cleanTag.includes("-")) {
+            const stripped = cleanTag.replace(/^\d+-/, "");
+            if (EXTRA_ZH_MAP[stripped]) return EXTRA_ZH_MAP[stripped];
+        }
+
+        // 绝不回退到 className 或 statusicon，仅返回最干净的可读名称
+        return cleanTag;
     }
 
     /**
