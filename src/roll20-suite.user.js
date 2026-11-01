@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.8
+// @version      0.9.9
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
-// @updateURL    https://raw.githubusercontent.com/Nihiliaan/roll20-scripts/master/src/roll20-suite.user.js
-// @downloadURL  https://raw.githubusercontent.com/Nihiliaan/roll20-scripts/master/src/roll20-suite.user.js
+// @updateURL    https://update.greasyfork.org/scripts/603253/roll20-suite-pf1e-turnorder-buff-engine.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/603253/roll20-suite-pf1e-turnorder-buff-engine.user.js
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.7...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.9...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -3533,7 +3533,7 @@ class BuffFloatingPanel {
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.8 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.9 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }
