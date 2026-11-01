@@ -67,8 +67,8 @@ export class Pf1eBuffUI {
                 flex-wrap: wrap !important;
                 flex-basis: 100% !important;
                 width: 100% !important;
-                max-width: calc(100% - 40px) !important;
-                margin-left: 34px !important;
+                max-width: 100% !important;
+                margin-left: 0 !important;
                 margin-top: 2px !important;
                 gap: 2px 4px !important;
                 line-height: 1 !important;
