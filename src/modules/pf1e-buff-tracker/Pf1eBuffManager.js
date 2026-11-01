@@ -1,4 +1,5 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
+import { Pf1eConditionRegistry, PF1E_CONDITIONS } from "./Pf1eConditionRegistry.js";
 
 /**
  * Pf1eBuffManager.js
@@ -115,10 +116,11 @@ export class Pf1eBuffManager {
         // 统一负数正计轮规范：若用户传入 2，存为 -2
         const storedVal = -Math.abs(Number(rounds));
         if (roundsAttr) {
-            roundsAttr.save({ current: storedVal });
+            roundsAttr.save({ current: storedVal }, { byScript: true });
         } else {
             character.attribs.create({ name: roundsKey, current: storedVal });
         }
+        this.syncTokenStatusmarkers(character);
     }
 
     /**
@@ -129,12 +131,64 @@ export class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
         const attr = character.attribs.models.find(a => a.get("name") === condKey);
         if (attr) {
-            attr.save({ current: "0" });
+            attr.save({ current: "0" }, { byScript: true });
         }
         const roundsKey = `${condKey}_rounds`;
         const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
         if (roundsAttr) {
             roundsAttr.destroy();
+        }
+        this.syncTokenStatusmarkers(character);
+    }
+
+    /**
+     * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (绝不添加数字，纯图标)
+     */
+    static syncTokenStatusmarkers(character, token = null) {
+        if (!character) return;
+        const page = Roll20Bridge.getCurrentPage();
+        if (!page || !page.thegraphics) return;
+
+        // 寻找所有代表此角色的 Token
+        const tokens = [];
+        if (token) {
+            tokens.push(token);
+        } else {
+            page.thegraphics.each(g => {
+                if (g.get("represents") === character.id) {
+                    tokens.push(g);
+                }
+            });
+        }
+
+        if (tokens.length === 0) return;
+
+        // 计算当前应该挂载的纯净 Tag 集合
+        const activeConditions = this.getActiveConditions(character);
+        const desiredTags = new Set();
+        for (const cond of activeConditions) {
+            const tag = Pf1eConditionRegistry.resolveMarkerTag(cond.key);
+            if (tag) desiredTags.add(tag);
+        }
+
+        for (const t of tokens) {
+            const currentStr = t.get("statusmarkers") || "";
+            // 保留不属于 PF1e 状态字典的其它自定义标记
+            const currentList = currentStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+            const merged = new Set(desiredTags);
+
+            for (const item of currentList) {
+                const baseName = item.split("::")[0];
+                const isManaged = !!Pf1eConditionRegistry.find(baseName);
+                if (!isManaged) {
+                    merged.add(item);
+                }
+            }
+
+            const newStr = Array.from(merged).join(",");
+            if (currentStr !== newStr) {
+                t.save({ statusmarkers: newStr }, { byScript: true });
+            }
         }
     }
     static generateStandardRowId() {

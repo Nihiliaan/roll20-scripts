@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.16
+// @version      0.9.17
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.16...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.17...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -208,7 +208,499 @@ class Roll20Bridge {
 }
 
     // ==========================================
-    // 2. Pf1eBuffManager (PF1e 角色卡数据管理层)
+    // 2. Pf1eConditionRegistry (PF1e 完全状态注册表与标记字典)
+    // ==========================================
+/**
+ * Pf1eConditionRegistry.js
+ * 严格按照 Pathfinder 1e 核心规则书 (CRB, Appendix 1: Conditions) 整理的完全状态注册表
+ * 集中管理状态元数据、角色卡属性映射、战役自定义棋子标记 (Token Markers) 与中文规则悬浮提示
+ */
+
+const PF1E_CONDITIONS = {
+    "bleed": {
+        id: "bleed",
+        nameZh: "流血",
+        nameEn: "Bleed",
+        isNativeSheet: true,
+        attrKey: "condition-Bleed",
+        roundsKey: "condition-Bleed_rounds",
+        markerName: "Bleeding Out",
+        fallbackMarker: "bleeding-eye",
+        description: "每轮开始受持续伤害，直至受DC 15医疗检定或治疗法术"
+    },
+    "blinded": {
+        id: "blinded",
+        nameZh: "目盲",
+        nameEn: "Blinded",
+        isNativeSheet: true,
+        attrKey: "condition-Blinded",
+        roundsKey: "condition-Blinded_rounds",
+        markerName: "Blinded",
+        fallbackMarker: "bleeding-eye",
+        description: "AC -2，失去敏捷加值，察觉检定自动失败，全隐蔽(50%失手)"
+    },
+    "confused": {
+        id: "confused",
+        nameZh: "困惑",
+        nameEn: "Confused",
+        isNativeSheet: false, // CRB 核心状态，卡面无原生复选框
+        attrKey: "custom_cond_confused",
+        roundsKey: "custom_cond_confused_rounds",
+        markerName: "Confused",
+        fallbackMarker: "brain-freeze",
+        description: "无法自主行动，每轮掷 d100 决定行为(攻击盟友/发呆/正常)"
+    },
+    "cowering": {
+        id: "cowering",
+        nameZh: "畏縮",
+        nameEn: "Cowering",
+        isNativeSheet: true,
+        attrKey: "condition-Cowering",
+        roundsKey: "condition-Cowering_rounds",
+        markerName: "screaming",
+        fallbackMarker: "screaming",
+        description: "极度恐惧冻结，AC -2，失去敏捷加值，无法采取任何动作"
+    },
+    "dazed": {
+        id: "dazed",
+        nameZh: "暈眩",
+        nameEn: "Dazed",
+        isNativeSheet: true,
+        attrKey: "condition-Dazed",
+        roundsKey: "condition-Dazed_rounds",
+        markerName: "half-haze",
+        fallbackMarker: "half-haze",
+        description: "无法采取任何动作，AC 不受直接减值"
+    },
+    "dazzled": {
+        id: "dazzled",
+        nameZh: "目眩",
+        nameEn: "Dazzled",
+        isNativeSheet: true,
+        attrKey: "condition-Dazzled",
+        roundsKey: "condition-Dazzled_rounds",
+        markerName: "aura",
+        fallbackMarker: "aura",
+        description: "强光致盲，攻击检定与视力察觉检定承受 -1 减值"
+    },
+    "dead": {
+        id: "dead",
+        nameZh: "死亡",
+        nameEn: "Dead",
+        isNativeSheet: true,
+        attrKey: "condition-Dead",
+        roundsKey: "condition-Dead_rounds",
+        markerName: "006-Dead",
+        fallbackMarker: "dead",
+        description: "生命值降至负体质值以下，无法行动与自行恢复"
+    },
+    "deafened": {
+        id: "deafened",
+        nameZh: "耳聾",
+        nameEn: "Deafened",
+        isNativeSheet: true,
+        attrKey: "condition-Deafened",
+        roundsKey: "condition-Deafened_rounds",
+        markerName: "Deafened",
+        fallbackMarker: "black-flag",
+        description: "先攻检定 -4，听力察觉自动失败，言语成分法术 20% 失败率"
+    },
+    "disabled": {
+        id: "disabled",
+        nameZh: "癱瘓",
+        nameEn: "Disabled",
+        isNativeSheet: true,
+        attrKey: "condition-Disabled",
+        roundsKey: "condition-Disabled_rounds",
+        markerName: "snail",
+        fallbackMarker: "snail",
+        description: "生命恰为 0，每轮只能做单个移动或标动，做标动受 1 伤害转濒死"
+    },
+    "drowning": {
+        id: "drowning",
+        nameZh: "溺水",
+        nameEn: "Drowning",
+        isNativeSheet: true,
+        attrKey: "condition-Drowning",
+        roundsKey: "condition-Drowning_rounds",
+        markerName: "bubble",
+        fallbackMarker: "bubble",
+        description: "溺水缺氧，无法呼吸，陷入昏迷与濒死"
+    },
+    "dying": {
+        id: "dying",
+        nameZh: "瀕死",
+        nameEn: "Dying",
+        isNativeSheet: true,
+        attrKey: "condition-Dying",
+        roundsKey: "condition-Dying_rounds",
+        markerName: "half-heart",
+        fallbackMarker: "half-heart",
+        description: "生命值为负，处于昏迷无助，每轮需体质检定否则流失生命"
+    },
+    "entangled": {
+        id: "entangled",
+        nameZh: "糾纏",
+        nameEn: "Entangled",
+        isNativeSheet: true,
+        attrKey: "condition-Entangled",
+        roundsKey: "condition-Entangled_rounds",
+        markerName: "Entangle",
+        fallbackMarker: "fishing-net",
+        description: "移动半速无法奔跑，敏捷 -4，攻击检定 -2，施法需集中检定"
+    },
+    "exhausted": {
+        id: "exhausted",
+        nameZh: "力竭",
+        nameEn: "Exhausted",
+        isNativeSheet: true,
+        attrKey: "condition-Exhausted",
+        roundsKey: "condition-Exhausted_rounds",
+        markerName: "Exhausted",
+        fallbackMarker: "back-pain",
+        description: "移动半速，力量和敏捷受到 -6 减值，休息 1 小时转为疲乏"
+    },
+    "fascinated": {
+        id: "fascinated",
+        nameZh: "迷魂",
+        nameEn: "Fascinated",
+        isNativeSheet: true,
+        attrKey: "condition-Fascinated",
+        roundsKey: "condition-Fascinated_rounds",
+        markerName: "Charmed",
+        fallbackMarker: "aura",
+        description: "驻足注视目标，察觉等技能受到 -4 减值，受到潜在威胁解除"
+    },
+    "fatigued": {
+        id: "fatigued",
+        nameZh: "疲乏",
+        nameEn: "Fatigued",
+        isNativeSheet: true,
+        attrKey: "condition-Fatigued",
+        roundsKey: "condition-Fatigued_rounds",
+        markerName: "back-pain",
+        fallbackMarker: "snail",
+        description: "无法奔跑或冲锋，力量和敏捷受到 -2 减值，休息 8 小时解除"
+    },
+    "flat_footed": {
+        id: "flat_footed",
+        nameZh: "措手不及",
+        nameEn: "Flat-Footed",
+        isNativeSheet: true,
+        attrKey: "condition-Flat-Footed",
+        roundsKey: "condition-Flat-Footed_rounds",
+        markerName: "arrowed",
+        fallbackMarker: "fist",
+        description: "战斗尚未行动，失去 AC 敏捷加值，无法进行借机攻击"
+    },
+    "frightened": {
+        id: "frightened",
+        nameZh: "恐慌",
+        nameEn: "Frightened",
+        isNativeSheet: true, // 对应角色卡 condition-Fear (恐慌任意)
+        attrKey: "condition-Fear",
+        roundsKey: "condition-Fear_rounds",
+        markerName: "Frightened",
+        fallbackMarker: "screaming",
+        description: "承受 -2 攻击/豁免/技能检定，且必须全力逃离恐惧源"
+    },
+    "grappled": {
+        id: "grappled",
+        nameZh: "擒抱",
+        nameEn: "Grappled",
+        isNativeSheet: true,
+        attrKey: "condition-Grappled",
+        roundsKey: "condition-Grappled_rounds",
+        markerName: "Grappled",
+        fallbackMarker: "grab",
+        description: "无法移动，敏捷 -4，攻击与战技检定 -2，施法需集中检定"
+    },
+    "helpless": {
+        id: "helpless",
+        nameZh: "無助",
+        nameEn: "Helpless",
+        isNativeSheet: true,
+        attrKey: "condition-Helpless",
+        roundsKey: "condition-Helpless_rounds",
+        markerName: "padlock",
+        fallbackMarker: "padlock",
+        description: "完全无法防卫，敏捷视同为 0 (-5 AC)，近战受击可被政变"
+    },
+    "incorporeal": {
+        id: "incorporeal",
+        nameZh: "虛體",
+        nameEn: "Incorporeal",
+        isNativeSheet: true,
+        attrKey: "condition-Incorporeal",
+        roundsKey: "condition-Incorporeal_rounds",
+        markerName: "Incorporeal",
+        fallbackMarker: "aura",
+        description: "无实体，免疫非魔法攻击，魔法武器伤害半额，可穿透实物"
+    },
+    "invisible": {
+        id: "invisible",
+        nameZh: "隱形",
+        nameEn: "Invisible",
+        isNativeSheet: true,
+        attrKey: "condition-Invisible",
+        roundsKey: "condition-Invisible_rounds",
+        markerName: "Invisible",
+        fallbackMarker: "ninja-mask",
+        description: "视觉不可见，拥有全隐蔽(50%失手)，攻击有视觉目标 +2"
+    },
+    "nauseated": {
+        id: "nauseated",
+        nameZh: "反胃",
+        nameEn: "Nauseated",
+        isNativeSheet: true,
+        attrKey: "condition-Nauseated",
+        roundsKey: "condition-Nauseated_rounds",
+        markerName: "chemical-bolt",
+        fallbackMarker: "chemical-bolt",
+        description: "极度胃部不适，每轮只能做单个移动动作，不可攻击或施法"
+    },
+    "paralyzed": {
+        id: "paralyzed",
+        nameZh: "麻痺",
+        nameEn: "Paralyzed",
+        isNativeSheet: true,
+        attrKey: "condition-Paralyzed",
+        roundsKey: "condition-Paralyzed_rounds",
+        markerName: "Paralyzed",
+        fallbackMarker: "padlock",
+        description: "肌肉僵直，力量敏捷视同为 0，完全无助，无法移动或发声"
+    },
+    "petrified": {
+        id: "petrified",
+        nameZh: "石化",
+        nameEn: "Petrified",
+        isNativeSheet: true,
+        attrKey: "condition-Petrified",
+        roundsKey: "condition-Petrified_rounds",
+        markerName: "Petrified",
+        fallbackMarker: "white-tower",
+        description: "转变为石头形态，完全无助，视同昏迷并停止感知"
+    },
+    "pinned": {
+        id: "pinned",
+        nameZh: "壓制",
+        nameEn: "Pinned",
+        isNativeSheet: true,
+        attrKey: "condition-Pinned",
+        roundsKey: "condition-Pinned_rounds",
+        markerName: "padlock",
+        fallbackMarker: "grab",
+        description: "擒抱升级状态，完全无法移动，极度缺乏防御，无法说话"
+    },
+    "prone": {
+        id: "prone",
+        nameZh: "俯臥",
+        nameEn: "Prone",
+        isNativeSheet: true,
+        attrKey: "condition-Prone",
+        roundsKey: "condition-Prone_rounds",
+        markerName: "Prone",
+        fallbackMarker: "tread",
+        description: "倒地，近战攻击 -4，近战受击 AC -4，远程受击 AC +4"
+    },
+    "sickened": {
+        id: "sickened",
+        nameZh: "噁心",
+        nameEn: "Sickened",
+        isNativeSheet: true,
+        attrKey: "condition-Sickened",
+        roundsKey: "condition-Sickened_rounds",
+        markerName: "chemical-bolt",
+        fallbackMarker: "chemical-bolt",
+        description: "轻度恶心不适，攻击、伤害、豁免、技能检定受到 -2 减值"
+    },
+    "stable": {
+        id: "stable",
+        nameZh: "穩定",
+        nameEn: "Stable",
+        isNativeSheet: true,
+        attrKey: "condition-Stable",
+        roundsKey: "condition-Stable_rounds",
+        markerName: "Stabilized",
+        fallbackMarker: "half-heart",
+        description: "生命值为负但已停止失血，昏迷但不再自动濒死流失生命"
+    },
+    "staggered": {
+        id: "staggered",
+        nameZh: "恍惚",
+        nameEn: "Staggered",
+        isNativeSheet: true,
+        attrKey: "condition-Staggered",
+        roundsKey: "condition-Staggered_rounds",
+        markerName: "Staggered",
+        fallbackMarker: "stopwatch",
+        description: "每轮只能执行一个移动动作或标准动作(二选一)"
+    },
+    "stunned": {
+        id: "stunned",
+        nameZh: "Stunned", // 规则震慑，角色卡标签为 Stunned
+        nameEn: "Stunned",
+        isNativeSheet: true,
+        attrKey: "condition-Stunned",
+        roundsKey: "condition-Stunned_rounds",
+        markerName: "Stunned",
+        fallbackMarker: "lightning-helix",
+        description: "丢弃手中武器，无法采取动作，AC -2 并失去敏捷加值"
+    },
+    "suffocating": {
+        id: "suffocating",
+        nameZh: "窒息",
+        nameEn: "Suffocating",
+        isNativeSheet: true,
+        attrKey: "condition-Suffocating",
+        roundsKey: "condition-Suffocating_rounds",
+        markerName: "bubble",
+        fallbackMarker: "bubble",
+        description: "严重缺氧，逐轮消耗体质，进入濒死并迅速死亡"
+    },
+    "unconscious": {
+        id: "unconscious",
+        nameZh: "昏迷",
+        nameEn: "Unconscious",
+        isNativeSheet: true,
+        attrKey: "condition-Unconscious",
+        roundsKey: "condition-Unconscious_rounds",
+        markerName: "Unconcious",
+        fallbackMarker: "sleepy",
+        description: "失去知觉并倒地，完全无助，无法采取任何动作"
+    }
+};
+
+/**
+ * 状态注册管理类
+ */
+class Pf1eConditionRegistry {
+    /**
+     * 根据任意键名、属性名或中文名匹配状态定义
+     */
+    static find(keyOrName) {
+        if (!keyOrName) return null;
+        const lower = String(keyOrName).trim().toLowerCase();
+
+        // 1. 直接 ID 匹配
+        if (PF1E_CONDITIONS[lower]) return PF1E_CONDITIONS[lower];
+
+        // 2. 遍历匹配 attrKey, nameZh, nameEn, markerName
+        for (const def of Object.values(PF1E_CONDITIONS)) {
+            if (def.attrKey && def.attrKey.toLowerCase() === lower) return def;
+            if (def.nameZh.toLowerCase() === lower) return def;
+            if (def.nameEn.toLowerCase() === lower) return def;
+            if (def.markerName && def.markerName.toLowerCase() === lower) return def;
+        }
+        return null;
+    }
+
+    /**
+     * 动态匹配当前战役中可用的 Marker Tag (优先自定义 Marker，回退默认)
+     * @param {string} condId 状态 ID
+     * @param {Array} campaignMarkers 当前战役 Campaign.get("token_markers") 数组
+     * @returns {string} 可直接写入 statusmarkers 的 Tag
+     */
+    static resolveMarkerTag(condId, campaignMarkers = null) {
+        const def = this.find(condId);
+        if (!def) return "";
+
+        let markers = campaignMarkers;
+        if (!markers && window.Campaign) {
+            try {
+                markers = JSON.parse(window.Campaign.get("token_markers") || "[]");
+            } catch (e) {
+                markers = [];
+            }
+        }
+
+        // 1. 尝试在当前战役的自定义标记包中寻找精准同名 Tag (如 Confused::6485456)
+        if (Array.isArray(markers) && def.markerName) {
+            const match = markers.find(m => m.name && m.name.toLowerCase() === def.markerName.toLowerCase());
+            if (match && match.tag) {
+                return match.tag;
+            }
+        }
+
+        // 2. 回退到默认内置标记
+        return def.fallbackMarker || def.markerName || "";
+    }
+
+    /**
+     * 规范化 statusmarkers 字符串：绝不添加数字，自动滤除已有数字 (@数字)
+     * @param {string} currentMarkers 当前 statusmarkers 字符串
+     * @param {string} tagToAdd 拟添加的标记 Tag
+     * @param {boolean} add 是否添加 (true 为添加，false 为移除)
+     * @returns {string} 干净的 statusmarkers 字符串
+     */
+    static mutateStatusmarkers(currentMarkers, tagToAdd, add = true) {
+        if (!tagToAdd) return currentMarkers || "";
+
+        // 拆分现有标记，并一律剥离 @数字
+        const existing = (currentMarkers || "")
+            .split(",")
+            .map(s => s.trim().replace(/@\d+$/, ""))
+            .filter(Boolean);
+
+        const cleanTag = tagToAdd.replace(/@\d+$/, "").trim();
+
+        const tagSet = new Set(existing);
+        if (add) {
+            tagSet.add(cleanTag);
+        } else {
+            tagSet.delete(cleanTag);
+            // 同时兼容无 tag 后缀的简写名称移除
+            const namePart = cleanTag.split("::")[0];
+            for (const item of [...tagSet]) {
+                if (item === namePart || item.startsWith(`${namePart}::`)) {
+                    tagSet.delete(item);
+                }
+            }
+        }
+
+        return Array.from(tagSet).join(",");
+    }
+
+    /**
+     * 将单个 markerTag 解析为简洁的原生提示词
+     * @param {string} tag 例如 "Blinded::6485443" 或 "skull"
+     * @returns {string} 例如 "目盲 (Blinded): AC -2，失去敏捷加值..."
+     */
+    static getTooltipForMarker(tag) {
+        if (!tag) return "";
+        const cleanTag = tag.split("::")[0];
+        const def = this.find(cleanTag) || this.find(tag);
+        if (def) {
+            return `${def.nameZh} (${def.nameEn}): ${def.description}`;
+        }
+        return cleanTag;
+    }
+
+    /**
+     * 将当前 Token 拥有的状态标记解析为纯中文文本列表（供悬浮 Tooltip 提示）
+     * @param {string} statusmarkersStr 
+     * @returns {string[]} 中文状态名称数组
+     */
+    static getReadableNamesFromMarkers(statusmarkersStr) {
+        if (!statusmarkersStr) return [];
+        const tags = statusmarkersStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+        const names = [];
+
+        for (const tag of tags) {
+            const tagName = tag.split("::")[0];
+            const def = this.find(tagName) || this.find(tag);
+            if (def) {
+                names.push(`${def.nameZh} (${def.nameEn})`);
+            } else {
+                names.push(tagName);
+            }
+        }
+        return names;
+    }
+}
+
+    // ==========================================
+    // 3. Pf1eBuffManager (PF1e 角色卡数据管理层)
     // ==========================================
 /**
  * Pf1eBuffManager.js
@@ -325,10 +817,11 @@ class Pf1eBuffManager {
         // 统一负数正计轮规范：若用户传入 2，存为 -2
         const storedVal = -Math.abs(Number(rounds));
         if (roundsAttr) {
-            roundsAttr.save({ current: storedVal });
+            roundsAttr.save({ current: storedVal }, { byScript: true });
         } else {
             character.attribs.create({ name: roundsKey, current: storedVal });
         }
+        this.syncTokenStatusmarkers(character);
     }
 
     /**
@@ -339,12 +832,64 @@ class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
         const attr = character.attribs.models.find(a => a.get("name") === condKey);
         if (attr) {
-            attr.save({ current: "0" });
+            attr.save({ current: "0" }, { byScript: true });
         }
         const roundsKey = `${condKey}_rounds`;
         const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
         if (roundsAttr) {
             roundsAttr.destroy();
+        }
+        this.syncTokenStatusmarkers(character);
+    }
+
+    /**
+     * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (绝不添加数字，纯图标)
+     */
+    static syncTokenStatusmarkers(character, token = null) {
+        if (!character) return;
+        const page = Roll20Bridge.getCurrentPage();
+        if (!page || !page.thegraphics) return;
+
+        // 寻找所有代表此角色的 Token
+        const tokens = [];
+        if (token) {
+            tokens.push(token);
+        } else {
+            page.thegraphics.each(g => {
+                if (g.get("represents") === character.id) {
+                    tokens.push(g);
+                }
+            });
+        }
+
+        if (tokens.length === 0) return;
+
+        // 计算当前应该挂载的纯净 Tag 集合
+        const activeConditions = this.getActiveConditions(character);
+        const desiredTags = new Set();
+        for (const cond of activeConditions) {
+            const tag = Pf1eConditionRegistry.resolveMarkerTag(cond.key);
+            if (tag) desiredTags.add(tag);
+        }
+
+        for (const t of tokens) {
+            const currentStr = t.get("statusmarkers") || "";
+            // 保留不属于 PF1e 状态字典的其它自定义标记
+            const currentList = currentStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+            const merged = new Set(desiredTags);
+
+            for (const item of currentList) {
+                const baseName = item.split("::")[0];
+                const isManaged = !!Pf1eConditionRegistry.find(baseName);
+                if (!isManaged) {
+                    merged.add(item);
+                }
+            }
+
+            const newStr = Array.from(merged).join(",");
+            if (currentStr !== newStr) {
+                t.save({ statusmarkers: newStr }, { byScript: true });
+            }
         }
     }
     static generateStandardRowId() {
@@ -879,7 +1424,7 @@ class Pf1eBuffManager {
 }
 
     // ==========================================
-    // 3. SuiteConfigStore 战役云端配置卡存储层
+    // 4. SuiteConfigStore 战役云端配置卡存储层
     // ==========================================
 /**
  * SuiteConfigStore.js
@@ -1229,7 +1774,7 @@ class SuiteConfigStore {
 }
 
     // ==========================================
-    // 4. TurnOrderObserver 先攻监听器
+    // 5. TurnOrderObserver 先攻监听器
     // ==========================================
 /**
  * TurnOrderObserver.js
@@ -1393,7 +1938,7 @@ class TurnOrderObserver {
 }
 
     // ==========================================
-    // 5. TokenBuffManager (纯野怪 Token 状态引擎)
+    // 6. TokenBuffManager (纯野怪 Token 状态引擎)
     // ==========================================
 /**
  * TokenBuffManager.js
@@ -1591,7 +2136,7 @@ class TokenBuffManager {
 }
 
     // ==========================================
-    // 6. Pf1eBuffUI (先攻列表徽章交互层)
+    // 7. Pf1eBuffUI (先攻列表徽章交互层)
     // ==========================================
 /**
  * Pf1eBuffUI.js
@@ -2185,7 +2730,143 @@ class Pf1eBuffUI {
 }
 
     // ==========================================
-    // 7. BuffPanelStyles (面板静态 CSS 样式)
+    // 8. CanvasMarkerHoverObserver (画布标记悬停原生提示探测器)
+    // ==========================================
+/**
+ * CanvasMarkerHoverObserver.js
+ * 负责在画布上检测鼠标是否悬停在特定棋子的状态标记上方
+ * 0 DOM 污染，直接复用 <canvas>.title 原生展现传统黄底黑字提示
+ */
+class CanvasMarkerHoverObserver {
+    static isStarted = false;
+    static _rafId = null;
+    static _lastMatchedTag = null;
+
+    /**
+     * 启动画布标记悬停探测器
+     */
+    static start() {
+        if (this.isStarted) return;
+
+        const canvas = document.getElementById("babylonCanvas") || document.querySelector("canvas");
+        if (!canvas) {
+            console.warn("[CanvasMarkerHoverObserver] 未找到主渲染画布，延迟重试");
+            setTimeout(() => this.start(), 1500);
+            return;
+        }
+
+        // 1. 监听画布上的鼠标移动，节流命中检测
+        canvas.addEventListener("mousemove", (e) => {
+            if (this._rafId) return;
+            this._rafId = requestAnimationFrame(() => {
+                this._rafId = null;
+                this.handleMouseMove(canvas, e.clientX, e.clientY);
+            });
+        }, { passive: true });
+
+        // 2. 鼠标离开画布时清空 title
+        canvas.addEventListener("mouseleave", () => {
+            if (canvas.title !== "") {
+                canvas.title = "";
+                this._lastMatchedTag = null;
+            }
+        }, { passive: true });
+
+        // 3. 增强标记选择面板 (Marker Menu Picker) 原生 title 汉化
+        this.bindMarkerPickerEnhancer();
+
+        this.isStarted = true;
+        console.log("[CanvasMarkerHoverObserver] 画布标记悬停原生提示探测器已就绪");
+    }
+
+    /**
+     * 处理鼠标在画布上的移动并检测 Marker 命中
+     */
+    static handleMouseMove(canvas, mouseX, mouseY) {
+        const campaign = Roll20Bridge.getCampaign();
+        const page = Roll20Bridge.getCurrentPage();
+        if (!campaign || !page || !page.thegraphics) return;
+
+        let hitTag = null;
+        let hitTooltip = null;
+
+        // 遍历当前地图所有携带 statusmarkers 的 Token Graphic
+        for (let i = 0; i < page.thegraphics.length; i++) {
+            const token = page.thegraphics.at(i);
+            const sm = token.get("statusmarkers");
+            if (!sm || sm === "" || sm === "false") continue;
+
+            const dec = token.view?.graphic?.tokenMarkerDecorator;
+            const engine = token.view?.graphic?.engine;
+            if (!dec || !engine || !dec.primaryNode) continue;
+
+            const children = dec.primaryNode.getChildren ? dec.primaryNode.getChildren() : [];
+            for (const node of children) {
+                // 忽略非标记节点
+                if (!node || !node.name || node.name.startsWith("instance-array")) continue;
+
+                try {
+                    const absPos = node.getAbsolutePosition ? node.getAbsolutePosition() : node.position;
+                    if (!absPos || typeof absPos.clone !== "function") continue;
+
+                    const screenPos = engine.getScreenPosition(absPos);
+                    if (!screenPos) continue;
+
+                    // 判断鼠标指针是否落在标记图标半径内 (约 15 像素半径)
+                    const dist = Math.hypot(mouseX - screenPos.x, mouseY - screenPos.y);
+                    if (dist <= 15) {
+                        hitTag = node.name;
+                        hitTooltip = Pf1eConditionRegistry.getTooltipForMarker(node.name);
+                        break;
+                    }
+                } catch (e) {
+                    // 忽略单个节点计算异常
+                }
+            }
+            if (hitTag) break;
+        }
+
+        // 更新 canvas.title
+        if (hitTag) {
+            if (this._lastMatchedTag !== hitTag) {
+                this._lastMatchedTag = hitTag;
+                canvas.title = hitTooltip || hitTag;
+            }
+        } else {
+            if (this._lastMatchedTag !== null || canvas.title !== "") {
+                this._lastMatchedTag = null;
+                canvas.title = "";
+            }
+        }
+    }
+
+    /**
+     * 自动为选中的棋子标记选择菜单 (Marker Menu) 中的小图标注入原生 title 中文提示
+     */
+    static bindMarkerPickerEnhancer() {
+        // 使用事件捕获监听点击或悬停进入 marker 菜单
+        document.addEventListener("mouseover", (e) => {
+            const target = e.target;
+            if (!target) return;
+
+            // 匹配标记选择菜单中的各个图标项
+            const markerItem = target.closest?.(".markermenu .marker, [data-action='toggle-marker'], .markermenu div");
+            if (!markerItem || markerItem.dataset.titleInjected) return;
+
+            const tagName = markerItem.dataset.tag || markerItem.dataset.name || markerItem.className || "";
+            if (tagName) {
+                const tooltip = Pf1eConditionRegistry.getTooltipForMarker(tagName);
+                if (tooltip) {
+                    markerItem.title = tooltip;
+                    markerItem.dataset.titleInjected = "true";
+                }
+            }
+        }, true);
+    }
+}
+
+    // ==========================================
+    // 9. BuffPanelStyles (面板静态 CSS 样式)
     // ==========================================
 /**
  * BuffPanelStyles.js
@@ -2648,7 +3329,7 @@ class BuffPanelStyles {
 }
 
     // ==========================================
-    // 8. BuffPanelTemplates (面板静态 HTML 模板)
+    // 10. BuffPanelTemplates (面板静态 HTML 模板)
     // ==========================================
 /**
  * BuffPanelTemplates.js
@@ -2657,7 +3338,7 @@ class BuffPanelStyles {
 class BuffPanelTemplates {}
 
     // ==========================================
-    // 9. BuffPanelDragDrop (面板拖拽手势交互)
+    // 11. BuffPanelDragDrop (面板拖拽手势交互)
     // ==========================================
 /**
  * BuffPanelDragDrop.js
@@ -2861,7 +3542,7 @@ class BuffPanelDragDrop {
 }
 
     // ==========================================
-    // 10. BuffFloatingPanel (状态Buff悬浮工作台控制器)
+    // 12. BuffFloatingPanel (状态Buff悬浮工作台控制器)
     // ==========================================
 /**
  * BuffFloatingPanel.js
@@ -4049,18 +4730,28 @@ class BuffFloatingPanel {
                 console.error("[Roll20Suite] 先攻条徽章挂载失败:", uiErr);
             }
 
-            // 4. 挂载命名空间供外部或开发者排查联动
+            // 4. 启动画布标记悬停原生提示探测器 (0 DOM 污染)
+            try {
+                CanvasMarkerHoverObserver.start();
+                console.log("[Roll20Suite] CanvasMarkerHoverObserver 画布标记悬停探测器挂载成功");
+            } catch (hoverErr) {
+                console.error("[Roll20Suite] CanvasMarkerHoverObserver 挂载异常:", hoverErr);
+            }
+
+            // 5. 挂载命名空间供外部或开发者排查联动
             window.Roll20Suite = {
                 Roll20Bridge,
+                Pf1eConditionRegistry,
                 Pf1eBuffManager,
                 SuiteConfigStore,
                 TurnOrderObserver,
                 TokenBuffManager,
                 Pf1eBuffUI,
+                CanvasMarkerHoverObserver,
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.16 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.17 全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }
