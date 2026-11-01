@@ -44,8 +44,66 @@ export class CanvasMarkerHoverObserver {
         // 3. 增强标记选择面板 (Marker Menu Picker) 原生 title 汉化
         this.bindMarkerPickerEnhancer();
 
+        // 4. 监听棋子标记手动变动，反向联动人物卡/先攻栏 Debuff
+        this.bindTokenMarkerChangeListeners();
+
         this.isStarted = true;
-        console.log("[CanvasMarkerHoverObserver] 画布标记悬停原生提示探测器已就绪");
+        console.log("[CanvasMarkerHoverObserver] 画布标记悬停原生提示与双向联动已就绪");
+    }
+
+    /**
+     * 监听棋子标记手动变动，实现棋子加/删标记自动反向联动人物卡/先攻栏 Debuff
+     */
+    static bindTokenMarkerChangeListeners() {
+        const page = Roll20Bridge.getCurrentPage();
+        if (!page || !page.thegraphics) return;
+
+        const boundTokens = new Set();
+
+        const attachToToken = (token) => {
+            if (!token || boundTokens.has(token.id)) return;
+            boundTokens.add(token.id);
+
+            token.on("change:statusmarkers", async (t, newSM, options) => {
+                // 若为脚本自主同步，彻底静音跳过，防止回路震荡
+                if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
+
+                const character = Roll20Bridge.getCharacterByToken(t);
+                if (!character) return;
+
+                const oldSM = t.previous("statusmarkers") || "";
+                const oldTags = new Set(oldSM.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
+                const newTags = new Set((newSM || "").split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
+
+                // 1. 查找新增的 tags
+                for (const tag of newTags) {
+                    if (!oldTags.has(tag)) {
+                        const baseName = tag.split("::")[0];
+                        const def = Pf1eConditionRegistry.find(baseName) || Pf1eConditionRegistry.find(tag);
+                        if (def) {
+                            await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1);
+                        }
+                    }
+                }
+
+                // 2. 查找移除的 tags
+                for (const tag of oldTags) {
+                    if (!newTags.has(tag)) {
+                        const baseName = tag.split("::")[0];
+                        const def = Pf1eConditionRegistry.find(baseName) || Pf1eConditionRegistry.find(tag);
+                        if (def) {
+                            await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id);
+                        }
+                    }
+                }
+
+                // 刷新先攻栏
+                Pf1eBuffUI.requestTokenRefresh(t.id);
+            });
+        };
+
+        page.thegraphics.each(attachToToken);
+        page.thegraphics.on("add", attachToToken);
     }
 
     /**
@@ -113,18 +171,22 @@ export class CanvasMarkerHoverObserver {
      * 自动为选中的棋子标记选择菜单 (Marker Menu) 中的小图标注入原生 title 中文提示
      */
     static bindMarkerPickerEnhancer() {
-        // 使用事件捕获监听点击或悬停进入 marker 菜单
         document.addEventListener("mouseover", (e) => {
             const target = e.target;
             if (!target) return;
 
-            // 匹配标记选择菜单中的各个图标项
-            const markerItem = target.closest?.(".markermenu .marker, [data-action='toggle-marker'], .markermenu div");
+            // 匹配标记选择菜单中的各个图标项 (Roll20 属性为 data-status-id 或 data-action-type)
+            const markerItem = target.closest?.(".markermenu .statusicon, .markermenu div[data-status-id], .markermenu [data-action-type]");
             if (!markerItem || markerItem.dataset.titleInjected) return;
 
-            const tagName = markerItem.dataset.tag || markerItem.dataset.name || markerItem.className || "";
-            if (tagName) {
-                const tooltip = Pf1eConditionRegistry.getTooltipForMarker(tagName);
+            // 优先从 data-status-id 提取准确的 marker 标识（绝不读取 className 兜底）
+            let statusId = markerItem.dataset.statusId || "";
+            if (!statusId && markerItem.dataset.actionType) {
+                statusId = markerItem.dataset.actionType.replace(/^toggle_status_/, "");
+            }
+
+            if (statusId) {
+                const tooltip = Pf1eConditionRegistry.getTooltipForMarker(statusId);
                 if (tooltip) {
                     markerItem.title = tooltip;
                     markerItem.dataset.titleInjected = "true";

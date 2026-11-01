@@ -464,6 +464,14 @@ export class Pf1eConditionRegistry {
 
         // 战役常见扩展 Buff/Debuff 标记纯中文映射
         const EXTRA_ZH_MAP = {
+            "red": "紅",
+            "blue": "藍",
+            "green": "綠",
+            "brown": "棕",
+            "purple": "紫",
+            "pink": "粉",
+            "yellow": "黃",
+            "dead": "死亡",
             "Hex": "惡咒",
             "Poisoned": "中毒",
             "Raging": "狂暴",

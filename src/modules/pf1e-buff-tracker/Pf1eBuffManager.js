@@ -142,9 +142,34 @@ export class Pf1eBuffManager {
     }
 
     /**
+     * 施加/激活指定负面状态（支持原生与补充状态，带默认正计轮）
+     */
+    static async applyCondition(character, condKey, rounds = -1) {
+        if (!character || !condKey) return;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+
+        const def = Pf1eConditionRegistry.find(condKey);
+        const actualAttrKey = def?.attrKey || condKey;
+
+        if (def?.isNativeSheet) {
+            // 原生属性赋予标准惩罚值
+            const defaultVal = actualAttrKey === "condition-Blinded" ? "2" : (actualAttrKey === "condition-Prone" ? "4" : "1");
+            let attr = character.attribs.models.find(a => a.get("name") === actualAttrKey);
+            if (!attr) {
+                character.attribs.create({ name: actualAttrKey, current: defaultVal });
+            } else {
+                attr.save({ current: defaultVal }, { byScript: true });
+            }
+        }
+
+        await this.setConditionRounds(character, actualAttrKey, rounds);
+        await this.syncTokenStatusmarkers(character);
+    }
+
+    /**
      * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (绝不添加数字，纯图标)
      */
-    static syncTokenStatusmarkers(character, token = null) {
+    static async syncTokenStatusmarkers(character, token = null) {
         if (!character) return;
         const page = Roll20Bridge.getCurrentPage();
         if (!page || !page.thegraphics) return;
@@ -164,7 +189,7 @@ export class Pf1eBuffManager {
         if (tokens.length === 0) return;
 
         // 计算当前应该挂载的纯净 Tag 集合
-        const activeConditions = this.getActiveConditions(character);
+        const activeConditions = await this.getActiveConditions(character);
         const desiredTags = new Set();
         for (const cond of activeConditions) {
             const tag = Pf1eConditionRegistry.resolveMarkerTag(cond.key);
