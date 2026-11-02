@@ -1,5 +1,6 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { Pf1eConditionRegistry } from "../pf1e-buff-tracker/Pf1eConditionRegistry.js";
+import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
 
 /**
  * CanvasMarkerHoverObserver.js
@@ -69,39 +70,14 @@ export class CanvasMarkerHoverObserver {
                 const prevKnown = tokenLastStatusMarkers.get(t.id) ?? t.previous("statusmarkers") ?? "";
                 tokenLastStatusMarkers.set(t.id, newSM || "");
 
-                // 若为脚本自主同步，彻底静音跳过，防止回路震荡
-                if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
+                // 若为脚本自主同步或正处于调和事务中，彻底静音跳过，防止回路震荡
+                if (options?.byScript || Pf1eBuffManager.isScriptMutating || Pf1eBuffManager.isReconciling) return;
 
                 const character = Roll20Bridge.getCharacterByToken(t);
                 if (!character) return;
 
-                const oldTags = new Set(prevKnown.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
-                const newTags = new Set((newSM || "").split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
-
-                // 1. 查找新增的 tags (玩家手动在棋子上点击添加标记)
-                for (const tag of newTags) {
-                    if (!oldTags.has(tag)) {
-                        const def = Pf1eConditionRegistry.find(tag);
-                        if (def) {
-                            console.log(`[CanvasMarkerHoverObserver] 检测到棋子新增标记 [${tag}]，反向激活角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1, { skipTokenSync: true });
-                        }
-                    }
-                }
-
-                // 2. 查找移除的 tags (玩家手动在棋子上点击移除标记)
-                for (const tag of oldTags) {
-                    if (!newTags.has(tag)) {
-                        const def = Pf1eConditionRegistry.find(tag);
-                        if (def) {
-                            console.log(`[CanvasMarkerHoverObserver] 检测到棋子移除标记 [${tag}]，反向解除角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id, { skipTokenSync: true });
-                        }
-                    }
-                }
-
-                // 刷新先攻栏对应徽章
-                Pf1eBuffUI.requestTokenRefresh(t.id);
+                // 声明式单向调和：由棋子驱动角色卡，绝对禁止反向修改棋子，杜绝选框失焦
+                await Pf1eBuffManager.reconcileConditions(character, t, { origin: "token" });
             });
         };
 
@@ -241,8 +217,9 @@ export class CanvasMarkerHoverObserver {
             }
         }, true);
 
-        // 2. 观察 DOM 变化，当 .markermenu 展开时一次性批量清洗全部图标 title
+        // 2. 观察 DOM 变化，当 .markermenu 展开时清洗 title，关闭时立即触发 0 延迟原子调和
         const menuObserver = new MutationObserver((mutations) => {
+            let menuRemoved = false;
             for (const m of mutations) {
                 for (const node of m.addedNodes) {
                     if (node.nodeType !== Node.ELEMENT_NODE) continue;
@@ -251,10 +228,35 @@ export class CanvasMarkerHoverObserver {
                         items.forEach(enhanceItem);
                     }
                 }
+                for (const node of m.removedNodes) {
+                    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+                    if (node.classList?.contains("markermenu") || node.querySelector?.(".markermenu")) {
+                        menuRemoved = true;
+                    }
+                }
+            }
+
+            if (menuRemoved) {
+                // 检查当前 DOM 树是否已经没有打开的 .markermenu
+                if (!document.querySelector(".markermenu")) {
+                    console.log("[CanvasMarkerHoverObserver] 检测到标记菜单关闭，立即触发挂起的调和会话");
+                    Pf1eBuffManager.flushPendingTokenReconciles();
+                }
             }
         });
 
         menuObserver.observe(document.body, { childList: true, subtree: true });
+
+        // 3. 点击外部区域兜底：当在标记菜单之外点击画布时，排队微任务检查关闭并结算
+        document.addEventListener("pointerdown", (e) => {
+            if (!e.target?.closest?.(".markermenu")) {
+                requestAnimationFrame(() => {
+                    if (!document.querySelector(".markermenu") && Pf1eBuffManager.pendingTokenReconciles.size > 0) {
+                        Pf1eBuffManager.flushPendingTokenReconciles();
+                    }
+                });
+            }
+        }, true);
 
         // 对页面当前已存在的 markermenu 图标立即执行一次清洗
         document.querySelectorAll(".markermenu .statusicon, .markermenu div[data-status-id]").forEach(enhanceItem);

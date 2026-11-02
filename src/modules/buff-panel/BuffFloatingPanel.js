@@ -216,9 +216,10 @@ export class BuffFloatingPanel {
             // 非编辑模式下点击直接施加/移除
             const name = item.dataset.name;
             const rounds = item.dataset.rounds ? parseInt(item.dataset.rounds) : null;
+            const initRounds = item.dataset.initRounds || null;
             const extraAttrs = item._extraAttrs || null;
 
-            await this.toggleBuffOnSelected(name, rounds, extraAttrs);
+            await this.toggleBuffOnSelected(name, rounds, extraAttrs, initRounds);
         });
 
         // 单位栏点击
@@ -300,6 +301,7 @@ export class BuffFloatingPanel {
 
         const currentName = isEditing ? existingNode.name : "";
         const currentRounds = isEditing && existingNode.rounds !== null && existingNode.rounds !== undefined ? existingNode.rounds : "";
+        const currentInitRounds = isEditing && existingNode.initRounds ? existingNode.initRounds : "";
         const currentJson = isEditing
             ? JSON.stringify(existingNode.extraAttrs || {}, null, 2)
             : `{
@@ -321,7 +323,11 @@ export class BuffFloatingPanel {
                     <label style="font-size:11px; color:#b0bec5;">Buff 名称:</label>
                     <input type="text" class="r20-input-text input-buff-name" value="${currentName}" placeholder="例如: 神恩、加速术..." />
 
-                    <label style="font-size:11px; color:#b0bec5;">持续轮数 (留空视为永久):</label>
+                    <label style="font-size:11px; color:#b0bec5;">预置初始轮数 / 公式 (每次开启自动求值):</label>
+                    <input type="text" class="r20-input-text input-buff-init-rounds" value="${currentInitRounds}" placeholder="例如: 10、@{level}*10、10+@{constitution_mod}" />
+                    <span style="font-size:10px; color:#78909c;">支持常数或 @{attr} 属性引用公式，开启时借用 Roll20 原生引擎自动求值。</span>
+
+                    <label style="font-size:11px; color:#b0bec5;">当前剩余轮数 (留空视为永久):</label>
                     <input type="number" class="r20-input-text input-buff-rounds" value="${currentRounds}" placeholder="留空或大于100视为永久" />
 
                     <label style="font-size:11px; color:#b0bec5;">PF1e 细目加值字典 (JSON 格式):</label>
@@ -341,6 +347,9 @@ export class BuffFloatingPanel {
             const name = mask.querySelector(".input-buff-name").value.trim();
             if (!name) { alert("请输入 Buff 名称"); return; }
 
+            const initRoundsVal = mask.querySelector(".input-buff-init-rounds").value.trim();
+            const initRounds = initRoundsVal === "" ? null : initRoundsVal;
+
             const roundsVal = mask.querySelector(".input-buff-rounds").value.trim();
             const rounds = roundsVal === "" ? null : parseInt(roundsVal, 10);
 
@@ -357,9 +366,10 @@ export class BuffFloatingPanel {
                     if (charTarget) {
                         // 1. 编辑角色卡身上的原生 Buff
                         const rowId = existingNode.rowId || existingNode.id;
-                        await Pf1eBuffManager.updateBuffRow(charTarget, rowId, name, rounds, extraAttrs);
+                        await Pf1eBuffManager.updateBuffRow(charTarget, rowId, name, rounds, extraAttrs, initRounds);
                         existingNode.name = name;
                         existingNode.rounds = rounds;
+                        existingNode.initRounds = initRounds;
                         existingNode.extraAttrs = extraAttrs;
                         this.showToast("✅ 已更新 " + charTarget.get("name") + " 的 Buff [" + name + "]", "success");
                         await Pf1eBuffUI.refreshAllBadges();
@@ -367,15 +377,16 @@ export class BuffFloatingPanel {
                     } else {
                         // 2. 编辑模板库中的 Buff 模板
                         const rowId = existingNode.rowId || existingNode.id;
-                        await SuiteConfigStore.updateBuffInDatabase(rowId, name, rounds, extraAttrs);
+                        await SuiteConfigStore.updateBuffInDatabase(rowId, name, rounds, extraAttrs, initRounds);
                         existingNode.name = name;
                         existingNode.rounds = rounds;
+                        existingNode.initRounds = initRounds;
                         existingNode.extraAttrs = extraAttrs;
                         this.showToast("✅ 已更新 Buff 模板 [" + name + "]", "success");
                         await this.renderTemplatePane();
                     }
                 } else {
-                    const newRowId = await SuiteConfigStore.addBuffToDatabase(name, rounds, extraAttrs);
+                    const newRowId = await SuiteConfigStore.addBuffToDatabase(name, rounds, extraAttrs, initRounds);
                     if (newRowId) {
                         this.currentTemplates.push({
                             id: newRowId,
@@ -383,6 +394,7 @@ export class BuffFloatingPanel {
                             type: "buff",
                             name,
                             rounds,
+                            initRounds,
                             extraAttrs
                         });
                         await SuiteConfigStore.saveTopology(this.currentTemplates);
@@ -572,10 +584,13 @@ export class BuffFloatingPanel {
                 item.dataset.id = rowId;
                 item.dataset.selectId = selectId;
                 if (node.rounds) item.dataset.rounds = node.rounds;
+                if (node.initRounds) item.dataset.initRounds = node.initRounds;
                 item._extraAttrs = node.extraAttrs || null;
                 item.draggable = true;
 
-                const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") ? (node.rounds + "轮") : "永久";
+                const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") 
+                    ? (node.rounds + "轮") 
+                    : (node.initRounds ? `[${node.initRounds}]` : "永久");
 
                 item.innerHTML = `
                     <div class="r20-item-left">
@@ -709,7 +724,7 @@ export class BuffFloatingPanel {
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
                             onCrossCopy: async (draggedNode) => {
-                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
+                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs, draggedNode.initRounds);
                                 if (newRowId) {
                                     await this.renderTemplatePane();
                                 }
@@ -764,7 +779,7 @@ export class BuffFloatingPanel {
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
                             onCrossCopy: async (draggedNode) => {
-                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
+                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs, draggedNode.initRounds);
                                 if (newRowId) {
                                     await this.renderTemplatePane();
                                 }
@@ -796,7 +811,7 @@ export class BuffFloatingPanel {
                     details.classList.remove("r20-drag-container-over");
                     const node = dragged.node;
                     if (char) {
-                        await Pf1eBuffManager.applyOrRefreshBuff(char, node.name, node.rounds, node.extraAttrs);
+                        await Pf1eBuffManager.applyOrRefreshBuff(char, node.name, node.rounds, node.extraAttrs, node.initRounds);
                     } else if (tokenItem.token) {
                         TokenBuffManager.applyOrRefreshBuff(tokenItem.token, node.name, node.rounds, node.extraAttrs);
                     }
@@ -815,7 +830,7 @@ export class BuffFloatingPanel {
     /**
      * 为选中的单位批量施加或移除 Buff
      */
-    static async toggleBuffOnSelected(buffName, rounds, extraAttrs) {
+    static async toggleBuffOnSelected(buffName, rounds, extraAttrs, initRounds = null) {
         const selected = this.getSelectedTokens();
         if (selected.length === 0) {
             this.showToast("⚠️ 请先在画布上选择目标 Token", "warn");
@@ -830,7 +845,7 @@ export class BuffFloatingPanel {
         for (const item of selected) {
             if (item.char) {
                 if (shouldApply) {
-                    await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs);
+                    await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs, initRounds);
                 } else {
                     const buffs = await Pf1eBuffManager.getAllBuffs(item.char);
                     const b = buffs.find(x => x.name === buffName && x.enabled);

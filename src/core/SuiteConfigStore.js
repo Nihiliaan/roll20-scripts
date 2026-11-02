@@ -107,6 +107,7 @@ export class SuiteConfigStore {
                                 type: "buff",
                                 name: native.name,
                                 rounds: native.rounds,
+                                initRounds: native.initRounds || null,
                                 extraAttrs: native.extraAttrs || null
                             });
                         }
@@ -129,6 +130,7 @@ export class SuiteConfigStore {
                         type: "buff",
                         name: b.name,
                         rounds: b.rounds,
+                        initRounds: b.initRounds || null,
                         extraAttrs: b.extraAttrs || null
                     });
                 }
@@ -206,7 +208,7 @@ export class SuiteConfigStore {
     /**
      * 原子新增一个 Buff 到数据库角色卡
      */
-    static async addBuffToDatabase(name, rounds = null, extraAttrs = null) {
+    static async addBuffToDatabase(name, rounds = null, extraAttrs = null, initRounds = null) {
         let dbChar = this.findDatabaseCharacter();
         if (!dbChar && this.isGM()) {
             dbChar = await this.createDatabaseCharacter();
@@ -216,23 +218,23 @@ export class SuiteConfigStore {
         await Roll20Bridge.ensureCharacterAttributes(dbChar);
 
         const rowId = window.generateUUID ? window.generateUUID() : ("-R20" + Math.random().toString(36).substr(2, 16));
-        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs);
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
 
-        console.log("[SuiteConfigStore] 原子创建原生 Buff [" + name + "] (rowId: " + rowId + ")");
+        console.log("[SuiteConfigStore] 原子创建原生 Buff [" + name + "] (rowId: " + rowId + ", initRounds: " + initRounds + ")");
         return rowId;
     }
 
     /**
      * 原子更新数据库角色卡上的指定 Buff
      */
-    static async updateBuffInDatabase(rowId, name, rounds = null, extraAttrs = null) {
+    static async updateBuffInDatabase(rowId, name, rounds = null, extraAttrs = null, initRounds = null) {
         const dbChar = this.findDatabaseCharacter();
         if (!dbChar || !rowId) return false;
 
         await Roll20Bridge.ensureCharacterAttributes(dbChar);
-        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs);
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
 
-        console.log("[SuiteConfigStore] 原子更新原生 Buff [" + name + "] (rowId: " + rowId + ")");
+        console.log("[SuiteConfigStore] 原子更新原生 Buff [" + name + "] (rowId: " + rowId + ", initRounds: " + initRounds + ")");
         return true;
     }
 
@@ -279,7 +281,7 @@ export class SuiteConfigStore {
     /**
      * 将一条 Buff 写入原生 repeating_buff2_<rowId> 属性集
      */
-    static async writeNativeBuffRow(character, rowId, name, rounds, extraAttrs) {
+    static async writeNativeBuffRow(character, rowId, name, rounds, extraAttrs, initRounds = null) {
         if (!character || !rowId) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -289,6 +291,7 @@ export class SuiteConfigStore {
             { name: prefix + "_enable_toggle", current: 0 },
             { name: prefix + "_tabcat2", current: "1" },
             { name: prefix + "_rounds", current: (rounds !== null && rounds !== undefined && rounds !== "") ? rounds : "" },
+            { name: prefix + "_init_rounds", current: (initRounds !== null && initRounds !== undefined) ? initRounds : "" },
             { name: prefix + "_bufftype", current: (extraAttrs && extraAttrs.bufftype) ? extraAttrs.bufftype : "spell" },
             { name: prefix + "_tabcat", current: (extraAttrs && extraAttrs.bufftype) ? extraAttrs.bufftype : "spell" },
             { name: prefix + "_row_id", current: rowId.toLowerCase() },
@@ -297,7 +300,7 @@ export class SuiteConfigStore {
 
         if (extraAttrs && typeof extraAttrs === "object") {
             for (const [key, val] of Object.entries(extraAttrs)) {
-                if (key !== "name" && key !== "enable_toggle" && key !== "rounds" && key !== "bufftype" && key !== "tabcat") {
+                if (key !== "name" && key !== "enable_toggle" && key !== "rounds" && key !== "init_rounds" && key !== "bufftype" && key !== "tabcat") {
                     attrs.push({ name: prefix + "_" + key, current: val });
                 }
             }
@@ -336,6 +339,7 @@ export class SuiteConfigStore {
                         type: "buff",
                         name: b.name + " (" + char.get("name") + ")",
                         rounds: b.rounds,
+                        initRounds: b.initRounds || null,
                         extraAttrs: b.extraAttrs || null
                     });
                 });

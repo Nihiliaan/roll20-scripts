@@ -13,8 +13,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Bleed",
         roundsKey: "condition-Bleed_rounds",
         markerName: "Bleeding Out",
-        fallbackMarker: "bleeding-eye",
-        aliases: ["Bleeding Out", "Bleeding_Out", "Bleed", "bleeding-eye"],
+        fallbackMarker: "death-zone",
+        aliases: ["Bleeding Out", "Bleeding_Out", "Bleed", "death-zone"],
         description: "每轮开始受持续伤害，直至受DC 15医疗检定或治疗法术"
     },
     "blinded": {
@@ -26,7 +26,7 @@ export const PF1E_CONDITIONS = {
         roundsKey: "condition-Blinded_rounds",
         markerName: "Blinded",
         fallbackMarker: "bleeding-eye",
-        aliases: ["Blinded", "bleeding-eye"],
+        aliases: ["Blinded", "Blind", "bleeding-eye"],
         description: "AC -2，失去敏捷加值，察觉检定自动失败，全隐蔽(50%失手)"
     },
     "confused": {
@@ -48,9 +48,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Cowering",
         roundsKey: "condition-Cowering_rounds",
-        markerName: "screaming",
-        fallbackMarker: "screaming",
-        aliases: ["Cowering", "screaming"],
+        markerName: "Cowering",
+        fallbackMarker: "broken-skull",
+        aliases: ["Cowering", "broken-skull"],
         description: "极度恐惧冻结，AC -2，失去敏捷加值，无法采取任何动作"
     },
     "dazed": {
@@ -97,8 +97,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Deafened",
         roundsKey: "condition-Deafened_rounds",
         markerName: "Deafened",
-        fallbackMarker: "black-flag",
-        aliases: ["Deafened", "black-flag"],
+        fallbackMarker: "edge-crack",
+        aliases: ["Deafened", "edge-crack"],
         description: "先攻检定 -4，听力察觉自动失败，言语成分法术 20% 失败率"
     },
     "disabled": {
@@ -108,7 +108,7 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Disabled",
         roundsKey: "condition-Disabled_rounds",
-        markerName: "snail",
+        markerName: "Disabled",
         fallbackMarker: "snail",
         aliases: ["Disabled", "snail"],
         description: "生命恰为 0，每轮只能做单个移动或标动，做标动受 1 伤害转濒死"
@@ -157,8 +157,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Exhausted",
         roundsKey: "condition-Exhausted_rounds",
         markerName: "Exhausted",
-        fallbackMarker: "back-pain",
-        aliases: ["Exhausted", "back-pain"],
+        fallbackMarker: "broken-shield",
+        aliases: ["Exhausted", "broken-shield"],
         description: "移动半速，力量和敏捷受到 -6 减值，休息 1 小时转为疲乏"
     },
     "fascinated": {
@@ -169,8 +169,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Fascinated",
         roundsKey: "condition-Fascinated_rounds",
         markerName: "Charmed",
-        fallbackMarker: "aura",
-        aliases: ["Fascinated", "Charmed", "aura"],
+        fallbackMarker: "all-for-one",
+        aliases: ["Fascinated", "Charmed", "all-for-one"],
         description: "驻足注视目标，察觉等技能受到 -4 减值，受到潜在威胁解除"
     },
     "fatigued": {
@@ -180,9 +180,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Fatigued",
         roundsKey: "condition-Fatigued_rounds",
-        markerName: "back-pain",
-        fallbackMarker: "snail",
-        aliases: ["Fatigued", "back-pain", "snail"],
+        markerName: "Fatigued",
+        fallbackMarker: "back-pain",
+        aliases: ["Fatigued", "back-pain"],
         description: "无法奔跑或冲锋，力量和敏捷受到 -2 减值，休息 8 小时解除"
     },
     "flat_footed": {
@@ -204,9 +204,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Fear",
         roundsKey: "condition-Fear_rounds",
-        markerName: "Cause of Fear",
+        markerName: "Frightened",
         fallbackMarker: "screaming",
-        aliases: ["Cause of Fear", "Cause_of_Fear", "Frightened", "Fear", "screaming"],
+        aliases: ["Frightened", "Cause of Fear", "Cause_of_Fear", "Fear", "screaming"],
         description: "恐惧逃离源头，攻击检定/豁免/技能受到 -2 减值，无法自主接近威胁"
     },
     "grappled": {
@@ -228,9 +228,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Helpless",
         roundsKey: "condition-Helpless_rounds",
-        markerName: "padlock",
-        fallbackMarker: "padlock",
-        aliases: ["Helpless", "padlock"],
+        markerName: "Helpless",
+        fallbackMarker: "chained-heart",
+        aliases: ["Helpless", "chained-heart"],
         description: "完全无法防卫，敏捷视同为 0 (-5 AC)，近战受击可被政变"
     },
     "incorporeal": {
@@ -241,8 +241,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Incorporeal",
         roundsKey: "condition-Incorporeal_rounds",
         markerName: "Incorporeal",
-        fallbackMarker: "aura",
-        aliases: ["Incorporeal", "aura"],
+        fallbackMarker: "white-tower",
+        aliases: ["Incorporeal", "white-tower"],
         description: "无实体，免疫非魔法攻击，魔法武器伤害半额，可穿透实物"
     },
     "invisible": {
@@ -264,9 +264,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Nauseated",
         roundsKey: "condition-Nauseated_rounds",
-        markerName: "Poisoned",
+        markerName: "Nauseated",
         fallbackMarker: "chemical-bolt",
-        aliases: ["Nauseated", "Poisoned", "602-Poisoned", "chemical-bolt"],
+        aliases: ["Nauseated", "Nausea", "Sick", "chemical-bolt"],
         description: "极度胃部不适，每轮只能做单个移动动作，不可攻击或施法"
     },
     "panicked": {
@@ -276,9 +276,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: false, // CRB 核心状态
         attrKey: "custom_cond_panicked",
         roundsKey: "custom_cond_panicked_rounds",
-        markerName: "screaming",
-        fallbackMarker: "screaming",
-        aliases: ["Panicked", "screaming"],
+        markerName: "Panicked",
+        fallbackMarker: "fluffy-wing",
+        aliases: ["Panicked", "fluffy-wing"],
         description: "扔下持有物全速逃离危险，防御检定承受 -2 减值，被逼角落时陷入畏缩"
     },
     "paralyzed": {
@@ -289,8 +289,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Paralyzed",
         roundsKey: "condition-Paralyzed_rounds",
         markerName: "Paralyzed",
-        fallbackMarker: "padlock",
-        aliases: ["Paralyzed", "padlock"],
+        fallbackMarker: "pummeled",
+        aliases: ["Paralyzed", "pummeled"],
         description: "肌肉僵直，力量敏捷视同为 0，完全无助，无法移动或发声"
     },
     "petrified": {
@@ -301,8 +301,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Petrified",
         roundsKey: "condition-Petrified_rounds",
         markerName: "Petrified",
-        fallbackMarker: "interdiction",
-        aliases: ["Petrified", "interdiction"],
+        fallbackMarker: "frozen-orb",
+        aliases: ["Petrified", "frozen-orb", "interdiction"],
         description: "身躯化为石质，完全无助昏迷，硬度 8，具有伤害减免"
     },
     "pinned": {
@@ -312,9 +312,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Pinned",
         roundsKey: "condition-Pinned_rounds",
-        markerName: "grab",
-        fallbackMarker: "grab",
-        aliases: ["Pinned", "grab", "padlock"],
+        markerName: "Pinned",
+        fallbackMarker: "padlock",
+        aliases: ["Pinned", "padlock"],
         description: "紧紧受制无法移动，AC -4 并失去敏捷加值，无法施展躯体法术"
     },
     "prone": {
@@ -336,9 +336,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: false, // CRB 核心状态
         attrKey: "custom_cond_shaken",
         roundsKey: "custom_cond_shaken_rounds",
-        markerName: "Cause of Fear",
+        markerName: "Shaken",
         fallbackMarker: "broken-heart",
-        aliases: ["Shaken", "Cause of Fear", "Cause_of_Fear", "broken-heart"],
+        aliases: ["Shaken", "broken-heart"],
         description: "轻微恐惧，攻击检定、豁免检定与技能检定承受 -2 减值"
     },
     "sickened": {
@@ -348,9 +348,9 @@ export const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Sickened",
         roundsKey: "condition-Sickened_rounds",
-        markerName: "Poisoned",
-        fallbackMarker: "snail",
-        aliases: ["Sickened", "Poisoned", "602-Poisoned", "snail"],
+        markerName: "Sickened",
+        fallbackMarker: "drink-me",
+        aliases: ["Sickened", "Sick", "drink-me", "three-leaves"],
         description: "身体不适恶心，攻击检定、武器伤害、豁免与技能检定承受 -2 减值"
     },
     "stable": {
@@ -361,8 +361,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Stable",
         roundsKey: "condition-Stable_rounds",
         markerName: "Stabilized",
-        fallbackMarker: "half-heart",
-        aliases: ["Stabilized", "Stable", "half-heart"],
+        fallbackMarker: "spanner",
+        aliases: ["Stabilized", "Stable", "spanner"],
         description: "濒死但伤势稳定，不再每轮流失生命，生命恢复正值前仍昏迷"
     },
     "staggered": {
@@ -373,8 +373,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Staggered",
         roundsKey: "condition-Staggered_rounds",
         markerName: "Staggered",
-        fallbackMarker: "snail",
-        aliases: ["Staggered", "snail"],
+        fallbackMarker: "stopwatch",
+        aliases: ["Staggered", "stopwatch"],
         description: "重创踉跄，每轮只能执行单个标动或移动动作，可做直觉动作"
     },
     "stunned": {
@@ -385,8 +385,8 @@ export const PF1E_CONDITIONS = {
         attrKey: "condition-Stunned",
         roundsKey: "condition-Stunned_rounds",
         markerName: "Stunned",
-        fallbackMarker: "lightning-helix",
-        aliases: ["Stunned", "lightning-helix"],
+        fallbackMarker: "fist",
+        aliases: ["Stunned", "fist", "lightning-helix"],
         description: "掉落持有物，无法采取动作，AC -2 并失去敏捷加值"
     },
     "suffocating": {
@@ -436,7 +436,23 @@ export class Pf1eConditionRegistry {
      */
     static find(keyOrName) {
         if (!keyOrName) return null;
-        const raw = String(keyOrName).split("::")[0].trim();
+        let rawKey = String(keyOrName).trim();
+
+        // 0. 尝试在当前战役 token_markers 中通过完整 tag 逆向获取自定义标记名称
+        if (window.Campaign) {
+            try {
+                const markers = JSON.parse(window.Campaign.get("token_markers") || "[]");
+                if (Array.isArray(markers)) {
+                    const cleanTag = rawKey.replace(/@\d+$/, "");
+                    const found = markers.find(m => m && (m.tag === rawKey || m.tag === cleanTag));
+                    if (found && found.name) {
+                        rawKey = found.name;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        const raw = rawKey.split("::")[0].trim();
         const lower = raw.toLowerCase();
         const norm = this.normalizeKey(raw);
 
@@ -577,7 +593,7 @@ export class Pf1eConditionRegistry {
             "Spirit Guardians": "守護之靈", "Spirit_Guardians": "守護之靈",
             "DivineFavor": "神恩", "Stabilized": "傷勢穩定", "Unconcious": "昏迷",
             "Cause_of_Fear": "恐懼", "Cause of Fear": "恐懼",
-            "Bleeding_Out": "瀕死流血", "Bleeding Out": "瀕死流血",
+            "Bleeding_Out": "流血", "Bleeding Out": "流血",
             "Concentration": "專注", "Petrified": "石化",
             "Slayers_Prey": "獵手印記", "Slayers Prey": "獵手印記",
             "Warding_Bond": "守護之鏈", "Warding Bond": "守護之鏈",

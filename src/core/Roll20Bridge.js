@@ -184,4 +184,80 @@ export class Roll20Bridge {
         }
         return false;
     }
+
+    /**
+     * 借用 Roll20 原生骰子与宏管道计算公式
+     * @param {string} formula 例如 "10", "@{level}", "10 + @{constitution_mod}", "[[1d4 + 1]]"
+     * @param {object} character 目标角色卡模型
+     * @returns {Promise<number|null>} 计算出的数值（非负整数轮数）
+     */
+    static async evalNativeFormula(formula, character = null) {
+        if (!formula && formula !== 0) return null;
+        let str = String(formula).trim();
+        if (!str) return null;
+
+        // 1. 若纯为数字，直接返回
+        if (!isNaN(Number(str))) {
+            return Math.max(0, Math.round(Number(str)));
+        }
+
+        // 2. 借用角色卡属性展开 @{attribute_name}
+        if (character && character.attribs) {
+            await this.ensureCharacterAttributes(character);
+            for (let depth = 0; depth < 5; depth++) {
+                const match = str.match(/@\{([^}]+)\}/);
+                if (!match) break;
+                const rawAttr = match[1].trim();
+                const cleanAttrName = rawAttr.replace(/^(selected|target)\|/i, "");
+                const attr = character.attribs.models.find(a => a.get("name") === cleanAttrName);
+                const val = attr ? String(attr.get("current") ?? 0) : "0";
+                str = str.replace(match[0], val);
+            }
+        }
+
+        // 3. 剥离外层中括号 [[ ... ]]
+        str = str.replace(/\[\[/g, "(").replace(/\]\]/g, ")").trim();
+
+        // 4. 原生骰子引擎计算通道：优先调用 Roll20 原生 d20.textchat.diceengine
+        const diceEngine = window.d20?.textchat?.diceengine;
+        if (diceEngine && typeof diceEngine.process === "function") {
+            try {
+                const result = await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error("原生骰子引擎求值超时")), 1500);
+                    try {
+                        diceEngine.process(str, (res) => {
+                            clearTimeout(timeout);
+                            const total = res?.total ?? (typeof res === "number" ? res : null);
+                            resolve(total);
+                        }, (err) => {
+                            clearTimeout(timeout);
+                            reject(err);
+                        });
+                    } catch (e) {
+                        clearTimeout(timeout);
+                        reject(e);
+                    }
+                });
+                if (result !== null && !isNaN(result)) {
+                    return Math.max(0, Math.round(result));
+                }
+            } catch (err) {
+                console.warn("[Roll20Bridge] 原生骰子引擎计算异常，使用安全回退:", err);
+            }
+        }
+
+        // 5. 原生受限数学运算兜底
+        try {
+            const sanitized = str.replace(/[^0-9+\-*/().%\s,]/g, "");
+            const evalFn = new Function("Math", `return (${sanitized});`);
+            const val = evalFn(Math);
+            if (!isNaN(val)) {
+                return Math.max(0, Math.round(val));
+            }
+        } catch (e) {
+            console.warn("[Roll20Bridge] 公式求值最终失败:", str, e);
+        }
+
+        return null;
+    }
 }

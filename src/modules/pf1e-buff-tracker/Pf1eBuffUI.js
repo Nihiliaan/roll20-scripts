@@ -333,11 +333,6 @@ export class Pf1eBuffUI {
             const buffs = await Pf1eBuffManager.getActiveBuffs(character);
             // 负面状态严格排在所有正面 Buff 之前
             activeItems = [...conditions, ...buffs];
-
-            // 3. 自动将当前最新的负面状态同步给棋子标记（纯本地视图同步，绝不添加数字）
-            if (token) {
-                await Pf1eBuffManager.syncTokenStatusmarkers(character, token);
-            }
         } else if (token) {
             activeItems = TokenBuffManager.getTokenBuffs(token).map(b => ({
                 name: b.name,

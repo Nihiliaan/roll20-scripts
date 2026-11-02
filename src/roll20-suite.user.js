@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.23
+// @version      0.9.24
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.23...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.24...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -205,6 +205,82 @@ class Roll20Bridge {
         }
         return false;
     }
+
+    /**
+     * 借用 Roll20 原生骰子与宏管道计算公式
+     * @param {string} formula 例如 "10", "@{level}", "10 + @{constitution_mod}", "[[1d4 + 1]]"
+     * @param {object} character 目标角色卡模型
+     * @returns {Promise<number|null>} 计算出的数值（非负整数轮数）
+     */
+    static async evalNativeFormula(formula, character = null) {
+        if (!formula && formula !== 0) return null;
+        let str = String(formula).trim();
+        if (!str) return null;
+
+        // 1. 若纯为数字，直接返回
+        if (!isNaN(Number(str))) {
+            return Math.max(0, Math.round(Number(str)));
+        }
+
+        // 2. 借用角色卡属性展开 @{attribute_name}
+        if (character && character.attribs) {
+            await this.ensureCharacterAttributes(character);
+            for (let depth = 0; depth < 5; depth++) {
+                const match = str.match(/@\{([^}]+)\}/);
+                if (!match) break;
+                const rawAttr = match[1].trim();
+                const cleanAttrName = rawAttr.replace(/^(selected|target)\|/i, "");
+                const attr = character.attribs.models.find(a => a.get("name") === cleanAttrName);
+                const val = attr ? String(attr.get("current") ?? 0) : "0";
+                str = str.replace(match[0], val);
+            }
+        }
+
+        // 3. 剥离外层中括号 [[ ... ]]
+        str = str.replace(/\[\[/g, "(").replace(/\]\]/g, ")").trim();
+
+        // 4. 原生骰子引擎计算通道：优先调用 Roll20 原生 d20.textchat.diceengine
+        const diceEngine = window.d20?.textchat?.diceengine;
+        if (diceEngine && typeof diceEngine.process === "function") {
+            try {
+                const result = await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error("原生骰子引擎求值超时")), 1500);
+                    try {
+                        diceEngine.process(str, (res) => {
+                            clearTimeout(timeout);
+                            const total = res?.total ?? (typeof res === "number" ? res : null);
+                            resolve(total);
+                        }, (err) => {
+                            clearTimeout(timeout);
+                            reject(err);
+                        });
+                    } catch (e) {
+                        clearTimeout(timeout);
+                        reject(e);
+                    }
+                });
+                if (result !== null && !isNaN(result)) {
+                    return Math.max(0, Math.round(result));
+                }
+            } catch (err) {
+                console.warn("[Roll20Bridge] 原生骰子引擎计算异常，使用安全回退:", err);
+            }
+        }
+
+        // 5. 原生受限数学运算兜底
+        try {
+            const sanitized = str.replace(/[^0-9+\-*/().%\s,]/g, "");
+            const evalFn = new Function("Math", `return (${sanitized});`);
+            const val = evalFn(Math);
+            if (!isNaN(val)) {
+                return Math.max(0, Math.round(val));
+            }
+        } catch (e) {
+            console.warn("[Roll20Bridge] 公式求值最终失败:", str, e);
+        }
+
+        return null;
+    }
 }
 
     // ==========================================
@@ -225,8 +301,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Bleed",
         roundsKey: "condition-Bleed_rounds",
         markerName: "Bleeding Out",
-        fallbackMarker: "bleeding-eye",
-        aliases: ["Bleeding Out", "Bleeding_Out", "Bleed", "bleeding-eye"],
+        fallbackMarker: "death-zone",
+        aliases: ["Bleeding Out", "Bleeding_Out", "Bleed", "death-zone"],
         description: "每轮开始受持续伤害，直至受DC 15医疗检定或治疗法术"
     },
     "blinded": {
@@ -238,7 +314,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Blinded_rounds",
         markerName: "Blinded",
         fallbackMarker: "bleeding-eye",
-        aliases: ["Blinded", "bleeding-eye"],
+        aliases: ["Blinded", "Blind", "bleeding-eye"],
         description: "AC -2，失去敏捷加值，察觉检定自动失败，全隐蔽(50%失手)"
     },
     "confused": {
@@ -260,9 +336,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Cowering",
         roundsKey: "condition-Cowering_rounds",
-        markerName: "screaming",
-        fallbackMarker: "screaming",
-        aliases: ["Cowering", "screaming"],
+        markerName: "Cowering",
+        fallbackMarker: "broken-skull",
+        aliases: ["Cowering", "broken-skull"],
         description: "极度恐惧冻结，AC -2，失去敏捷加值，无法采取任何动作"
     },
     "dazed": {
@@ -309,8 +385,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Deafened",
         roundsKey: "condition-Deafened_rounds",
         markerName: "Deafened",
-        fallbackMarker: "black-flag",
-        aliases: ["Deafened", "black-flag"],
+        fallbackMarker: "edge-crack",
+        aliases: ["Deafened", "edge-crack"],
         description: "先攻检定 -4，听力察觉自动失败，言语成分法术 20% 失败率"
     },
     "disabled": {
@@ -320,7 +396,7 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Disabled",
         roundsKey: "condition-Disabled_rounds",
-        markerName: "snail",
+        markerName: "Disabled",
         fallbackMarker: "snail",
         aliases: ["Disabled", "snail"],
         description: "生命恰为 0，每轮只能做单个移动或标动，做标动受 1 伤害转濒死"
@@ -369,8 +445,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Exhausted",
         roundsKey: "condition-Exhausted_rounds",
         markerName: "Exhausted",
-        fallbackMarker: "back-pain",
-        aliases: ["Exhausted", "back-pain"],
+        fallbackMarker: "broken-shield",
+        aliases: ["Exhausted", "broken-shield"],
         description: "移动半速，力量和敏捷受到 -6 减值，休息 1 小时转为疲乏"
     },
     "fascinated": {
@@ -381,8 +457,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Fascinated",
         roundsKey: "condition-Fascinated_rounds",
         markerName: "Charmed",
-        fallbackMarker: "aura",
-        aliases: ["Fascinated", "Charmed", "aura"],
+        fallbackMarker: "all-for-one",
+        aliases: ["Fascinated", "Charmed", "all-for-one"],
         description: "驻足注视目标，察觉等技能受到 -4 减值，受到潜在威胁解除"
     },
     "fatigued": {
@@ -392,9 +468,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Fatigued",
         roundsKey: "condition-Fatigued_rounds",
-        markerName: "back-pain",
-        fallbackMarker: "snail",
-        aliases: ["Fatigued", "back-pain", "snail"],
+        markerName: "Fatigued",
+        fallbackMarker: "back-pain",
+        aliases: ["Fatigued", "back-pain"],
         description: "无法奔跑或冲锋，力量和敏捷受到 -2 减值，休息 8 小时解除"
     },
     "flat_footed": {
@@ -416,9 +492,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Fear",
         roundsKey: "condition-Fear_rounds",
-        markerName: "Cause of Fear",
+        markerName: "Frightened",
         fallbackMarker: "screaming",
-        aliases: ["Cause of Fear", "Cause_of_Fear", "Frightened", "Fear", "screaming"],
+        aliases: ["Frightened", "Cause of Fear", "Cause_of_Fear", "Fear", "screaming"],
         description: "恐惧逃离源头，攻击检定/豁免/技能受到 -2 减值，无法自主接近威胁"
     },
     "grappled": {
@@ -440,9 +516,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Helpless",
         roundsKey: "condition-Helpless_rounds",
-        markerName: "padlock",
-        fallbackMarker: "padlock",
-        aliases: ["Helpless", "padlock"],
+        markerName: "Helpless",
+        fallbackMarker: "chained-heart",
+        aliases: ["Helpless", "chained-heart"],
         description: "完全无法防卫，敏捷视同为 0 (-5 AC)，近战受击可被政变"
     },
     "incorporeal": {
@@ -453,8 +529,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Incorporeal",
         roundsKey: "condition-Incorporeal_rounds",
         markerName: "Incorporeal",
-        fallbackMarker: "aura",
-        aliases: ["Incorporeal", "aura"],
+        fallbackMarker: "white-tower",
+        aliases: ["Incorporeal", "white-tower"],
         description: "无实体，免疫非魔法攻击，魔法武器伤害半额，可穿透实物"
     },
     "invisible": {
@@ -476,9 +552,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Nauseated",
         roundsKey: "condition-Nauseated_rounds",
-        markerName: "Poisoned",
+        markerName: "Nauseated",
         fallbackMarker: "chemical-bolt",
-        aliases: ["Nauseated", "Poisoned", "602-Poisoned", "chemical-bolt"],
+        aliases: ["Nauseated", "Nausea", "Sick", "chemical-bolt"],
         description: "极度胃部不适，每轮只能做单个移动动作，不可攻击或施法"
     },
     "panicked": {
@@ -488,9 +564,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: false, // CRB 核心状态
         attrKey: "custom_cond_panicked",
         roundsKey: "custom_cond_panicked_rounds",
-        markerName: "screaming",
-        fallbackMarker: "screaming",
-        aliases: ["Panicked", "screaming"],
+        markerName: "Panicked",
+        fallbackMarker: "fluffy-wing",
+        aliases: ["Panicked", "fluffy-wing"],
         description: "扔下持有物全速逃离危险，防御检定承受 -2 减值，被逼角落时陷入畏缩"
     },
     "paralyzed": {
@@ -501,8 +577,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Paralyzed",
         roundsKey: "condition-Paralyzed_rounds",
         markerName: "Paralyzed",
-        fallbackMarker: "padlock",
-        aliases: ["Paralyzed", "padlock"],
+        fallbackMarker: "pummeled",
+        aliases: ["Paralyzed", "pummeled"],
         description: "肌肉僵直，力量敏捷视同为 0，完全无助，无法移动或发声"
     },
     "petrified": {
@@ -513,8 +589,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Petrified",
         roundsKey: "condition-Petrified_rounds",
         markerName: "Petrified",
-        fallbackMarker: "interdiction",
-        aliases: ["Petrified", "interdiction"],
+        fallbackMarker: "frozen-orb",
+        aliases: ["Petrified", "frozen-orb", "interdiction"],
         description: "身躯化为石质，完全无助昏迷，硬度 8，具有伤害减免"
     },
     "pinned": {
@@ -524,9 +600,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Pinned",
         roundsKey: "condition-Pinned_rounds",
-        markerName: "grab",
-        fallbackMarker: "grab",
-        aliases: ["Pinned", "grab", "padlock"],
+        markerName: "Pinned",
+        fallbackMarker: "padlock",
+        aliases: ["Pinned", "padlock"],
         description: "紧紧受制无法移动，AC -4 并失去敏捷加值，无法施展躯体法术"
     },
     "prone": {
@@ -548,9 +624,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: false, // CRB 核心状态
         attrKey: "custom_cond_shaken",
         roundsKey: "custom_cond_shaken_rounds",
-        markerName: "Cause of Fear",
+        markerName: "Shaken",
         fallbackMarker: "broken-heart",
-        aliases: ["Shaken", "Cause of Fear", "Cause_of_Fear", "broken-heart"],
+        aliases: ["Shaken", "broken-heart"],
         description: "轻微恐惧，攻击检定、豁免检定与技能检定承受 -2 减值"
     },
     "sickened": {
@@ -560,9 +636,9 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Sickened",
         roundsKey: "condition-Sickened_rounds",
-        markerName: "Poisoned",
-        fallbackMarker: "snail",
-        aliases: ["Sickened", "Poisoned", "602-Poisoned", "snail"],
+        markerName: "Sickened",
+        fallbackMarker: "drink-me",
+        aliases: ["Sickened", "Sick", "drink-me", "three-leaves"],
         description: "身体不适恶心，攻击检定、武器伤害、豁免与技能检定承受 -2 减值"
     },
     "stable": {
@@ -573,8 +649,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Stable",
         roundsKey: "condition-Stable_rounds",
         markerName: "Stabilized",
-        fallbackMarker: "half-heart",
-        aliases: ["Stabilized", "Stable", "half-heart"],
+        fallbackMarker: "spanner",
+        aliases: ["Stabilized", "Stable", "spanner"],
         description: "濒死但伤势稳定，不再每轮流失生命，生命恢复正值前仍昏迷"
     },
     "staggered": {
@@ -585,8 +661,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Staggered",
         roundsKey: "condition-Staggered_rounds",
         markerName: "Staggered",
-        fallbackMarker: "snail",
-        aliases: ["Staggered", "snail"],
+        fallbackMarker: "stopwatch",
+        aliases: ["Staggered", "stopwatch"],
         description: "重创踉跄，每轮只能执行单个标动或移动动作，可做直觉动作"
     },
     "stunned": {
@@ -597,8 +673,8 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Stunned",
         roundsKey: "condition-Stunned_rounds",
         markerName: "Stunned",
-        fallbackMarker: "lightning-helix",
-        aliases: ["Stunned", "lightning-helix"],
+        fallbackMarker: "fist",
+        aliases: ["Stunned", "fist", "lightning-helix"],
         description: "掉落持有物，无法采取动作，AC -2 并失去敏捷加值"
     },
     "suffocating": {
@@ -648,7 +724,23 @@ class Pf1eConditionRegistry {
      */
     static find(keyOrName) {
         if (!keyOrName) return null;
-        const raw = String(keyOrName).split("::")[0].trim();
+        let rawKey = String(keyOrName).trim();
+
+        // 0. 尝试在当前战役 token_markers 中通过完整 tag 逆向获取自定义标记名称
+        if (window.Campaign) {
+            try {
+                const markers = JSON.parse(window.Campaign.get("token_markers") || "[]");
+                if (Array.isArray(markers)) {
+                    const cleanTag = rawKey.replace(/@\d+$/, "");
+                    const found = markers.find(m => m && (m.tag === rawKey || m.tag === cleanTag));
+                    if (found && found.name) {
+                        rawKey = found.name;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        const raw = rawKey.split("::")[0].trim();
         const lower = raw.toLowerCase();
         const norm = this.normalizeKey(raw);
 
@@ -789,7 +881,7 @@ class Pf1eConditionRegistry {
             "Spirit Guardians": "守護之靈", "Spirit_Guardians": "守護之靈",
             "DivineFavor": "神恩", "Stabilized": "傷勢穩定", "Unconcious": "昏迷",
             "Cause_of_Fear": "恐懼", "Cause of Fear": "恐懼",
-            "Bleeding_Out": "瀕死流血", "Bleeding Out": "瀕死流血",
+            "Bleeding_Out": "流血", "Bleeding Out": "流血",
             "Concentration": "專注", "Petrified": "石化",
             "Slayers_Prey": "獵手印記", "Slayers Prey": "獵手印記",
             "Warding_Bond": "守護之鏈", "Warding Bond": "守護之鏈",
@@ -863,6 +955,21 @@ class Pf1eBuffManager {
      * 脚本自主修改状态锁（为 true 时抑制外部属性监听器响应）
      */
     static isScriptMutating = false;
+
+    /**
+     * 声明式调和全局事务锁（防止多端事件回流震荡）
+     */
+    static isReconciling = false;
+
+    /**
+     * 待结算的棋子标记调和会话表 (Token ID -> { character, token, timestamp })
+     */
+    static pendingTokenReconciles = new Map();
+
+    /**
+     * 兜底定时器表
+     */
+    static tokenSafetyTimers = new Map();
 
     /**
      * 官方内置负面状态 (Conditions) 31 项白名单（精准匹配角色卡 UI，排除能量吸取与被纠缠联动派生的被缓慢）
@@ -968,10 +1075,48 @@ class Pf1eBuffManager {
 
         const handleAttributeMutation = async (attr, options) => {
             if (!attr) return;
-            // 忽略脚本自主更新或正在批量修改，彻底切断震荡回路
-            if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
+            // 忽略脚本自主更新、批量修改或当前处于调和事务中，彻底切断震荡回路
+            if (options?.byScript || Pf1eBuffManager.isScriptMutating || Pf1eBuffManager.isReconciling) return;
 
             const attrName = attr.get("name") || "";
+
+            // 0. 响应常规 repeating_buff2_*_enable_toggle 开启，自动根据预置公式初始化轮数
+            if (attrName.startsWith("repeating_buff2_") && attrName.endsWith("_enable_toggle")) {
+                const isToggledOn = Number(attr.get("current")) === 1;
+                if (isToggledOn) {
+                    const prefix = attrName.replace("_enable_toggle", "");
+                    const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+                    const curRounds = roundsAttr ? roundsAttr.get("current") : "";
+                    const isRoundsEmpty = curRounds === "" || curRounds === null || Number(curRounds) === 0;
+
+                    if (isRoundsEmpty) {
+                        const initRoundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
+                        const formula = initRoundsAttr ? initRoundsAttr.get("current") : "";
+                        if (formula) {
+                            const val = await Roll20Bridge.evalNativeFormula(formula, character);
+                            if (val !== null && !isNaN(val)) {
+                                console.log(`[Pf1eBuffManager] 角色卡开启 Buff (${prefix})，借用原生机制求值公式 [${formula}] = ${val}`);
+                                if (!roundsAttr) {
+                                    character.attribs.create({ name: `${prefix}_rounds`, current: val });
+                                } else {
+                                    roundsAttr.save({ current: val });
+                                }
+                            }
+                        }
+                    }
+                }
+                // 刷新代表该角色的先攻条徽章
+                const page = Roll20Bridge.getCurrentPage();
+                if (page && page.thegraphics) {
+                    page.thegraphics.each(g => {
+                        if (g.get("represents") === character.id) {
+                            Pf1eBuffUI.requestTokenRefresh(g.id);
+                        }
+                    });
+                }
+                return;
+            }
+
             // 仅对 condition- 开头的状态属性响应
             if (!attrName.startsWith("condition-")) return;
             // 忽略轮数属性本身的变动，仅关注开关值变动
@@ -979,8 +1124,8 @@ class Pf1eBuffManager {
 
             console.log(`[Pf1eBuffManager] 捕获到角色 ${character.get("name")} 的 Debuff 开关变动: ${attrName} = ${attr.get("current")}`);
 
-            // 1. 同步棋子标记 (单端管辖，仅修改本地 token 模型与 Jumpgate 渲染，不发网络通知)
-            await Pf1eBuffManager.syncTokenStatusmarkers(character);
+            // 1. 声明式调和棋子标记 (单向调和: character -> token)
+            await Pf1eBuffManager.reconcileConditions(character, null, { origin: "character" });
 
             // 2. 刷新代表该角色的先攻条徽章
             const page = Roll20Bridge.getCurrentPage();
@@ -1071,72 +1216,228 @@ class Pf1eBuffManager {
     }
 
     /**
-     * 将角色当前处于激活状态的负面效果同步到棋子标记 (单端管辖，尊重原生顺序，绝不颠倒重排)
+     * 声明式多端状态调和引擎 (Declarative Condition Reconciliation Engine)
+     * 遵循单向数据流与来源戳记准则，杜绝一切多端震荡与界面失焦。
+     * @param {object} character Character Backbone 模型
+     * @param {object} token Token Graphic Backbone 模型
+     * @param {object} options 调和选项 { origin: "token" | "character" }
      */
-    static async syncTokenStatusmarkers(character, token = null) {
-        if (!character) return;
-        const page = Roll20Bridge.getCurrentPage();
-        if (!page || !page.thegraphics) return;
+    static async reconcileConditions(character, token = null, options = {}) {
+        if (!character && !token) return;
+        if (this.isReconciling) return;
 
-        // 寻找所有代表此角色的 Token
-        const tokens = [];
-        if (token) {
-            tokens.push(token);
-        } else {
-            page.thegraphics.each(g => {
-                if (g.get("represents") === character.id) {
-                    tokens.push(g);
+        this.isReconciling = true;
+        try {
+            const origin = options.origin || "character";
+
+            // 1. 若变动来源于棋子 (origin: "token")
+            // 方案 A 会话生命周期感知：若标记栏处于打开状态，挂起调和，绝不修改角色卡与 DOM，保证选框永不失焦；
+            // 待用户操作完毕关闭标记栏时，立即 0 延迟原子执行调和结算！
+            if (origin === "token") {
+                if (!token || !character) return;
+
+                const isMarkerMenuOpen = !!document.querySelector(".markermenu");
+                if (isMarkerMenuOpen) {
+                    this.pendingTokenReconciles.set(token.id, { character, token, timestamp: Date.now() });
+                    console.log(`[Pf1eBuffManager] 标记栏处于活动会话中，挂起调和请求，等待面板关闭后结算 (Token ID: ${token.id})`);
+
+                    // 设置 5 秒防呆兜底定时器：若极端情况下未收到关闭事件，自动检查并安全结算
+                    if (this.tokenSafetyTimers.has(token.id)) {
+                        clearTimeout(this.tokenSafetyTimers.get(token.id));
+                    }
+                    const safetyTimer = setTimeout(() => {
+                        this.tokenSafetyTimers.delete(token.id);
+                        if (!document.querySelector(".markermenu")) {
+                            this.flushPendingTokenReconciles();
+                        }
+                    }, 5000);
+                    this.tokenSafetyTimers.set(token.id, safetyTimer);
+                    return;
                 }
+
+                // 标记栏未打开（宏调用、快捷键或外部调用），直接原子调和
+                await this._executeTokenReconciliation(character, token);
+                return;
+            }
+
+            // 2. 若变动来源于角色卡 (origin: "character")
+            // 铁律：角色卡当前状态即为真理源，仅单向调和棋子标记！
+            if (origin === "character") {
+                if (!character) return;
+                const page = Roll20Bridge.getCurrentPage();
+                if (!page || !page.thegraphics) return;
+
+                const tokens = [];
+                if (token) {
+                    tokens.push(token);
+                } else {
+                    page.thegraphics.each(g => {
+                        if (g.get("represents") === character.id) {
+                            tokens.push(g);
+                        }
+                    });
+                }
+
+                if (tokens.length === 0) return;
+
+                // 计算当前应该挂载的纯净 Tag 集合
+                const activeConditions = await this.getActiveConditions(character);
+                const desiredTags = new Set();
+                for (const cond of activeConditions) {
+                    const tag = Pf1eConditionRegistry.resolveMarkerTag(cond.key);
+                    if (tag) desiredTags.add(tag);
+                }
+
+                for (const t of tokens) {
+                    const currentStr = t.get("statusmarkers") || "";
+                    const currentList = currentStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+
+                    // 保留原有列表中未被解除的标记与非托管自定义标记，完全维持原有自然顺序
+                    const remainingDesired = new Set(desiredTags);
+                    const preservedList = [];
+                    for (const item of currentList) {
+                        const def = Pf1eConditionRegistry.find(item);
+                        if (!def) {
+                            preservedList.push(item);
+                        } else {
+                            const resolvedTag = Pf1eConditionRegistry.resolveMarkerTag(def.attrKey || def.id);
+                            if (remainingDesired.has(item) || remainingDesired.has(resolvedTag)) {
+                                preservedList.push(item);
+                                remainingDesired.delete(item);
+                                remainingDesired.delete(resolvedTag);
+                            }
+                        }
+                    }
+
+                    for (const tag of remainingDesired) {
+                        preservedList.push(tag);
+                    }
+
+                    // 纯集合差异比对：若无差异，绝不触碰棋子，杜绝任何多余重写与弹窗失焦
+                    const oldSet = new Set(currentList);
+                    const newSet = new Set(preservedList);
+                    const isIdentical = oldSet.size === newSet.size && [...oldSet].every(x => newSet.has(x));
+
+                    if (!isIdentical) {
+                        const newStr = preservedList.join(",");
+                        console.log(`[Pf1eBuffManager] 调和棋子标记: ${currentStr} -> ${newStr}`);
+                        t.set({ statusmarkers: newStr }, { byScript: true });
+                    }
+                }
+            }
+        } finally {
+            queueMicrotask(() => {
+                this.isReconciling = false;
             });
         }
+    }
 
-        if (tokens.length === 0) return;
+    /**
+     * 结算所有挂起的棋子调和会话（0 延迟原子执行）
+     */
+    static async flushPendingTokenReconciles() {
+        if (this.pendingTokenReconciles.size === 0) return;
+        const entries = Array.from(this.pendingTokenReconciles.values());
+        this.pendingTokenReconciles.clear();
 
-        // 计算当前应该挂载的纯净 Tag 集合
-        const activeConditions = await this.getActiveConditions(character);
-        const desiredTags = new Set();
-        for (const cond of activeConditions) {
-            const tag = Pf1eConditionRegistry.resolveMarkerTag(cond.key);
-            if (tag) desiredTags.add(tag);
+        for (const item of entries) {
+            try {
+                if (this.tokenSafetyTimers.has(item.token.id)) {
+                    clearTimeout(this.tokenSafetyTimers.get(item.token.id));
+                    this.tokenSafetyTimers.delete(item.token.id);
+                }
+                await this._executeTokenReconciliation(item.character, item.token);
+            } catch (err) {
+                console.error("[Pf1eBuffManager] 执行会话结算调和失败:", err);
+            }
         }
+    }
 
-        for (const t of tokens) {
-            const currentStr = t.get("statusmarkers") || "";
-            const currentList = currentStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+    /**
+     * 棋子标记防抖结算后的底层原子调和
+     * 仅单向将棋子上的标记变更落实到角色卡属性，绝对禁止反向修改棋子
+     */
+    static async _executeTokenReconciliation(character, token) {
+        if (!character || !token) return;
+        this.isReconciling = true;
+        try {
+            await Roll20Bridge.ensureCharacterAttributes(character);
 
-            // 保留原有列表中未被解除的标记与非托管自定义标记，完全维持原有自然顺序
-            const preservedList = [];
-            for (const item of currentList) {
-                const def = Pf1eConditionRegistry.find(item);
-                if (!def) {
-                    // 非托管的其它标记，原样保留在原位
-                    preservedList.push(item);
+            const currentMarkersStr = token.get("statusmarkers") || "";
+            const currentTags = currentMarkersStr
+                .split(",")
+                .map(s => s.trim().replace(/@\d+$/, ""))
+                .filter(Boolean);
+
+            // 解析棋子上所有已挂载的 tags 对应的负面状态属性 Key
+            const desiredCondAttrKeys = new Set();
+            for (const tag of currentTags) {
+                const def = Pf1eConditionRegistry.find(tag);
+                if (def && def.attrKey) {
+                    desiredCondAttrKeys.add(def.attrKey);
+                }
+            }
+
+            let characterChanged = false;
+
+            // 遍历系统所有支持的 34 项状态注册表，进行 Diff 调和
+            for (const def of Object.values(PF1E_CONDITIONS)) {
+                const attrKey = def.attrKey;
+                if (!attrKey) continue;
+
+                const attr = character.attribs.models.find(a => a.get("name") === attrKey);
+                const isCurrentlyActive = attr && attr.get("current") !== "0" && attr.get("current") !== 0 && attr.get("current") !== "" && attr.get("current") !== null && attr.get("current") !== undefined && attr.get("current") !== false;
+                const shouldBeActive = desiredCondAttrKeys.has(attrKey);
+
+                // 状态一致，无差异跳过
+                if (isCurrentlyActive === shouldBeActive) continue;
+
+                characterChanged = true;
+                if (shouldBeActive) {
+                    console.log(`[Pf1eBuffManager] 防抖结算调和: 激活 ${character.get("name")} 的 ${def.nameZh} (${attrKey})`);
+                    const defaultVal = attrKey === "condition-Blinded" ? "2" : (attrKey === "condition-Prone" ? "4" : "1");
+                    if (!attr) {
+                        character.attribs.create({ name: attrKey, current: defaultVal });
+                    } else {
+                        attr.save({ current: defaultVal }, { byScript: true });
+                    }
+                    // 补齐默认正计轮 (-1)
+                    const roundsKey = `${attrKey}_rounds`;
+                    let roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+                    if (!roundsAttr) {
+                        character.attribs.create({ name: roundsKey, current: -1 });
+                    } else {
+                        roundsAttr.save({ current: -1 }, { byScript: true });
+                    }
                 } else {
-                    // 是托管状态：仅当它依然处于激活状态时才保留原位
-                    const resolvedTag = Pf1eConditionRegistry.resolveMarkerTag(def.attrKey || def.id);
-                    if (desiredTags.has(item) || desiredTags.has(resolvedTag)) {
-                        preservedList.push(item);
-                        desiredTags.delete(item);
-                        desiredTags.delete(resolvedTag);
+                    console.log(`[Pf1eBuffManager] 防抖结算调和: 解除 ${character.get("name")} 的 ${def.nameZh} (${attrKey})`);
+                    if (attr) {
+                        attr.save({ current: "0" }, { byScript: true });
+                    }
+                    const roundsKey = `${attrKey}_rounds`;
+                    const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+                    if (roundsAttr) {
+                        roundsAttr.destroy();
                     }
                 }
             }
 
-            // 对新激活但原列表中尚不存在的标记，直接追加在末尾
-            for (const tag of desiredTags) {
-                preservedList.push(tag);
+            // 仅刷新下游纯展示视图（先攻条徽章），棋子绝不碰触
+            if (characterChanged) {
+                Pf1eBuffUI.requestTokenRefresh(token.id);
             }
-
-            // 纯集合比对：若元素完全一致，绝对不触碰棋子，杜绝任何多余重写与弹窗失焦
-            const oldSet = new Set(currentList);
-            const newSet = new Set(preservedList);
-            const isIdentical = oldSet.size === newSet.size && [...oldSet].every(x => newSet.has(x));
-
-            if (!isIdentical) {
-                const newStr = preservedList.join(",");
-                t.set({ statusmarkers: newStr }, { byScript: true });
-            }
+        } finally {
+            queueMicrotask(() => {
+                this.isReconciling = false;
+            });
         }
+    }
+
+    /**
+     * 将角色当前处于激活状态的负面效果同步到棋子标记 (单端管辖，尊重原生顺序，绝不颠倒重排)
+     */
+    static async syncTokenStatusmarkers(character, token = null) {
+        return this.reconcileConditions(character, token, { origin: "character" });
     }
     static generateStandardRowId() {
         if (typeof window.generateUUID === "function") {
@@ -1192,11 +1493,13 @@ class Pf1eBuffManager {
 
             const toggleAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_enable_toggle`);
             const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+            const initRoundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
             const buffTypeAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_bufftype`);
 
             const name = nameAttr.get("current") || "未命名Buff";
             const enabled = toggleAttr ? Number(toggleAttr.get("current")) === 1 : false;
             const rounds = roundsAttr && roundsAttr.get("current") !== "" ? Number(roundsAttr.get("current")) : null;
+            const initRounds = initRoundsAttr && initRoundsAttr.get("current") !== "" ? String(initRoundsAttr.get("current")) : null;
             const buffType = buffTypeAttr ? buffTypeAttr.get("current") : "spell";
 
             // 提取该原生 Buff 条目下所有存储的扩展加值与修饰细目字典 (extraAttrs)
@@ -1210,6 +1513,7 @@ class Pf1eBuffManager {
                         subKey !== "name" &&
                         subKey !== "enable_toggle" &&
                         subKey !== "rounds" &&
+                        subKey !== "init_rounds" &&
                         subKey !== "tabcat" &&
                         subKey !== "tabcat2" &&
                         subKey !== "row_id"
@@ -1228,10 +1532,12 @@ class Pf1eBuffManager {
                 name,
                 enabled,
                 rounds: (rounds !== null && !isNaN(rounds)) ? rounds : null,
+                initRounds: initRounds || null,
                 buffType,
                 extraAttrs: Object.keys(extraAttrs).length > 0 ? extraAttrs : null,
                 toggleAttr: toggleAttr || null,
-                roundsAttr: roundsAttr || null
+                roundsAttr: roundsAttr || null,
+                initRoundsAttr: initRoundsAttr || null
             });
         }
 
@@ -1244,10 +1550,11 @@ class Pf1eBuffManager {
      * 2. 若无同名 Buff，则自动新建一行符合官方标准规范的原生 Buff 并激活。
      * @param {object} character Character 模型
      * @param {string} buffName Buff 名称
-     * @param {number|null} rounds 持续轮数
+     * @param {number|null} rounds 持续轮数 (若为 null 且有预置公式，将借用原生求值自动计算)
      * @param {object|null} extraAttrs 额外的细目加值字典（如 b1_bonus, b1_val 等）
+     * @param {string|null} initRounds 预置初始轮数或公式 (如 "10", "@{level}*10")
      */
-    static async applyOrRefreshBuff(character, buffName, rounds = null, extraAttrs = null) {
+    static async applyOrRefreshBuff(character, buffName, rounds = null, extraAttrs = null, initRounds = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -1276,12 +1583,32 @@ class Pf1eBuffManager {
             // 补全原生必需标签，防止角色卡报错
             this.ensureNativeRequiredAttrs(character, prefix, rowId);
 
-            let roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
-            if (rounds !== null && !isNaN(rounds)) {
-                if (!roundsAttr) {
-                    roundsAttr = character.attribs.create({ name: `${prefix}_rounds`, current: Number(rounds), max: Number(rounds) });
+            // 更新或保存预置初始轮数/公式
+            if (initRounds !== null && initRounds !== undefined) {
+                let initAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
+                if (!initAttr) {
+                    if (initRounds !== "") character.attribs.create({ name: `${prefix}_init_rounds`, current: initRounds });
                 } else {
-                    roundsAttr.save({ current: Number(rounds) });
+                    initAttr.save({ current: initRounds });
+                }
+            }
+
+            let effectiveRounds = rounds;
+            if (effectiveRounds === null || isNaN(effectiveRounds)) {
+                // 借用原生机制求值预置公式
+                const targetFormula = initRounds || (character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`)?.get("current"));
+                if (targetFormula) {
+                    const evalVal = await Roll20Bridge.evalNativeFormula(targetFormula, character);
+                    if (evalVal !== null && !isNaN(evalVal)) effectiveRounds = evalVal;
+                }
+            }
+
+            let roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+            if (effectiveRounds !== null && !isNaN(effectiveRounds)) {
+                if (!roundsAttr) {
+                    roundsAttr = character.attribs.create({ name: `${prefix}_rounds`, current: Number(effectiveRounds), max: Number(effectiveRounds) });
+                } else {
+                    roundsAttr.save({ current: Number(effectiveRounds) });
                 }
             } else if (roundsAttr) {
                 // 设为常驻
@@ -1291,7 +1618,7 @@ class Pf1eBuffManager {
             // 更新细目属性
             if (extraAttrs && typeof extraAttrs === "object") {
                 for (const [k, v] of Object.entries(extraAttrs)) {
-                    if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "row_id") continue;
+                    if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "init_rounds" || k === "row_id") continue;
                     const attrFullName = `${prefix}_${k}`;
                     let subAttr = character.attribs.models.find(a => a.get("name") === attrFullName);
                     if (!subAttr) {
@@ -1302,11 +1629,11 @@ class Pf1eBuffManager {
                 }
             }
 
-            console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 激活并刷新已有同名 Buff [${cleanName}], 轮数: ${rounds}`);
-            return { rowId, prefix, name: cleanName, rounds, isRefreshed: true };
+            console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 激活并刷新已有同名 Buff [${cleanName}], 轮数: ${effectiveRounds}`);
+            return { rowId, prefix, name: cleanName, rounds: effectiveRounds, isRefreshed: true };
         } else {
             // 不存在同名 Buff，新增一行
-            const newBuff = await this.addBuff(character, cleanName, rounds, extraAttrs);
+            const newBuff = await this.addBuff(character, cleanName, rounds, extraAttrs, initRounds);
             return { ...newBuff, isRefreshed: false };
         }
     }
@@ -1314,7 +1641,7 @@ class Pf1eBuffManager {
     /**
      * 为角色卡新增一个原生 Buff 行并激活
      */
-    static async addBuff(character, buffName, rounds = null, extraAttrs = null) {
+    static async addBuff(character, buffName, rounds = null, extraAttrs = null, initRounds = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -1333,25 +1660,36 @@ class Pf1eBuffManager {
         character.attribs.create({ name: `${prefix}_description-show`, current: 1 });
         character.attribs.create({ name: `${prefix}_row_id`, current: rowId.toLowerCase() });
 
+        // 保存初始预置轮数/公式
+        if (initRounds !== null && initRounds !== undefined && initRounds !== "") {
+            character.attribs.create({ name: `${prefix}_init_rounds`, current: initRounds });
+        }
+
+        let effectiveRounds = rounds;
+        if ((effectiveRounds === null || isNaN(effectiveRounds)) && initRounds) {
+            const evalVal = await Roll20Bridge.evalNativeFormula(initRounds, character);
+            if (evalVal !== null && !isNaN(evalVal)) effectiveRounds = evalVal;
+        }
+
         let roundsAttr = null;
-        if (rounds !== null && !isNaN(rounds) && rounds > 0) {
+        if (effectiveRounds !== null && !isNaN(effectiveRounds) && effectiveRounds > 0) {
             roundsAttr = character.attribs.create({
                 name: `${prefix}_rounds`,
-                current: Number(rounds),
-                max: Number(rounds)
+                current: Number(effectiveRounds),
+                max: Number(effectiveRounds)
             });
         }
 
         // 写入细目属性
         if (extraAttrs && typeof extraAttrs === "object") {
             for (const [k, v] of Object.entries(extraAttrs)) {
-                if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "bufftype" || k === "tabcat" || k === "tabcat2" || k === "row_id") continue;
+                if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "init_rounds" || k === "bufftype" || k === "tabcat" || k === "tabcat2" || k === "row_id") continue;
                 character.attribs.create({ name: `${prefix}_${k}`, current: v });
             }
         }
 
-        console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增原生规范 Buff [${cleanName}], 轮数: ${rounds}`);
-        return { rowId, prefix, name: cleanName, rounds, toggleAttr, roundsAttr };
+        console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增原生规范 Buff [${cleanName}], 轮数: ${effectiveRounds}`);
+        return { rowId, prefix, name: cleanName, rounds: effectiveRounds, toggleAttr, roundsAttr };
     }
 
     /**
@@ -1395,6 +1733,35 @@ class Pf1eBuffManager {
             toggleAttr = character.attribs.create({ name: `${targetPrefix}_enable_toggle`, current: val });
         } else {
             toggleAttr.save({ current: val });
+        }
+
+        // 若开启，检查是否需自动根据预置公式初始化轮数
+        if (enable) {
+            const roundsAttr = character.attribs.models.find(a => {
+                const n = a.get("name") || "";
+                return n === `${targetPrefix}_rounds` || n.toLowerCase() === `${lowerPrefix}_rounds`;
+            });
+            const curVal = roundsAttr ? roundsAttr.get("current") : "";
+            const isRoundsEmpty = curVal === "" || curVal === null || Number(curVal) === 0;
+
+            if (isRoundsEmpty) {
+                const initRoundsAttr = character.attribs.models.find(a => {
+                    const n = a.get("name") || "";
+                    return n === `${targetPrefix}_init_rounds` || n.toLowerCase() === `${lowerPrefix}_init_rounds`;
+                });
+                const formula = initRoundsAttr ? initRoundsAttr.get("current") : "";
+                if (formula) {
+                    const val = await Roll20Bridge.evalNativeFormula(formula, character);
+                    if (val !== null && !isNaN(val)) {
+                        console.log(`[Pf1eBuffManager] 启用 Buff (${rowId})，借用原生求值公式 [${formula}] = ${val}`);
+                        if (!roundsAttr) {
+                            character.attribs.create({ name: `${targetPrefix}_rounds`, current: val });
+                        } else {
+                            roundsAttr.save({ current: val });
+                        }
+                    }
+                }
+            }
         }
 
         // 若关停，同步将轮数重置清零，防止僵尸轮数残留
@@ -1476,7 +1843,7 @@ class Pf1eBuffManager {
     /**
      * 更新指定角色卡上的单行 Buff 数据（名称、轮数与细目扩展加值字典）
      */
-    static async updateBuffRow(character, rowId, name, rounds, extraAttrs) {
+    static async updateBuffRow(character, rowId, name, rounds, extraAttrs, initRounds = null) {
         if (!character || !rowId) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -1500,13 +1867,24 @@ class Pf1eBuffManager {
             roundsAttr.save({ current: roundsVal });
         }
 
-        // 3. 补全原生必需属性
+        // 3. 更新预置初始轮数/公式
+        if (initRounds !== null && initRounds !== undefined) {
+            const initKey = `${prefix}_init_rounds`;
+            let initAttr = character.attribs.models.find(a => a.get("name") === initKey);
+            if (!initAttr) {
+                if (initRounds !== "") character.attribs.create({ name: initKey, current: initRounds });
+            } else {
+                initAttr.save({ current: initRounds });
+            }
+        }
+
+        // 4. 补全原生必需属性
         this.ensureNativeRequiredAttrs(character, prefix, rowId);
 
-        // 4. 更新细目加值字典 (extraAttrs)
+        // 5. 更新细目加值字典 (extraAttrs)
         if (extraAttrs && typeof extraAttrs === "object") {
             // 清理不在新 extraAttrs 中的旧扩展字段
-            const preservedKeys = new Set(["name", "enable_toggle", "rounds", "tabcat", "tabcat2", "row_id", "bufftype"]);
+            const preservedKeys = new Set(["name", "enable_toggle", "rounds", "init_rounds", "tabcat", "tabcat2", "row_id", "bufftype"]);
             for (const attr of [...character.attribs.models]) {
                 const attrName = attr.get("name") || "";
                 if (attrName.startsWith(prefixWithUnderscore)) {
@@ -1781,6 +2159,7 @@ class SuiteConfigStore {
                                 type: "buff",
                                 name: native.name,
                                 rounds: native.rounds,
+                                initRounds: native.initRounds || null,
                                 extraAttrs: native.extraAttrs || null
                             });
                         }
@@ -1803,6 +2182,7 @@ class SuiteConfigStore {
                         type: "buff",
                         name: b.name,
                         rounds: b.rounds,
+                        initRounds: b.initRounds || null,
                         extraAttrs: b.extraAttrs || null
                     });
                 }
@@ -1880,7 +2260,7 @@ class SuiteConfigStore {
     /**
      * 原子新增一个 Buff 到数据库角色卡
      */
-    static async addBuffToDatabase(name, rounds = null, extraAttrs = null) {
+    static async addBuffToDatabase(name, rounds = null, extraAttrs = null, initRounds = null) {
         let dbChar = this.findDatabaseCharacter();
         if (!dbChar && this.isGM()) {
             dbChar = await this.createDatabaseCharacter();
@@ -1890,23 +2270,23 @@ class SuiteConfigStore {
         await Roll20Bridge.ensureCharacterAttributes(dbChar);
 
         const rowId = window.generateUUID ? window.generateUUID() : ("-R20" + Math.random().toString(36).substr(2, 16));
-        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs);
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
 
-        console.log("[SuiteConfigStore] 原子创建原生 Buff [" + name + "] (rowId: " + rowId + ")");
+        console.log("[SuiteConfigStore] 原子创建原生 Buff [" + name + "] (rowId: " + rowId + ", initRounds: " + initRounds + ")");
         return rowId;
     }
 
     /**
      * 原子更新数据库角色卡上的指定 Buff
      */
-    static async updateBuffInDatabase(rowId, name, rounds = null, extraAttrs = null) {
+    static async updateBuffInDatabase(rowId, name, rounds = null, extraAttrs = null, initRounds = null) {
         const dbChar = this.findDatabaseCharacter();
         if (!dbChar || !rowId) return false;
 
         await Roll20Bridge.ensureCharacterAttributes(dbChar);
-        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs);
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
 
-        console.log("[SuiteConfigStore] 原子更新原生 Buff [" + name + "] (rowId: " + rowId + ")");
+        console.log("[SuiteConfigStore] 原子更新原生 Buff [" + name + "] (rowId: " + rowId + ", initRounds: " + initRounds + ")");
         return true;
     }
 
@@ -1953,7 +2333,7 @@ class SuiteConfigStore {
     /**
      * 将一条 Buff 写入原生 repeating_buff2_<rowId> 属性集
      */
-    static async writeNativeBuffRow(character, rowId, name, rounds, extraAttrs) {
+    static async writeNativeBuffRow(character, rowId, name, rounds, extraAttrs, initRounds = null) {
         if (!character || !rowId) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -1963,6 +2343,7 @@ class SuiteConfigStore {
             { name: prefix + "_enable_toggle", current: 0 },
             { name: prefix + "_tabcat2", current: "1" },
             { name: prefix + "_rounds", current: (rounds !== null && rounds !== undefined && rounds !== "") ? rounds : "" },
+            { name: prefix + "_init_rounds", current: (initRounds !== null && initRounds !== undefined) ? initRounds : "" },
             { name: prefix + "_bufftype", current: (extraAttrs && extraAttrs.bufftype) ? extraAttrs.bufftype : "spell" },
             { name: prefix + "_tabcat", current: (extraAttrs && extraAttrs.bufftype) ? extraAttrs.bufftype : "spell" },
             { name: prefix + "_row_id", current: rowId.toLowerCase() },
@@ -1971,7 +2352,7 @@ class SuiteConfigStore {
 
         if (extraAttrs && typeof extraAttrs === "object") {
             for (const [key, val] of Object.entries(extraAttrs)) {
-                if (key !== "name" && key !== "enable_toggle" && key !== "rounds" && key !== "bufftype" && key !== "tabcat") {
+                if (key !== "name" && key !== "enable_toggle" && key !== "rounds" && key !== "init_rounds" && key !== "bufftype" && key !== "tabcat") {
                     attrs.push({ name: prefix + "_" + key, current: val });
                 }
             }
@@ -2010,6 +2391,7 @@ class SuiteConfigStore {
                         type: "buff",
                         name: b.name + " (" + char.get("name") + ")",
                         rounds: b.rounds,
+                        initRounds: b.initRounds || null,
                         extraAttrs: b.extraAttrs || null
                     });
                 });
@@ -2715,11 +3097,6 @@ class Pf1eBuffUI {
             const buffs = await Pf1eBuffManager.getActiveBuffs(character);
             // 负面状态严格排在所有正面 Buff 之前
             activeItems = [...conditions, ...buffs];
-
-            // 3. 自动将当前最新的负面状态同步给棋子标记（纯本地视图同步，绝不添加数字）
-            if (token) {
-                await Pf1eBuffManager.syncTokenStatusmarkers(character, token);
-            }
         } else if (token) {
             activeItems = TokenBuffManager.getTokenBuffs(token).map(b => ({
                 name: b.name,
@@ -3051,39 +3428,14 @@ class CanvasMarkerHoverObserver {
                 const prevKnown = tokenLastStatusMarkers.get(t.id) ?? t.previous("statusmarkers") ?? "";
                 tokenLastStatusMarkers.set(t.id, newSM || "");
 
-                // 若为脚本自主同步，彻底静音跳过，防止回路震荡
-                if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
+                // 若为脚本自主同步或正处于调和事务中，彻底静音跳过，防止回路震荡
+                if (options?.byScript || Pf1eBuffManager.isScriptMutating || Pf1eBuffManager.isReconciling) return;
 
                 const character = Roll20Bridge.getCharacterByToken(t);
                 if (!character) return;
 
-                const oldTags = new Set(prevKnown.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
-                const newTags = new Set((newSM || "").split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean));
-
-                // 1. 查找新增的 tags (玩家手动在棋子上点击添加标记)
-                for (const tag of newTags) {
-                    if (!oldTags.has(tag)) {
-                        const def = Pf1eConditionRegistry.find(tag);
-                        if (def) {
-                            console.log(`[CanvasMarkerHoverObserver] 检测到棋子新增标记 [${tag}]，反向激活角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1, { skipTokenSync: true });
-                        }
-                    }
-                }
-
-                // 2. 查找移除的 tags (玩家手动在棋子上点击移除标记)
-                for (const tag of oldTags) {
-                    if (!newTags.has(tag)) {
-                        const def = Pf1eConditionRegistry.find(tag);
-                        if (def) {
-                            console.log(`[CanvasMarkerHoverObserver] 检测到棋子移除标记 [${tag}]，反向解除角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id, { skipTokenSync: true });
-                        }
-                    }
-                }
-
-                // 刷新先攻栏对应徽章
-                Pf1eBuffUI.requestTokenRefresh(t.id);
+                // 声明式单向调和：由棋子驱动角色卡，绝对禁止反向修改棋子，杜绝选框失焦
+                await Pf1eBuffManager.reconcileConditions(character, t, { origin: "token" });
             });
         };
 
@@ -3223,8 +3575,9 @@ class CanvasMarkerHoverObserver {
             }
         }, true);
 
-        // 2. 观察 DOM 变化，当 .markermenu 展开时一次性批量清洗全部图标 title
+        // 2. 观察 DOM 变化，当 .markermenu 展开时清洗 title，关闭时立即触发 0 延迟原子调和
         const menuObserver = new MutationObserver((mutations) => {
+            let menuRemoved = false;
             for (const m of mutations) {
                 for (const node of m.addedNodes) {
                     if (node.nodeType !== Node.ELEMENT_NODE) continue;
@@ -3233,10 +3586,35 @@ class CanvasMarkerHoverObserver {
                         items.forEach(enhanceItem);
                     }
                 }
+                for (const node of m.removedNodes) {
+                    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+                    if (node.classList?.contains("markermenu") || node.querySelector?.(".markermenu")) {
+                        menuRemoved = true;
+                    }
+                }
+            }
+
+            if (menuRemoved) {
+                // 检查当前 DOM 树是否已经没有打开的 .markermenu
+                if (!document.querySelector(".markermenu")) {
+                    console.log("[CanvasMarkerHoverObserver] 检测到标记菜单关闭，立即触发挂起的调和会话");
+                    Pf1eBuffManager.flushPendingTokenReconciles();
+                }
             }
         });
 
         menuObserver.observe(document.body, { childList: true, subtree: true });
+
+        // 3. 点击外部区域兜底：当在标记菜单之外点击画布时，排队微任务检查关闭并结算
+        document.addEventListener("pointerdown", (e) => {
+            if (!e.target?.closest?.(".markermenu")) {
+                requestAnimationFrame(() => {
+                    if (!document.querySelector(".markermenu") && Pf1eBuffManager.pendingTokenReconciles.size > 0) {
+                        Pf1eBuffManager.flushPendingTokenReconciles();
+                    }
+                });
+            }
+        }, true);
 
         // 对页面当前已存在的 markermenu 图标立即执行一次清洗
         document.querySelectorAll(".markermenu .statusicon, .markermenu div[data-status-id]").forEach(enhanceItem);
@@ -3244,7 +3622,260 @@ class CanvasMarkerHoverObserver {
 }
 
     // ==========================================
-    // 9. BuffPanelStyles (面板静态 CSS 样式)
+    // 9. CharacterSheetBuffEnhancer (官方人物卡 Buff 预置初始轮数注入增强器)
+    // ==========================================
+/**
+ * Roll20 Suite - 官方人物卡 Buff 增强注入器
+ * 负责在官方人物卡 Buff 列表中动态注入“预置初始轮数/公式”输入框，
+ * 采用原生“Buff 計算式”的原汁原味 HTML 模板结构，并与 Roll20 底层 Backbone 属性实现双向绑定。
+ */
+class CharacterSheetBuffEnhancer {
+    static isInitialized = false;
+
+    /**
+     * 全局初始化
+     */
+    static init() {
+        if (this.isInitialized) return;
+        this.isInitialized = true;
+
+        console.log("[CharacterSheetBuffEnhancer] 启动官方人物卡 Buff 增强注入器...");
+
+        // 1. 扫描当前已有的人物卡弹窗
+        this.scanAllDialogs();
+
+        // 2. 监听后续打开的人物卡弹窗
+        const observer = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                for (const node of m.addedNodes) {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        if (node.matches?.(".characterdialog, .ui-dialog") || node.querySelector?.(".characterdialog")) {
+                            this.scanAllDialogs();
+                        }
+                    }
+                }
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // 3. 辅助轮询扫描（低频 1.5s），确保异步 iframe 与动态 tab 切换被 100% 捕获
+        setInterval(() => {
+            this.scanAllDialogs();
+        }, 1500);
+    }
+
+    /**
+     * 扫描所有当前打开的人物卡对话框
+     */
+    static scanAllDialogs() {
+        const dialogEls = document.querySelectorAll(".characterdialog, .ui-dialog");
+        dialogEls.forEach(el => this.enhanceDialog(el));
+    }
+
+    /**
+     * 对单个对话框进行增强
+     */
+    static enhanceDialog(dialogEl) {
+        if (!dialogEl) return;
+
+        // 获取对应的 Character Backbone Model
+        const character = this.findCharacterFromDialog(dialogEl);
+        if (!character) return;
+
+        // 处理直接嵌入的 DOM
+        this.enhanceContainer(dialogEl, character);
+
+        // 如果人物卡内部有 iframe，深入 iframe 内部增强
+        const iframes = dialogEl.querySelectorAll("iframe");
+        iframes.forEach(iframe => {
+            try {
+                const doc = iframe.contentDocument || iframe.contentWindow?.document;
+                if (doc && doc.body) {
+                    this.enhanceContainer(doc.body, character);
+                }
+            } catch (e) {
+                // 跨域或安全受限忽略
+            }
+        });
+    }
+
+    /**
+     * 从对话框元素中定位 Character Backbone Model
+     */
+    static findCharacterFromDialog(dialogEl) {
+        if (!window.Campaign || !window.Campaign.characters) return null;
+
+        // 1. 尝试从 dataset 中读取 characterid
+        let charId = dialogEl.getAttribute("data-characterid") || 
+                     dialogEl.querySelector("[data-characterid]")?.getAttribute("data-characterid");
+
+        // 2. 尝试从 jQuery data 中获取
+        if (!charId && window.$) {
+            try {
+                const charObj = window.$(dialogEl).data("character");
+                if (charObj && charObj.id) return charObj;
+            } catch (e) {}
+        }
+
+        // 3. 尝试从对话框 ID 或类名解析 (如 #character-123456)
+        if (!charId) {
+            const idAttr = dialogEl.id || "";
+            const match = idAttr.match(/character-([a-zA-Z0-9_-]+)/);
+            if (match) charId = match[1];
+        }
+
+        if (charId) {
+            return window.Campaign.characters.get(charId);
+        }
+
+        return null;
+    }
+
+    /**
+     * 在人物卡容器内寻找 repeating_buff2 重复列表并注入输入框
+     */
+    static enhanceContainer(containerEl, character) {
+        // 查找所有 repeating_buff2 与 repeating_buff 的容器
+        const repContainers = containerEl.querySelectorAll(
+            'div.repcontainer[data-groupname="repeating_buff2"], div.repcontainer[data-groupname="repeating_buff"]'
+        );
+
+        repContainers.forEach(repContainer => {
+            const groupName = repContainer.getAttribute("data-groupname") || "repeating_buff2";
+            const repItems = repContainer.querySelectorAll("div.repitem");
+
+            repItems.forEach(item => {
+                this.enhanceRepItem(item, character, groupName);
+            });
+
+            // 监听该重复容器内动态新增/删除的行
+            if (!repContainer._r20SuiteObserved) {
+                repContainer._r20SuiteObserved = true;
+                const itemObserver = new MutationObserver((mutations) => {
+                    for (const m of mutations) {
+                        for (const node of m.addedNodes) {
+                            if (node.nodeType === Node.ELEMENT_NODE && node.classList?.contains("repitem")) {
+                                this.enhanceRepItem(node, character, groupName);
+                            }
+                        }
+                    }
+                });
+                itemObserver.observe(repContainer, { childList: true });
+            }
+        });
+    }
+
+    /**
+     * 增强单行 Buff 条目
+     * 照抄原生“Buff 計算式” HTML 模板，不依赖运行时 DOM 是否已展开计算式
+     */
+    static enhanceRepItem(itemEl, character, groupName = "repeating_buff2") {
+        if (!itemEl || !character) return;
+
+        // 1. 获取 rowId
+        let rowId = itemEl.getAttribute("data-reprowid");
+        if (!rowId) {
+            const namedInput = itemEl.querySelector('input[name*="_name"], input[name*="_row_id"]');
+            if (namedInput) {
+                const nameAttr = namedInput.getAttribute("name") || "";
+                const match = nameAttr.match(/repeating_buff2?_([^_]+)_/);
+                if (match) rowId = match[1];
+            }
+        }
+        if (!rowId) return;
+
+        // 2. 找到名称 label (起始锚点)
+        const nameInput = itemEl.querySelector('input[name="attr_name"], input[name$="_name"]');
+        if (!nameInput) return;
+
+        const nameLabel = nameInput.closest("label");
+        if (!nameLabel || !nameLabel.parentNode) return;
+
+        // 避免重复注入
+        if (nameLabel.parentNode.querySelector(".r20-suite-init-rounds-col, .r20-suite-init-rounds")) return;
+
+        // 3. 确定说明文字语言风格
+        const allText = itemEl.textContent || "";
+        const labelText = (allText.includes("名称") || allText.includes("计算式")) 
+            ? "轮数计算式" 
+            : (allText.includes("Name") && !allText.includes("名稱") ? "Rounds Formula" : "輪數計算式");
+
+        // 4. 照抄“Buff 計算式”的原生 HTML 结构模板 (单下划线底线透明输入框 + 加粗斜体居中文本)
+        const tempDiv = document.createElement("div");
+        tempDiv.innerHTML = `
+<label class="r20-suite-init-rounds-col" style="display:inline-block; vertical-align:top; width:70px; text-align:center; margin:0 2px; box-sizing:border-box;">
+    <input type="text" name="attr_init_rounds" class="r20-suite-init-rounds" placeholder="0" style="border:none; border-bottom:1px solid #000; border-radius:0; background:transparent; width:100%; height:24px; text-align:center; font-family:inherit; font-size:12px; color:inherit; box-sizing:border-box; padding:1px 2px;" title="预置初始轮数/公式（例如 10、@{level}*10、10+@{constitution_mod}）。开启 Buff 时借用原生引擎自动求值。">
+    <span class="r20-suite-init-rounds-label" style="display:block; text-align:center; font-weight:bold; font-style:italic; font-size:9px; color:#333; margin-top:2px; white-space:nowrap;">${labelText}</span>
+</label>
+        `.trim();
+
+        const newLabel = tempDiv.firstElementChild;
+        const input = newLabel.querySelector("input");
+
+        // 5. 顺延插入在类型下拉框之前 (或名称后面)
+        const typeSelect = itemEl.querySelector('select[name="attr_bufftype"], select[name$="_bufftype"], select[name*="bufftype"]');
+        const typeLabel = typeSelect ? typeSelect.closest("label") : null;
+        const targetBeforeNode = (typeLabel && typeLabel.parentNode === nameLabel.parentNode)
+            ? typeLabel
+            : nameLabel.nextElementSibling;
+
+        nameLabel.parentNode.insertBefore(newLabel, targetBeforeNode);
+
+        // 6. 双向数据绑定
+        const attrFullName = `${groupName}_${rowId}_init_rounds`;
+
+        // 读取现有轮数公式值回填
+        const initAttr = character.attribs?.models?.find(a => a.get("name") === attrFullName);
+        if (initAttr && initAttr.get("current") !== undefined && initAttr.get("current") !== null) {
+            input.value = initAttr.get("current");
+        }
+
+        // 监听用户输入改动并写回 Backbone 属性
+        const handleSave = () => {
+            const val = input.value.trim();
+            let attr = character.attribs?.models?.find(a => a.get("name") === attrFullName);
+            if (!attr) {
+                if (val !== "") {
+                    character.attribs.create({
+                        name: attrFullName,
+                        current: val
+                    });
+                    console.log(`[CharacterSheetBuffEnhancer] 角色卡创建初始轮数公式属性 ${attrFullName} = ${val}`);
+                }
+            } else {
+                if (attr.get("current") !== val) {
+                    attr.save({ current: val });
+                    console.log(`[CharacterSheetBuffEnhancer] 角色卡更新初始轮数公式属性 ${attrFullName} = ${val}`);
+                }
+            }
+        };
+
+        input.addEventListener("change", handleSave);
+        input.addEventListener("blur", handleSave);
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                input.blur();
+            }
+        });
+
+        // 监听外部模型数据变更反向同步到 input
+        if (character.attribs?.on) {
+            const syncFromModel = (changedAttr) => {
+                if (changedAttr.get("name") === attrFullName) {
+                    const cur = changedAttr.get("current") || "";
+                    if (input.value !== cur && document.activeElement !== input) {
+                        input.value = cur;
+                    }
+                }
+            };
+            character.attribs.on("change:current", syncFromModel);
+        }
+    }
+}
+
+    // ==========================================
+    // 10. BuffPanelStyles (面板静态 CSS 样式)
     // ==========================================
 /**
  * BuffPanelStyles.js
@@ -3707,7 +4338,7 @@ class BuffPanelStyles {
 }
 
     // ==========================================
-    // 10. BuffPanelTemplates (面板静态 HTML 模板)
+    // 11. BuffPanelTemplates (面板静态 HTML 模板)
     // ==========================================
 /**
  * BuffPanelTemplates.js
@@ -3716,7 +4347,7 @@ class BuffPanelStyles {
 class BuffPanelTemplates {}
 
     // ==========================================
-    // 11. BuffPanelDragDrop (面板拖拽手势交互)
+    // 12. BuffPanelDragDrop (面板拖拽手势交互)
     // ==========================================
 /**
  * BuffPanelDragDrop.js
@@ -3920,7 +4551,7 @@ class BuffPanelDragDrop {
 }
 
     // ==========================================
-    // 12. BuffFloatingPanel (状态Buff悬浮工作台控制器)
+    // 13. BuffFloatingPanel (状态Buff悬浮工作台控制器)
     // ==========================================
 /**
  * BuffFloatingPanel.js
@@ -4140,9 +4771,10 @@ class BuffFloatingPanel {
             // 非编辑模式下点击直接施加/移除
             const name = item.dataset.name;
             const rounds = item.dataset.rounds ? parseInt(item.dataset.rounds) : null;
+            const initRounds = item.dataset.initRounds || null;
             const extraAttrs = item._extraAttrs || null;
 
-            await this.toggleBuffOnSelected(name, rounds, extraAttrs);
+            await this.toggleBuffOnSelected(name, rounds, extraAttrs, initRounds);
         });
 
         // 单位栏点击
@@ -4224,6 +4856,7 @@ class BuffFloatingPanel {
 
         const currentName = isEditing ? existingNode.name : "";
         const currentRounds = isEditing && existingNode.rounds !== null && existingNode.rounds !== undefined ? existingNode.rounds : "";
+        const currentInitRounds = isEditing && existingNode.initRounds ? existingNode.initRounds : "";
         const currentJson = isEditing
             ? JSON.stringify(existingNode.extraAttrs || {}, null, 2)
             : `{
@@ -4245,7 +4878,11 @@ class BuffFloatingPanel {
                     <label style="font-size:11px; color:#b0bec5;">Buff 名称:</label>
                     <input type="text" class="r20-input-text input-buff-name" value="${currentName}" placeholder="例如: 神恩、加速术..." />
 
-                    <label style="font-size:11px; color:#b0bec5;">持续轮数 (留空视为永久):</label>
+                    <label style="font-size:11px; color:#b0bec5;">预置初始轮数 / 公式 (每次开启自动求值):</label>
+                    <input type="text" class="r20-input-text input-buff-init-rounds" value="${currentInitRounds}" placeholder="例如: 10、@{level}*10、10+@{constitution_mod}" />
+                    <span style="font-size:10px; color:#78909c;">支持常数或 @{attr} 属性引用公式，开启时借用 Roll20 原生引擎自动求值。</span>
+
+                    <label style="font-size:11px; color:#b0bec5;">当前剩余轮数 (留空视为永久):</label>
                     <input type="number" class="r20-input-text input-buff-rounds" value="${currentRounds}" placeholder="留空或大于100视为永久" />
 
                     <label style="font-size:11px; color:#b0bec5;">PF1e 细目加值字典 (JSON 格式):</label>
@@ -4265,6 +4902,9 @@ class BuffFloatingPanel {
             const name = mask.querySelector(".input-buff-name").value.trim();
             if (!name) { alert("请输入 Buff 名称"); return; }
 
+            const initRoundsVal = mask.querySelector(".input-buff-init-rounds").value.trim();
+            const initRounds = initRoundsVal === "" ? null : initRoundsVal;
+
             const roundsVal = mask.querySelector(".input-buff-rounds").value.trim();
             const rounds = roundsVal === "" ? null : parseInt(roundsVal, 10);
 
@@ -4281,9 +4921,10 @@ class BuffFloatingPanel {
                     if (charTarget) {
                         // 1. 编辑角色卡身上的原生 Buff
                         const rowId = existingNode.rowId || existingNode.id;
-                        await Pf1eBuffManager.updateBuffRow(charTarget, rowId, name, rounds, extraAttrs);
+                        await Pf1eBuffManager.updateBuffRow(charTarget, rowId, name, rounds, extraAttrs, initRounds);
                         existingNode.name = name;
                         existingNode.rounds = rounds;
+                        existingNode.initRounds = initRounds;
                         existingNode.extraAttrs = extraAttrs;
                         this.showToast("✅ 已更新 " + charTarget.get("name") + " 的 Buff [" + name + "]", "success");
                         await Pf1eBuffUI.refreshAllBadges();
@@ -4291,15 +4932,16 @@ class BuffFloatingPanel {
                     } else {
                         // 2. 编辑模板库中的 Buff 模板
                         const rowId = existingNode.rowId || existingNode.id;
-                        await SuiteConfigStore.updateBuffInDatabase(rowId, name, rounds, extraAttrs);
+                        await SuiteConfigStore.updateBuffInDatabase(rowId, name, rounds, extraAttrs, initRounds);
                         existingNode.name = name;
                         existingNode.rounds = rounds;
+                        existingNode.initRounds = initRounds;
                         existingNode.extraAttrs = extraAttrs;
                         this.showToast("✅ 已更新 Buff 模板 [" + name + "]", "success");
                         await this.renderTemplatePane();
                     }
                 } else {
-                    const newRowId = await SuiteConfigStore.addBuffToDatabase(name, rounds, extraAttrs);
+                    const newRowId = await SuiteConfigStore.addBuffToDatabase(name, rounds, extraAttrs, initRounds);
                     if (newRowId) {
                         this.currentTemplates.push({
                             id: newRowId,
@@ -4307,6 +4949,7 @@ class BuffFloatingPanel {
                             type: "buff",
                             name,
                             rounds,
+                            initRounds,
                             extraAttrs
                         });
                         await SuiteConfigStore.saveTopology(this.currentTemplates);
@@ -4496,10 +5139,13 @@ class BuffFloatingPanel {
                 item.dataset.id = rowId;
                 item.dataset.selectId = selectId;
                 if (node.rounds) item.dataset.rounds = node.rounds;
+                if (node.initRounds) item.dataset.initRounds = node.initRounds;
                 item._extraAttrs = node.extraAttrs || null;
                 item.draggable = true;
 
-                const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") ? (node.rounds + "轮") : "永久";
+                const roundsText = (node.rounds !== null && node.rounds !== undefined && node.rounds !== "") 
+                    ? (node.rounds + "轮") 
+                    : (node.initRounds ? `[${node.initRounds}]` : "永久");
 
                 item.innerHTML = `
                     <div class="r20-item-left">
@@ -4633,7 +5279,7 @@ class BuffFloatingPanel {
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
                             onCrossCopy: async (draggedNode) => {
-                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
+                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs, draggedNode.initRounds);
                                 if (newRowId) {
                                     await this.renderTemplatePane();
                                 }
@@ -4688,7 +5334,7 @@ class BuffFloatingPanel {
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
                             onCrossCopy: async (draggedNode) => {
-                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
+                                const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs, draggedNode.initRounds);
                                 if (newRowId) {
                                     await this.renderTemplatePane();
                                 }
@@ -4720,7 +5366,7 @@ class BuffFloatingPanel {
                     details.classList.remove("r20-drag-container-over");
                     const node = dragged.node;
                     if (char) {
-                        await Pf1eBuffManager.applyOrRefreshBuff(char, node.name, node.rounds, node.extraAttrs);
+                        await Pf1eBuffManager.applyOrRefreshBuff(char, node.name, node.rounds, node.extraAttrs, node.initRounds);
                     } else if (tokenItem.token) {
                         TokenBuffManager.applyOrRefreshBuff(tokenItem.token, node.name, node.rounds, node.extraAttrs);
                     }
@@ -4739,7 +5385,7 @@ class BuffFloatingPanel {
     /**
      * 为选中的单位批量施加或移除 Buff
      */
-    static async toggleBuffOnSelected(buffName, rounds, extraAttrs) {
+    static async toggleBuffOnSelected(buffName, rounds, extraAttrs, initRounds = null) {
         const selected = this.getSelectedTokens();
         if (selected.length === 0) {
             this.showToast("⚠️ 请先在画布上选择目标 Token", "warn");
@@ -4754,7 +5400,7 @@ class BuffFloatingPanel {
         for (const item of selected) {
             if (item.char) {
                 if (shouldApply) {
-                    await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs);
+                    await Pf1eBuffManager.applyOrRefreshBuff(item.char, buffName, rounds, extraAttrs, initRounds);
                 } else {
                     const buffs = await Pf1eBuffManager.getAllBuffs(item.char);
                     const b = buffs.find(x => x.name === buffName && x.enabled);
@@ -5021,7 +5667,7 @@ class BuffFloatingPanel {
 }
 
     // ==========================================
-    // 11. 引擎主入口启动流程
+    // 14. 引擎主入口启动流程
     // ==========================================
     async function main() {
         try {
@@ -5116,7 +5762,15 @@ class BuffFloatingPanel {
                 console.error("[Roll20Suite] CanvasMarkerHoverObserver 挂载异常:", hoverErr);
             }
 
-            // 5. 挂载命名空间供外部或开发者排查联动
+            // 5. 启动官方人物卡 Buff 预置初始轮数增强注入器
+            try {
+                CharacterSheetBuffEnhancer.init();
+                console.log("[Roll20Suite] CharacterSheetBuffEnhancer 官方人物卡增强器挂载成功");
+            } catch (enhancerErr) {
+                console.error("[Roll20Suite] CharacterSheetBuffEnhancer 挂载异常:", enhancerErr);
+            }
+
+            // 6. 挂载命名空间供外部或开发者排查联动
             window.Roll20Suite = {
                 Roll20Bridge,
                 Pf1eConditionRegistry,
@@ -5126,10 +5780,11 @@ class BuffFloatingPanel {
                 TokenBuffManager,
                 Pf1eBuffUI,
                 CanvasMarkerHoverObserver,
+                CharacterSheetBuffEnhancer,
                 BuffFloatingPanel
             };
 
-            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎 v0.9.19 全部就绪！");
+            console.log("[Roll20Suite] PF1e Turnorder Buff 引擎全部就绪！");
         } catch (fatalErr) {
             console.error("[Roll20Suite] 引擎主入口遭遇致命异常:", fatalErr);
         }

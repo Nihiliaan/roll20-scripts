@@ -12,6 +12,21 @@ export class Pf1eBuffManager {
     static isScriptMutating = false;
 
     /**
+     * 声明式调和全局事务锁（防止多端事件回流震荡）
+     */
+    static isReconciling = false;
+
+    /**
+     * 待结算的棋子标记调和会话表 (Token ID -> { character, token, timestamp })
+     */
+    static pendingTokenReconciles = new Map();
+
+    /**
+     * 兜底定时器表
+     */
+    static tokenSafetyTimers = new Map();
+
+    /**
      * 官方内置负面状态 (Conditions) 31 项白名单（精准匹配角色卡 UI，排除能量吸取与被纠缠联动派生的被缓慢）
      */
     static CONDITION_DEFINITIONS = {
@@ -115,10 +130,48 @@ export class Pf1eBuffManager {
 
         const handleAttributeMutation = async (attr, options) => {
             if (!attr) return;
-            // 忽略脚本自主更新或正在批量修改，彻底切断震荡回路
-            if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
+            // 忽略脚本自主更新、批量修改或当前处于调和事务中，彻底切断震荡回路
+            if (options?.byScript || Pf1eBuffManager.isScriptMutating || Pf1eBuffManager.isReconciling) return;
 
             const attrName = attr.get("name") || "";
+
+            // 0. 响应常规 repeating_buff2_*_enable_toggle 开启，自动根据预置公式初始化轮数
+            if (attrName.startsWith("repeating_buff2_") && attrName.endsWith("_enable_toggle")) {
+                const isToggledOn = Number(attr.get("current")) === 1;
+                if (isToggledOn) {
+                    const prefix = attrName.replace("_enable_toggle", "");
+                    const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+                    const curRounds = roundsAttr ? roundsAttr.get("current") : "";
+                    const isRoundsEmpty = curRounds === "" || curRounds === null || Number(curRounds) === 0;
+
+                    if (isRoundsEmpty) {
+                        const initRoundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
+                        const formula = initRoundsAttr ? initRoundsAttr.get("current") : "";
+                        if (formula) {
+                            const val = await Roll20Bridge.evalNativeFormula(formula, character);
+                            if (val !== null && !isNaN(val)) {
+                                console.log(`[Pf1eBuffManager] 角色卡开启 Buff (${prefix})，借用原生机制求值公式 [${formula}] = ${val}`);
+                                if (!roundsAttr) {
+                                    character.attribs.create({ name: `${prefix}_rounds`, current: val });
+                                } else {
+                                    roundsAttr.save({ current: val });
+                                }
+                            }
+                        }
+                    }
+                }
+                // 刷新代表该角色的先攻条徽章
+                const page = Roll20Bridge.getCurrentPage();
+                if (page && page.thegraphics) {
+                    page.thegraphics.each(g => {
+                        if (g.get("represents") === character.id) {
+                            Pf1eBuffUI.requestTokenRefresh(g.id);
+                        }
+                    });
+                }
+                return;
+            }
+
             // 仅对 condition- 开头的状态属性响应
             if (!attrName.startsWith("condition-")) return;
             // 忽略轮数属性本身的变动，仅关注开关值变动
@@ -126,8 +179,8 @@ export class Pf1eBuffManager {
 
             console.log(`[Pf1eBuffManager] 捕获到角色 ${character.get("name")} 的 Debuff 开关变动: ${attrName} = ${attr.get("current")}`);
 
-            // 1. 同步棋子标记 (单端管辖，仅修改本地 token 模型与 Jumpgate 渲染，不发网络通知)
-            await Pf1eBuffManager.syncTokenStatusmarkers(character);
+            // 1. 声明式调和棋子标记 (单向调和: character -> token)
+            await Pf1eBuffManager.reconcileConditions(character, null, { origin: "character" });
 
             // 2. 刷新代表该角色的先攻条徽章
             const page = Roll20Bridge.getCurrentPage();
@@ -218,72 +271,228 @@ export class Pf1eBuffManager {
     }
 
     /**
-     * 将角色当前处于激活状态的负面效果同步到棋子标记 (单端管辖，尊重原生顺序，绝不颠倒重排)
+     * 声明式多端状态调和引擎 (Declarative Condition Reconciliation Engine)
+     * 遵循单向数据流与来源戳记准则，杜绝一切多端震荡与界面失焦。
+     * @param {object} character Character Backbone 模型
+     * @param {object} token Token Graphic Backbone 模型
+     * @param {object} options 调和选项 { origin: "token" | "character" }
      */
-    static async syncTokenStatusmarkers(character, token = null) {
-        if (!character) return;
-        const page = Roll20Bridge.getCurrentPage();
-        if (!page || !page.thegraphics) return;
+    static async reconcileConditions(character, token = null, options = {}) {
+        if (!character && !token) return;
+        if (this.isReconciling) return;
 
-        // 寻找所有代表此角色的 Token
-        const tokens = [];
-        if (token) {
-            tokens.push(token);
-        } else {
-            page.thegraphics.each(g => {
-                if (g.get("represents") === character.id) {
-                    tokens.push(g);
+        this.isReconciling = true;
+        try {
+            const origin = options.origin || "character";
+
+            // 1. 若变动来源于棋子 (origin: "token")
+            // 方案 A 会话生命周期感知：若标记栏处于打开状态，挂起调和，绝不修改角色卡与 DOM，保证选框永不失焦；
+            // 待用户操作完毕关闭标记栏时，立即 0 延迟原子执行调和结算！
+            if (origin === "token") {
+                if (!token || !character) return;
+
+                const isMarkerMenuOpen = !!document.querySelector(".markermenu");
+                if (isMarkerMenuOpen) {
+                    this.pendingTokenReconciles.set(token.id, { character, token, timestamp: Date.now() });
+                    console.log(`[Pf1eBuffManager] 标记栏处于活动会话中，挂起调和请求，等待面板关闭后结算 (Token ID: ${token.id})`);
+
+                    // 设置 5 秒防呆兜底定时器：若极端情况下未收到关闭事件，自动检查并安全结算
+                    if (this.tokenSafetyTimers.has(token.id)) {
+                        clearTimeout(this.tokenSafetyTimers.get(token.id));
+                    }
+                    const safetyTimer = setTimeout(() => {
+                        this.tokenSafetyTimers.delete(token.id);
+                        if (!document.querySelector(".markermenu")) {
+                            this.flushPendingTokenReconciles();
+                        }
+                    }, 5000);
+                    this.tokenSafetyTimers.set(token.id, safetyTimer);
+                    return;
                 }
+
+                // 标记栏未打开（宏调用、快捷键或外部调用），直接原子调和
+                await this._executeTokenReconciliation(character, token);
+                return;
+            }
+
+            // 2. 若变动来源于角色卡 (origin: "character")
+            // 铁律：角色卡当前状态即为真理源，仅单向调和棋子标记！
+            if (origin === "character") {
+                if (!character) return;
+                const page = Roll20Bridge.getCurrentPage();
+                if (!page || !page.thegraphics) return;
+
+                const tokens = [];
+                if (token) {
+                    tokens.push(token);
+                } else {
+                    page.thegraphics.each(g => {
+                        if (g.get("represents") === character.id) {
+                            tokens.push(g);
+                        }
+                    });
+                }
+
+                if (tokens.length === 0) return;
+
+                // 计算当前应该挂载的纯净 Tag 集合
+                const activeConditions = await this.getActiveConditions(character);
+                const desiredTags = new Set();
+                for (const cond of activeConditions) {
+                    const tag = Pf1eConditionRegistry.resolveMarkerTag(cond.key);
+                    if (tag) desiredTags.add(tag);
+                }
+
+                for (const t of tokens) {
+                    const currentStr = t.get("statusmarkers") || "";
+                    const currentList = currentStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+
+                    // 保留原有列表中未被解除的标记与非托管自定义标记，完全维持原有自然顺序
+                    const remainingDesired = new Set(desiredTags);
+                    const preservedList = [];
+                    for (const item of currentList) {
+                        const def = Pf1eConditionRegistry.find(item);
+                        if (!def) {
+                            preservedList.push(item);
+                        } else {
+                            const resolvedTag = Pf1eConditionRegistry.resolveMarkerTag(def.attrKey || def.id);
+                            if (remainingDesired.has(item) || remainingDesired.has(resolvedTag)) {
+                                preservedList.push(item);
+                                remainingDesired.delete(item);
+                                remainingDesired.delete(resolvedTag);
+                            }
+                        }
+                    }
+
+                    for (const tag of remainingDesired) {
+                        preservedList.push(tag);
+                    }
+
+                    // 纯集合差异比对：若无差异，绝不触碰棋子，杜绝任何多余重写与弹窗失焦
+                    const oldSet = new Set(currentList);
+                    const newSet = new Set(preservedList);
+                    const isIdentical = oldSet.size === newSet.size && [...oldSet].every(x => newSet.has(x));
+
+                    if (!isIdentical) {
+                        const newStr = preservedList.join(",");
+                        console.log(`[Pf1eBuffManager] 调和棋子标记: ${currentStr} -> ${newStr}`);
+                        t.set({ statusmarkers: newStr }, { byScript: true });
+                    }
+                }
+            }
+        } finally {
+            queueMicrotask(() => {
+                this.isReconciling = false;
             });
         }
+    }
 
-        if (tokens.length === 0) return;
+    /**
+     * 结算所有挂起的棋子调和会话（0 延迟原子执行）
+     */
+    static async flushPendingTokenReconciles() {
+        if (this.pendingTokenReconciles.size === 0) return;
+        const entries = Array.from(this.pendingTokenReconciles.values());
+        this.pendingTokenReconciles.clear();
 
-        // 计算当前应该挂载的纯净 Tag 集合
-        const activeConditions = await this.getActiveConditions(character);
-        const desiredTags = new Set();
-        for (const cond of activeConditions) {
-            const tag = Pf1eConditionRegistry.resolveMarkerTag(cond.key);
-            if (tag) desiredTags.add(tag);
+        for (const item of entries) {
+            try {
+                if (this.tokenSafetyTimers.has(item.token.id)) {
+                    clearTimeout(this.tokenSafetyTimers.get(item.token.id));
+                    this.tokenSafetyTimers.delete(item.token.id);
+                }
+                await this._executeTokenReconciliation(item.character, item.token);
+            } catch (err) {
+                console.error("[Pf1eBuffManager] 执行会话结算调和失败:", err);
+            }
         }
+    }
 
-        for (const t of tokens) {
-            const currentStr = t.get("statusmarkers") || "";
-            const currentList = currentStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+    /**
+     * 棋子标记防抖结算后的底层原子调和
+     * 仅单向将棋子上的标记变更落实到角色卡属性，绝对禁止反向修改棋子
+     */
+    static async _executeTokenReconciliation(character, token) {
+        if (!character || !token) return;
+        this.isReconciling = true;
+        try {
+            await Roll20Bridge.ensureCharacterAttributes(character);
 
-            // 保留原有列表中未被解除的标记与非托管自定义标记，完全维持原有自然顺序
-            const preservedList = [];
-            for (const item of currentList) {
-                const def = Pf1eConditionRegistry.find(item);
-                if (!def) {
-                    // 非托管的其它标记，原样保留在原位
-                    preservedList.push(item);
+            const currentMarkersStr = token.get("statusmarkers") || "";
+            const currentTags = currentMarkersStr
+                .split(",")
+                .map(s => s.trim().replace(/@\d+$/, ""))
+                .filter(Boolean);
+
+            // 解析棋子上所有已挂载的 tags 对应的负面状态属性 Key
+            const desiredCondAttrKeys = new Set();
+            for (const tag of currentTags) {
+                const def = Pf1eConditionRegistry.find(tag);
+                if (def && def.attrKey) {
+                    desiredCondAttrKeys.add(def.attrKey);
+                }
+            }
+
+            let characterChanged = false;
+
+            // 遍历系统所有支持的 34 项状态注册表，进行 Diff 调和
+            for (const def of Object.values(PF1E_CONDITIONS)) {
+                const attrKey = def.attrKey;
+                if (!attrKey) continue;
+
+                const attr = character.attribs.models.find(a => a.get("name") === attrKey);
+                const isCurrentlyActive = attr && attr.get("current") !== "0" && attr.get("current") !== 0 && attr.get("current") !== "" && attr.get("current") !== null && attr.get("current") !== undefined && attr.get("current") !== false;
+                const shouldBeActive = desiredCondAttrKeys.has(attrKey);
+
+                // 状态一致，无差异跳过
+                if (isCurrentlyActive === shouldBeActive) continue;
+
+                characterChanged = true;
+                if (shouldBeActive) {
+                    console.log(`[Pf1eBuffManager] 防抖结算调和: 激活 ${character.get("name")} 的 ${def.nameZh} (${attrKey})`);
+                    const defaultVal = attrKey === "condition-Blinded" ? "2" : (attrKey === "condition-Prone" ? "4" : "1");
+                    if (!attr) {
+                        character.attribs.create({ name: attrKey, current: defaultVal });
+                    } else {
+                        attr.save({ current: defaultVal }, { byScript: true });
+                    }
+                    // 补齐默认正计轮 (-1)
+                    const roundsKey = `${attrKey}_rounds`;
+                    let roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+                    if (!roundsAttr) {
+                        character.attribs.create({ name: roundsKey, current: -1 });
+                    } else {
+                        roundsAttr.save({ current: -1 }, { byScript: true });
+                    }
                 } else {
-                    // 是托管状态：仅当它依然处于激活状态时才保留原位
-                    const resolvedTag = Pf1eConditionRegistry.resolveMarkerTag(def.attrKey || def.id);
-                    if (desiredTags.has(item) || desiredTags.has(resolvedTag)) {
-                        preservedList.push(item);
-                        desiredTags.delete(item);
-                        desiredTags.delete(resolvedTag);
+                    console.log(`[Pf1eBuffManager] 防抖结算调和: 解除 ${character.get("name")} 的 ${def.nameZh} (${attrKey})`);
+                    if (attr) {
+                        attr.save({ current: "0" }, { byScript: true });
+                    }
+                    const roundsKey = `${attrKey}_rounds`;
+                    const roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+                    if (roundsAttr) {
+                        roundsAttr.destroy();
                     }
                 }
             }
 
-            // 对新激活但原列表中尚不存在的标记，直接追加在末尾
-            for (const tag of desiredTags) {
-                preservedList.push(tag);
+            // 仅刷新下游纯展示视图（先攻条徽章），棋子绝不碰触
+            if (characterChanged) {
+                Pf1eBuffUI.requestTokenRefresh(token.id);
             }
-
-            // 纯集合比对：若元素完全一致，绝对不触碰棋子，杜绝任何多余重写与弹窗失焦
-            const oldSet = new Set(currentList);
-            const newSet = new Set(preservedList);
-            const isIdentical = oldSet.size === newSet.size && [...oldSet].every(x => newSet.has(x));
-
-            if (!isIdentical) {
-                const newStr = preservedList.join(",");
-                t.set({ statusmarkers: newStr }, { byScript: true });
-            }
+        } finally {
+            queueMicrotask(() => {
+                this.isReconciling = false;
+            });
         }
+    }
+
+    /**
+     * 将角色当前处于激活状态的负面效果同步到棋子标记 (单端管辖，尊重原生顺序，绝不颠倒重排)
+     */
+    static async syncTokenStatusmarkers(character, token = null) {
+        return this.reconcileConditions(character, token, { origin: "character" });
     }
     static generateStandardRowId() {
         if (typeof window.generateUUID === "function") {
@@ -339,11 +548,13 @@ export class Pf1eBuffManager {
 
             const toggleAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_enable_toggle`);
             const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+            const initRoundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
             const buffTypeAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_bufftype`);
 
             const name = nameAttr.get("current") || "未命名Buff";
             const enabled = toggleAttr ? Number(toggleAttr.get("current")) === 1 : false;
             const rounds = roundsAttr && roundsAttr.get("current") !== "" ? Number(roundsAttr.get("current")) : null;
+            const initRounds = initRoundsAttr && initRoundsAttr.get("current") !== "" ? String(initRoundsAttr.get("current")) : null;
             const buffType = buffTypeAttr ? buffTypeAttr.get("current") : "spell";
 
             // 提取该原生 Buff 条目下所有存储的扩展加值与修饰细目字典 (extraAttrs)
@@ -357,6 +568,7 @@ export class Pf1eBuffManager {
                         subKey !== "name" &&
                         subKey !== "enable_toggle" &&
                         subKey !== "rounds" &&
+                        subKey !== "init_rounds" &&
                         subKey !== "tabcat" &&
                         subKey !== "tabcat2" &&
                         subKey !== "row_id"
@@ -375,10 +587,12 @@ export class Pf1eBuffManager {
                 name,
                 enabled,
                 rounds: (rounds !== null && !isNaN(rounds)) ? rounds : null,
+                initRounds: initRounds || null,
                 buffType,
                 extraAttrs: Object.keys(extraAttrs).length > 0 ? extraAttrs : null,
                 toggleAttr: toggleAttr || null,
-                roundsAttr: roundsAttr || null
+                roundsAttr: roundsAttr || null,
+                initRoundsAttr: initRoundsAttr || null
             });
         }
 
@@ -391,10 +605,11 @@ export class Pf1eBuffManager {
      * 2. 若无同名 Buff，则自动新建一行符合官方标准规范的原生 Buff 并激活。
      * @param {object} character Character 模型
      * @param {string} buffName Buff 名称
-     * @param {number|null} rounds 持续轮数
+     * @param {number|null} rounds 持续轮数 (若为 null 且有预置公式，将借用原生求值自动计算)
      * @param {object|null} extraAttrs 额外的细目加值字典（如 b1_bonus, b1_val 等）
+     * @param {string|null} initRounds 预置初始轮数或公式 (如 "10", "@{level}*10")
      */
-    static async applyOrRefreshBuff(character, buffName, rounds = null, extraAttrs = null) {
+    static async applyOrRefreshBuff(character, buffName, rounds = null, extraAttrs = null, initRounds = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -423,12 +638,32 @@ export class Pf1eBuffManager {
             // 补全原生必需标签，防止角色卡报错
             this.ensureNativeRequiredAttrs(character, prefix, rowId);
 
-            let roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
-            if (rounds !== null && !isNaN(rounds)) {
-                if (!roundsAttr) {
-                    roundsAttr = character.attribs.create({ name: `${prefix}_rounds`, current: Number(rounds), max: Number(rounds) });
+            // 更新或保存预置初始轮数/公式
+            if (initRounds !== null && initRounds !== undefined) {
+                let initAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
+                if (!initAttr) {
+                    if (initRounds !== "") character.attribs.create({ name: `${prefix}_init_rounds`, current: initRounds });
                 } else {
-                    roundsAttr.save({ current: Number(rounds) });
+                    initAttr.save({ current: initRounds });
+                }
+            }
+
+            let effectiveRounds = rounds;
+            if (effectiveRounds === null || isNaN(effectiveRounds)) {
+                // 借用原生机制求值预置公式
+                const targetFormula = initRounds || (character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`)?.get("current"));
+                if (targetFormula) {
+                    const evalVal = await Roll20Bridge.evalNativeFormula(targetFormula, character);
+                    if (evalVal !== null && !isNaN(evalVal)) effectiveRounds = evalVal;
+                }
+            }
+
+            let roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+            if (effectiveRounds !== null && !isNaN(effectiveRounds)) {
+                if (!roundsAttr) {
+                    roundsAttr = character.attribs.create({ name: `${prefix}_rounds`, current: Number(effectiveRounds), max: Number(effectiveRounds) });
+                } else {
+                    roundsAttr.save({ current: Number(effectiveRounds) });
                 }
             } else if (roundsAttr) {
                 // 设为常驻
@@ -438,7 +673,7 @@ export class Pf1eBuffManager {
             // 更新细目属性
             if (extraAttrs && typeof extraAttrs === "object") {
                 for (const [k, v] of Object.entries(extraAttrs)) {
-                    if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "row_id") continue;
+                    if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "init_rounds" || k === "row_id") continue;
                     const attrFullName = `${prefix}_${k}`;
                     let subAttr = character.attribs.models.find(a => a.get("name") === attrFullName);
                     if (!subAttr) {
@@ -449,11 +684,11 @@ export class Pf1eBuffManager {
                 }
             }
 
-            console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 激活并刷新已有同名 Buff [${cleanName}], 轮数: ${rounds}`);
-            return { rowId, prefix, name: cleanName, rounds, isRefreshed: true };
+            console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 激活并刷新已有同名 Buff [${cleanName}], 轮数: ${effectiveRounds}`);
+            return { rowId, prefix, name: cleanName, rounds: effectiveRounds, isRefreshed: true };
         } else {
             // 不存在同名 Buff，新增一行
-            const newBuff = await this.addBuff(character, cleanName, rounds, extraAttrs);
+            const newBuff = await this.addBuff(character, cleanName, rounds, extraAttrs, initRounds);
             return { ...newBuff, isRefreshed: false };
         }
     }
@@ -461,7 +696,7 @@ export class Pf1eBuffManager {
     /**
      * 为角色卡新增一个原生 Buff 行并激活
      */
-    static async addBuff(character, buffName, rounds = null, extraAttrs = null) {
+    static async addBuff(character, buffName, rounds = null, extraAttrs = null, initRounds = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -480,25 +715,36 @@ export class Pf1eBuffManager {
         character.attribs.create({ name: `${prefix}_description-show`, current: 1 });
         character.attribs.create({ name: `${prefix}_row_id`, current: rowId.toLowerCase() });
 
+        // 保存初始预置轮数/公式
+        if (initRounds !== null && initRounds !== undefined && initRounds !== "") {
+            character.attribs.create({ name: `${prefix}_init_rounds`, current: initRounds });
+        }
+
+        let effectiveRounds = rounds;
+        if ((effectiveRounds === null || isNaN(effectiveRounds)) && initRounds) {
+            const evalVal = await Roll20Bridge.evalNativeFormula(initRounds, character);
+            if (evalVal !== null && !isNaN(evalVal)) effectiveRounds = evalVal;
+        }
+
         let roundsAttr = null;
-        if (rounds !== null && !isNaN(rounds) && rounds > 0) {
+        if (effectiveRounds !== null && !isNaN(effectiveRounds) && effectiveRounds > 0) {
             roundsAttr = character.attribs.create({
                 name: `${prefix}_rounds`,
-                current: Number(rounds),
-                max: Number(rounds)
+                current: Number(effectiveRounds),
+                max: Number(effectiveRounds)
             });
         }
 
         // 写入细目属性
         if (extraAttrs && typeof extraAttrs === "object") {
             for (const [k, v] of Object.entries(extraAttrs)) {
-                if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "bufftype" || k === "tabcat" || k === "tabcat2" || k === "row_id") continue;
+                if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "init_rounds" || k === "bufftype" || k === "tabcat" || k === "tabcat2" || k === "row_id") continue;
                 character.attribs.create({ name: `${prefix}_${k}`, current: v });
             }
         }
 
-        console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增原生规范 Buff [${cleanName}], 轮数: ${rounds}`);
-        return { rowId, prefix, name: cleanName, rounds, toggleAttr, roundsAttr };
+        console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增原生规范 Buff [${cleanName}], 轮数: ${effectiveRounds}`);
+        return { rowId, prefix, name: cleanName, rounds: effectiveRounds, toggleAttr, roundsAttr };
     }
 
     /**
@@ -542,6 +788,35 @@ export class Pf1eBuffManager {
             toggleAttr = character.attribs.create({ name: `${targetPrefix}_enable_toggle`, current: val });
         } else {
             toggleAttr.save({ current: val });
+        }
+
+        // 若开启，检查是否需自动根据预置公式初始化轮数
+        if (enable) {
+            const roundsAttr = character.attribs.models.find(a => {
+                const n = a.get("name") || "";
+                return n === `${targetPrefix}_rounds` || n.toLowerCase() === `${lowerPrefix}_rounds`;
+            });
+            const curVal = roundsAttr ? roundsAttr.get("current") : "";
+            const isRoundsEmpty = curVal === "" || curVal === null || Number(curVal) === 0;
+
+            if (isRoundsEmpty) {
+                const initRoundsAttr = character.attribs.models.find(a => {
+                    const n = a.get("name") || "";
+                    return n === `${targetPrefix}_init_rounds` || n.toLowerCase() === `${lowerPrefix}_init_rounds`;
+                });
+                const formula = initRoundsAttr ? initRoundsAttr.get("current") : "";
+                if (formula) {
+                    const val = await Roll20Bridge.evalNativeFormula(formula, character);
+                    if (val !== null && !isNaN(val)) {
+                        console.log(`[Pf1eBuffManager] 启用 Buff (${rowId})，借用原生求值公式 [${formula}] = ${val}`);
+                        if (!roundsAttr) {
+                            character.attribs.create({ name: `${targetPrefix}_rounds`, current: val });
+                        } else {
+                            roundsAttr.save({ current: val });
+                        }
+                    }
+                }
+            }
         }
 
         // 若关停，同步将轮数重置清零，防止僵尸轮数残留
@@ -623,7 +898,7 @@ export class Pf1eBuffManager {
     /**
      * 更新指定角色卡上的单行 Buff 数据（名称、轮数与细目扩展加值字典）
      */
-    static async updateBuffRow(character, rowId, name, rounds, extraAttrs) {
+    static async updateBuffRow(character, rowId, name, rounds, extraAttrs, initRounds = null) {
         if (!character || !rowId) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -647,13 +922,24 @@ export class Pf1eBuffManager {
             roundsAttr.save({ current: roundsVal });
         }
 
-        // 3. 补全原生必需属性
+        // 3. 更新预置初始轮数/公式
+        if (initRounds !== null && initRounds !== undefined) {
+            const initKey = `${prefix}_init_rounds`;
+            let initAttr = character.attribs.models.find(a => a.get("name") === initKey);
+            if (!initAttr) {
+                if (initRounds !== "") character.attribs.create({ name: initKey, current: initRounds });
+            } else {
+                initAttr.save({ current: initRounds });
+            }
+        }
+
+        // 4. 补全原生必需属性
         this.ensureNativeRequiredAttrs(character, prefix, rowId);
 
-        // 4. 更新细目加值字典 (extraAttrs)
+        // 5. 更新细目加值字典 (extraAttrs)
         if (extraAttrs && typeof extraAttrs === "object") {
             // 清理不在新 extraAttrs 中的旧扩展字段
-            const preservedKeys = new Set(["name", "enable_toggle", "rounds", "tabcat", "tabcat2", "row_id", "bufftype"]);
+            const preservedKeys = new Set(["name", "enable_toggle", "rounds", "init_rounds", "tabcat", "tabcat2", "row_id", "bufftype"]);
             for (const attr of [...character.attribs.models]) {
                 const attrName = attr.get("name") || "";
                 if (attrName.startsWith(prefixWithUnderscore)) {
