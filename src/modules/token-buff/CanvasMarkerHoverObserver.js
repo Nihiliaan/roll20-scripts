@@ -84,7 +84,7 @@ export class CanvasMarkerHoverObserver {
                         const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子新增标记 [${tag}]，反向激活角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1);
+                            await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1, { skipTokenSync: true });
                         }
                     }
                 }
@@ -95,7 +95,7 @@ export class CanvasMarkerHoverObserver {
                         const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子移除标记 [${tag}]，反向解除角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id);
+                            await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id, { skipTokenSync: true });
                         }
                     }
                 }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.22
+// @version      0.9.23
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.22...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.23...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -1001,7 +1001,7 @@ class Pf1eBuffManager {
     /**
      * 设置或更新指定负面状态的已过轮数（负数存储）
      */
-    static async setConditionRounds(character, condKey, rounds) {
+    static async setConditionRounds(character, condKey, rounds, options = {}) {
         if (!character) return;
         await Roll20Bridge.ensureCharacterAttributes(character);
         const roundsKey = `${condKey}_rounds`;
@@ -1019,13 +1019,16 @@ class Pf1eBuffManager {
         } else {
             character.attribs.create({ name: roundsKey, current: storedVal });
         }
-        await this.syncTokenStatusmarkers(character);
+
+        if (!options.skipTokenSync) {
+            await this.syncTokenStatusmarkers(character);
+        }
     }
 
     /**
      * 关闭/解除指定负面状态
      */
-    static async removeCondition(character, condKey) {
+    static async removeCondition(character, condKey, options = {}) {
         if (!character) return;
         await Roll20Bridge.ensureCharacterAttributes(character);
         const attr = character.attribs.models.find(a => a.get("name") === condKey);
@@ -1037,13 +1040,16 @@ class Pf1eBuffManager {
         if (roundsAttr) {
             roundsAttr.destroy();
         }
-        await this.syncTokenStatusmarkers(character);
+
+        if (!options.skipTokenSync) {
+            await this.syncTokenStatusmarkers(character);
+        }
     }
 
     /**
      * 施加/激活指定负面状态（支持原生与补充状态，带默认正计轮）
      */
-    static async applyCondition(character, condKey, rounds = -1) {
+    static async applyCondition(character, condKey, rounds = -1, options = {}) {
         if (!character || !condKey) return;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
@@ -1061,12 +1067,11 @@ class Pf1eBuffManager {
             }
         }
 
-        await this.setConditionRounds(character, actualAttrKey, rounds);
-        await this.syncTokenStatusmarkers(character);
+        await this.setConditionRounds(character, actualAttrKey, rounds, options);
     }
 
     /**
-     * 将角色当前处于激活状态的负面效果同步到棋子标记 statusmarkers (单端管辖，纯图标绝不带数字)
+     * 将角色当前处于激活状态的负面效果同步到棋子标记 (单端管辖，尊重原生顺序，绝不颠倒重排)
      */
     static async syncTokenStatusmarkers(character, token = null) {
         if (!character) return;
@@ -1097,21 +1102,38 @@ class Pf1eBuffManager {
 
         for (const t of tokens) {
             const currentStr = t.get("statusmarkers") || "";
-            // 保留不属于 PF1e 状态字典的其它自定义标记
             const currentList = currentStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
-            const merged = new Set(desiredTags);
 
+            // 保留原有列表中未被解除的标记与非托管自定义标记，完全维持原有自然顺序
+            const preservedList = [];
             for (const item of currentList) {
-                const baseName = item.split("::")[0];
-                const isManaged = !!Pf1eConditionRegistry.find(baseName);
-                if (!isManaged) {
-                    merged.add(item);
+                const def = Pf1eConditionRegistry.find(item);
+                if (!def) {
+                    // 非托管的其它标记，原样保留在原位
+                    preservedList.push(item);
+                } else {
+                    // 是托管状态：仅当它依然处于激活状态时才保留原位
+                    const resolvedTag = Pf1eConditionRegistry.resolveMarkerTag(def.attrKey || def.id);
+                    if (desiredTags.has(item) || desiredTags.has(resolvedTag)) {
+                        preservedList.push(item);
+                        desiredTags.delete(item);
+                        desiredTags.delete(resolvedTag);
+                    }
                 }
             }
 
-            const newStr = Array.from(merged).join(",");
-            if (currentStr !== newStr) {
-                // 单端管辖：使用 token.set 更新本地模型与画布渲染，绝不向 Firebase 发送 save 网络广播
+            // 对新激活但原列表中尚不存在的标记，直接追加在末尾
+            for (const tag of desiredTags) {
+                preservedList.push(tag);
+            }
+
+            // 纯集合比对：若元素完全一致，绝对不触碰棋子，杜绝任何多余重写与弹窗失焦
+            const oldSet = new Set(currentList);
+            const newSet = new Set(preservedList);
+            const isIdentical = oldSet.size === newSet.size && [...oldSet].every(x => newSet.has(x));
+
+            if (!isIdentical) {
+                const newStr = preservedList.join(",");
                 t.set({ statusmarkers: newStr }, { byScript: true });
             }
         }
@@ -3044,7 +3066,7 @@ class CanvasMarkerHoverObserver {
                         const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子新增标记 [${tag}]，反向激活角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1);
+                            await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1, { skipTokenSync: true });
                         }
                     }
                 }
@@ -3055,7 +3077,7 @@ class CanvasMarkerHoverObserver {
                         const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子移除标记 [${tag}]，反向解除角色卡 Debuff: ${def.nameZh}`);
-                            await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id);
+                            await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id, { skipTokenSync: true });
                         }
                     }
                 }
