@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.21
+// @version      0.9.22
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.21...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.22...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -3012,7 +3012,7 @@ class CanvasMarkerHoverObserver {
     }
 
     /**
-     * 监听棋子标记手动变动，实现棋子加/删标记自动反向联动人物卡/先攻栏 Debuff
+     * 监听棋子标记变动（完全基于集合生命周期：新建、拖拽、复制粘贴、批量入场、换页全自动装载）
      */
     static bindTokenMarkerChangeListeners() {
         const boundTokens = new Set();
@@ -3065,19 +3065,40 @@ class CanvasMarkerHoverObserver {
             });
         };
 
-        const attachAllCurrent = () => {
+        let boundPageId = null;
+
+        const bindCurrentPageGraphics = () => {
             const page = Roll20Bridge.getCurrentPage();
-            if (!page || !page.thegraphics) return;
+            if (!page || !page.thegraphics) {
+                // 环境尚未就绪，延迟重试直到就绪
+                setTimeout(bindCurrentPageGraphics, 500);
+                return;
+            }
+
+            // 1. 立即挂载当前地图全部已有棋子
             page.thegraphics.each(attachToToken);
-            page.thegraphics.on("add", attachToToken);
+
+            // 若已经给当前页面的 thegraphics 挂过集合级事件，避免重复绑定
+            if (boundPageId === page.id) return;
+            boundPageId = page.id;
+
+            // 2. 监听新棋子进场（包括拖拽生成、Ctrl+C/V 复制粘贴）
+            page.thegraphics.on("add", (token) => {
+                attachToToken(token);
+            });
+
+            // 3. 监听批量数据载入（云端数据就绪、整页刷新）
+            page.thegraphics.on("reset", () => {
+                page.thegraphics.each(attachToToken);
+            });
         };
 
-        attachAllCurrent();
+        bindCurrentPageGraphics();
 
-        // 监听换页，确保新页面棋子同样挂载监听
+        // 4. 监听切换地图事件，自动切换到新地图并装配
         if (window.Campaign) {
             window.Campaign.on("change:playerpageid", () => {
-                setTimeout(attachAllCurrent, 500);
+                setTimeout(bindCurrentPageGraphics, 300);
             });
         }
     }
