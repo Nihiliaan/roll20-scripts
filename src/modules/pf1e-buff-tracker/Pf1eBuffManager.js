@@ -113,7 +113,8 @@ export class Pf1eBuffManager {
         if (!character || !character.attribs || character._pf1eAttribsBound) return;
         character._pf1eAttribsBound = true;
 
-        character.attribs.on("change:current", async (attr, options) => {
+        const handleAttributeMutation = async (attr, options) => {
+            if (!attr) return;
             // 忽略脚本自主更新或正在批量修改，彻底切断震荡回路
             if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
 
@@ -137,7 +138,11 @@ export class Pf1eBuffManager {
                     }
                 });
             }
-        });
+        };
+
+        // 同时监听属性值变更 (change:current) 与卡面首次勾选新建属性 (add)
+        character.attribs.on("change:current", handleAttributeMutation);
+        character.attribs.on("add", (attr, collection, options) => handleAttributeMutation(attr, options));
     }
 
     /**

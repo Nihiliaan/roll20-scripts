@@ -55,9 +55,6 @@ export class CanvasMarkerHoverObserver {
      * 监听棋子标记手动变动，实现棋子加/删标记自动反向联动人物卡/先攻栏 Debuff
      */
     static bindTokenMarkerChangeListeners() {
-        const page = Roll20Bridge.getCurrentPage();
-        if (!page || !page.thegraphics) return;
-
         const boundTokens = new Set();
         const tokenLastStatusMarkers = new Map();
 
@@ -84,9 +81,7 @@ export class CanvasMarkerHoverObserver {
                 // 1. 查找新增的 tags (玩家手动在棋子上点击添加标记)
                 for (const tag of newTags) {
                     if (!oldTags.has(tag)) {
-                        const cleanTag = tag.split("::")[0];
-                        const normalized = cleanTag.replace(/_/g, " ");
-                        const def = Pf1eConditionRegistry.find(cleanTag) || Pf1eConditionRegistry.find(normalized) || Pf1eConditionRegistry.find(tag);
+                        const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子新增标记 [${tag}]，反向激活角色卡 Debuff: ${def.nameZh}`);
                             await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1);
@@ -97,9 +92,7 @@ export class CanvasMarkerHoverObserver {
                 // 2. 查找移除的 tags (玩家手动在棋子上点击移除标记)
                 for (const tag of oldTags) {
                     if (!newTags.has(tag)) {
-                        const cleanTag = tag.split("::")[0];
-                        const normalized = cleanTag.replace(/_/g, " ");
-                        const def = Pf1eConditionRegistry.find(cleanTag) || Pf1eConditionRegistry.find(normalized) || Pf1eConditionRegistry.find(tag);
+                        const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子移除标记 [${tag}]，反向解除角色卡 Debuff: ${def.nameZh}`);
                             await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id);
@@ -112,8 +105,21 @@ export class CanvasMarkerHoverObserver {
             });
         };
 
-        page.thegraphics.each(attachToToken);
-        page.thegraphics.on("add", attachToToken);
+        const attachAllCurrent = () => {
+            const page = Roll20Bridge.getCurrentPage();
+            if (!page || !page.thegraphics) return;
+            page.thegraphics.each(attachToToken);
+            page.thegraphics.on("add", attachToToken);
+        };
+
+        attachAllCurrent();
+
+        // 监听换页，确保新页面棋子同样挂载监听
+        if (window.Campaign) {
+            window.Campaign.on("change:playerpageid", () => {
+                setTimeout(attachAllCurrent, 500);
+            });
+        }
     }
 
     /**

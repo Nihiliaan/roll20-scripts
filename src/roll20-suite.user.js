@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.20
+// @version      0.9.21
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @match        https://app.roll20.net/editor/*
@@ -14,7 +14,7 @@
 (function () {
     'use strict';
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.20...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.21...");
 
     // ==========================================
     // 1. Roll20Bridge 核心通信层
@@ -226,6 +226,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Bleed_rounds",
         markerName: "Bleeding Out",
         fallbackMarker: "bleeding-eye",
+        aliases: ["Bleeding Out", "Bleeding_Out", "Bleed", "bleeding-eye"],
         description: "每轮开始受持续伤害，直至受DC 15医疗检定或治疗法术"
     },
     "blinded": {
@@ -237,6 +238,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Blinded_rounds",
         markerName: "Blinded",
         fallbackMarker: "bleeding-eye",
+        aliases: ["Blinded", "bleeding-eye"],
         description: "AC -2，失去敏捷加值，察觉检定自动失败，全隐蔽(50%失手)"
     },
     "confused": {
@@ -248,6 +250,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "custom_cond_confused_rounds",
         markerName: "Confused",
         fallbackMarker: "brain-freeze",
+        aliases: ["Confused", "brain-freeze"],
         description: "无法自主行动，每轮掷 d100 决定行为(攻击盟友/发呆/正常)"
     },
     "cowering": {
@@ -259,6 +262,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Cowering_rounds",
         markerName: "screaming",
         fallbackMarker: "screaming",
+        aliases: ["Cowering", "screaming"],
         description: "极度恐惧冻结，AC -2，失去敏捷加值，无法采取任何动作"
     },
     "dazed": {
@@ -270,6 +274,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Dazed_rounds",
         markerName: "half-haze",
         fallbackMarker: "half-haze",
+        aliases: ["Dazed", "half-haze"],
         description: "无法采取任何动作，AC 不受直接减值"
     },
     "dazzled": {
@@ -281,6 +286,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Dazzled_rounds",
         markerName: "aura",
         fallbackMarker: "aura",
+        aliases: ["Dazzled", "aura"],
         description: "强光致盲，攻击检定与视力察觉检定承受 -1 减值"
     },
     "dead": {
@@ -292,6 +298,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Dead_rounds",
         markerName: "006-Dead",
         fallbackMarker: "dead",
+        aliases: ["006-Dead", "dead", "skull"],
         description: "生命值降至负体质值以下，无法行动与自行恢复"
     },
     "deafened": {
@@ -303,6 +310,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Deafened_rounds",
         markerName: "Deafened",
         fallbackMarker: "black-flag",
+        aliases: ["Deafened", "black-flag"],
         description: "先攻检定 -4，听力察觉自动失败，言语成分法术 20% 失败率"
     },
     "disabled": {
@@ -314,6 +322,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Disabled_rounds",
         markerName: "snail",
         fallbackMarker: "snail",
+        aliases: ["Disabled", "snail"],
         description: "生命恰为 0，每轮只能做单个移动或标动，做标动受 1 伤害转濒死"
     },
     "drowning": {
@@ -325,6 +334,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Drowning_rounds",
         markerName: "bubble",
         fallbackMarker: "bubble",
+        aliases: ["Drowning", "bubble"],
         description: "溺水缺氧，无法呼吸，陷入昏迷与濒死"
     },
     "dying": {
@@ -336,6 +346,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Dying_rounds",
         markerName: "half-heart",
         fallbackMarker: "half-heart",
+        aliases: ["Dying", "half-heart"],
         description: "生命值为负，处于昏迷无助，每轮需体质检定否则流失生命"
     },
     "entangled": {
@@ -347,6 +358,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Entangled_rounds",
         markerName: "Entangle",
         fallbackMarker: "fishing-net",
+        aliases: ["Entangle", "Entangled", "601-Entangled-Grappled", "fishing-net"],
         description: "移动半速无法奔跑，敏捷 -4，攻击检定 -2，施法需集中检定"
     },
     "exhausted": {
@@ -358,6 +370,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Exhausted_rounds",
         markerName: "Exhausted",
         fallbackMarker: "back-pain",
+        aliases: ["Exhausted", "back-pain"],
         description: "移动半速，力量和敏捷受到 -6 减值，休息 1 小时转为疲乏"
     },
     "fascinated": {
@@ -369,6 +382,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Fascinated_rounds",
         markerName: "Charmed",
         fallbackMarker: "aura",
+        aliases: ["Fascinated", "Charmed", "aura"],
         description: "驻足注视目标，察觉等技能受到 -4 减值，受到潜在威胁解除"
     },
     "fatigued": {
@@ -380,6 +394,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Fatigued_rounds",
         markerName: "back-pain",
         fallbackMarker: "snail",
+        aliases: ["Fatigued", "back-pain", "snail"],
         description: "无法奔跑或冲锋，力量和敏捷受到 -2 减值，休息 8 小时解除"
     },
     "flat_footed": {
@@ -390,19 +405,21 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Flat-Footed",
         roundsKey: "condition-Flat-Footed_rounds",
         markerName: "arrowed",
-        fallbackMarker: "fist",
-        description: "战斗尚未行动，失去 AC 敏捷加值，无法进行借机攻击"
+        fallbackMarker: "arrowed",
+        aliases: ["Flat-Footed", "Flat_Footed", "FlatFooted", "arrowed"],
+        description: "未行动前失去敏捷加值与直觉动作，无法借机攻击"
     },
     "frightened": {
         id: "frightened",
         nameZh: "恐慌",
         nameEn: "Frightened",
-        isNativeSheet: true, // 对应角色卡 condition-Fear (恐慌任意)
+        isNativeSheet: true,
         attrKey: "condition-Fear",
         roundsKey: "condition-Fear_rounds",
-        markerName: "Frightened",
+        markerName: "Cause of Fear",
         fallbackMarker: "screaming",
-        description: "承受 -2 攻击/豁免/技能检定，且必须全力逃离恐惧源"
+        aliases: ["Cause of Fear", "Cause_of_Fear", "Frightened", "Fear", "screaming"],
+        description: "恐惧逃离源头，攻击检定/豁免/技能受到 -2 减值，无法自主接近威胁"
     },
     "grappled": {
         id: "grappled",
@@ -413,6 +430,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Grappled_rounds",
         markerName: "Grappled",
         fallbackMarker: "grab",
+        aliases: ["Grappled", "601-Entangled-Grappled", "grab"],
         description: "无法移动，敏捷 -4，攻击与战技检定 -2，施法需集中检定"
     },
     "helpless": {
@@ -424,6 +442,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Helpless_rounds",
         markerName: "padlock",
         fallbackMarker: "padlock",
+        aliases: ["Helpless", "padlock"],
         description: "完全无法防卫，敏捷视同为 0 (-5 AC)，近战受击可被政变"
     },
     "incorporeal": {
@@ -435,6 +454,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Incorporeal_rounds",
         markerName: "Incorporeal",
         fallbackMarker: "aura",
+        aliases: ["Incorporeal", "aura"],
         description: "无实体，免疫非魔法攻击，魔法武器伤害半额，可穿透实物"
     },
     "invisible": {
@@ -446,6 +466,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Invisible_rounds",
         markerName: "Invisible",
         fallbackMarker: "ninja-mask",
+        aliases: ["Invisible", "ninja-mask"],
         description: "视觉不可见，拥有全隐蔽(50%失手)，攻击有视觉目标 +2"
     },
     "nauseated": {
@@ -455,9 +476,22 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Nauseated",
         roundsKey: "condition-Nauseated_rounds",
-        markerName: "chemical-bolt",
+        markerName: "Poisoned",
         fallbackMarker: "chemical-bolt",
+        aliases: ["Nauseated", "Poisoned", "602-Poisoned", "chemical-bolt"],
         description: "极度胃部不适，每轮只能做单个移动动作，不可攻击或施法"
+    },
+    "panicked": {
+        id: "panicked",
+        nameZh: "驚懼",
+        nameEn: "Panicked",
+        isNativeSheet: false, // CRB 核心状态
+        attrKey: "custom_cond_panicked",
+        roundsKey: "custom_cond_panicked_rounds",
+        markerName: "screaming",
+        fallbackMarker: "screaming",
+        aliases: ["Panicked", "screaming"],
+        description: "扔下持有物全速逃离危险，防御检定承受 -2 减值，被逼角落时陷入畏缩"
     },
     "paralyzed": {
         id: "paralyzed",
@@ -468,6 +502,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Paralyzed_rounds",
         markerName: "Paralyzed",
         fallbackMarker: "padlock",
+        aliases: ["Paralyzed", "padlock"],
         description: "肌肉僵直，力量敏捷视同为 0，完全无助，无法移动或发声"
     },
     "petrified": {
@@ -478,8 +513,9 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Petrified",
         roundsKey: "condition-Petrified_rounds",
         markerName: "Petrified",
-        fallbackMarker: "white-tower",
-        description: "转变为石头形态，完全无助，视同昏迷并停止感知"
+        fallbackMarker: "interdiction",
+        aliases: ["Petrified", "interdiction"],
+        description: "身躯化为石质，完全无助昏迷，硬度 8，具有伤害减免"
     },
     "pinned": {
         id: "pinned",
@@ -488,9 +524,10 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Pinned",
         roundsKey: "condition-Pinned_rounds",
-        markerName: "padlock",
+        markerName: "grab",
         fallbackMarker: "grab",
-        description: "擒抱升级状态，完全无法移动，极度缺乏防御，无法说话"
+        aliases: ["Pinned", "grab", "padlock"],
+        description: "紧紧受制无法移动，AC -4 并失去敏捷加值，无法施展躯体法术"
     },
     "prone": {
         id: "prone",
@@ -501,7 +538,20 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Prone_rounds",
         markerName: "Prone",
         fallbackMarker: "tread",
-        description: "倒地，近战攻击 -4，近战受击 AC -4，远程受击 AC +4"
+        aliases: ["Prone", "101-KnockedDown", "tread"],
+        description: "倒地卧姿，近战攻击检定 -4，近战受击 AC -4，远程受击 AC +4"
+    },
+    "shaken": {
+        id: "shaken",
+        nameZh: "戰慄",
+        nameEn: "Shaken",
+        isNativeSheet: false, // CRB 核心状态
+        attrKey: "custom_cond_shaken",
+        roundsKey: "custom_cond_shaken_rounds",
+        markerName: "Cause of Fear",
+        fallbackMarker: "broken-heart",
+        aliases: ["Shaken", "Cause of Fear", "Cause_of_Fear", "broken-heart"],
+        description: "轻微恐惧，攻击检定、豁免检定与技能检定承受 -2 减值"
     },
     "sickened": {
         id: "sickened",
@@ -510,9 +560,10 @@ const PF1E_CONDITIONS = {
         isNativeSheet: true,
         attrKey: "condition-Sickened",
         roundsKey: "condition-Sickened_rounds",
-        markerName: "chemical-bolt",
-        fallbackMarker: "chemical-bolt",
-        description: "轻度恶心不适，攻击、伤害、豁免、技能检定受到 -2 减值"
+        markerName: "Poisoned",
+        fallbackMarker: "snail",
+        aliases: ["Sickened", "Poisoned", "602-Poisoned", "snail"],
+        description: "身体不适恶心，攻击检定、武器伤害、豁免与技能检定承受 -2 减值"
     },
     "stable": {
         id: "stable",
@@ -523,7 +574,8 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Stable_rounds",
         markerName: "Stabilized",
         fallbackMarker: "half-heart",
-        description: "生命值为负但已停止失血，昏迷但不再自动濒死流失生命"
+        aliases: ["Stabilized", "Stable", "half-heart"],
+        description: "濒死但伤势稳定，不再每轮流失生命，生命恢复正值前仍昏迷"
     },
     "staggered": {
         id: "staggered",
@@ -533,19 +585,21 @@ const PF1E_CONDITIONS = {
         attrKey: "condition-Staggered",
         roundsKey: "condition-Staggered_rounds",
         markerName: "Staggered",
-        fallbackMarker: "stopwatch",
-        description: "每轮只能执行一个移动动作或标准动作(二选一)"
+        fallbackMarker: "snail",
+        aliases: ["Staggered", "snail"],
+        description: "重创踉跄，每轮只能执行单个标动或移动动作，可做直觉动作"
     },
     "stunned": {
         id: "stunned",
-        nameZh: "Stunned", // 规则震慑，角色卡标签为 Stunned
+        nameZh: "震懾",
         nameEn: "Stunned",
         isNativeSheet: true,
         attrKey: "condition-Stunned",
         roundsKey: "condition-Stunned_rounds",
         markerName: "Stunned",
         fallbackMarker: "lightning-helix",
-        description: "丢弃手中武器，无法采取动作，AC -2 并失去敏捷加值"
+        aliases: ["Stunned", "lightning-helix"],
+        description: "掉落持有物，无法采取动作，AC -2 并失去敏捷加值"
     },
     "suffocating": {
         id: "suffocating",
@@ -556,6 +610,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Suffocating_rounds",
         markerName: "bubble",
         fallbackMarker: "bubble",
+        aliases: ["Suffocating", "bubble"],
         description: "严重缺氧，逐轮消耗体质，进入濒死并迅速死亡"
     },
     "unconscious": {
@@ -567,6 +622,7 @@ const PF1E_CONDITIONS = {
         roundsKey: "condition-Unconscious_rounds",
         markerName: "Unconcious",
         fallbackMarker: "sleepy",
+        aliases: ["Unconscious", "Unconcious", "005-Unconscious", "sleepy"],
         description: "失去知觉并倒地，完全无助，无法采取任何动作"
     }
 };
@@ -576,21 +632,47 @@ const PF1E_CONDITIONS = {
  */
 class Pf1eConditionRegistry {
     /**
-     * 根据任意键名、属性名或中文名匹配状态定义
+     * 字符串归一化（去除 ::id，替换 _ 和 - 为无符号小写纯字母）
+     */
+    static normalizeKey(str) {
+        if (!str) return "";
+        return String(str)
+            .split("::")[0]
+            .trim()
+            .toLowerCase()
+            .replace(/[_-\s]+/g, "");
+    }
+
+    /**
+     * 根据任意键名、属性名、中文名、自定义 Tag 或别名匹配状态定义
      */
     static find(keyOrName) {
         if (!keyOrName) return null;
-        const lower = String(keyOrName).trim().toLowerCase();
+        const raw = String(keyOrName).split("::")[0].trim();
+        const lower = raw.toLowerCase();
+        const norm = this.normalizeKey(raw);
 
         // 1. 直接 ID 匹配
         if (PF1E_CONDITIONS[lower]) return PF1E_CONDITIONS[lower];
+        if (PF1E_CONDITIONS[norm]) return PF1E_CONDITIONS[norm];
 
-        // 2. 遍历匹配 attrKey, nameZh, nameEn, markerName
+        // 2. 遍历匹配各项属性与别名
         for (const def of Object.values(PF1E_CONDITIONS)) {
-            if (def.attrKey && def.attrKey.toLowerCase() === lower) return def;
-            if (def.nameZh.toLowerCase() === lower) return def;
-            if (def.nameEn.toLowerCase() === lower) return def;
-            if (def.markerName && def.markerName.toLowerCase() === lower) return def;
+            if (def.id === lower || def.id === norm) return def;
+            if (def.attrKey && (def.attrKey.toLowerCase() === lower || this.normalizeKey(def.attrKey) === norm)) return def;
+            if (def.nameZh && def.nameZh === raw) return def;
+            if (def.nameEn && (def.nameEn.toLowerCase() === lower || this.normalizeKey(def.nameEn) === norm)) return def;
+            if (def.markerName && (def.markerName.toLowerCase() === lower || this.normalizeKey(def.markerName) === norm)) return def;
+            if (def.fallbackMarker && (def.fallbackMarker.toLowerCase() === lower || this.normalizeKey(def.fallbackMarker) === norm)) return def;
+
+            // 3. 别名列表匹配
+            if (Array.isArray(def.aliases)) {
+                for (const alias of def.aliases) {
+                    if (alias.toLowerCase() === lower || this.normalizeKey(alias) === norm) {
+                        return def;
+                    }
+                }
+            }
         }
         return null;
     }
@@ -614,11 +696,18 @@ class Pf1eConditionRegistry {
             }
         }
 
-        // 1. 尝试在当前战役的自定义标记包中寻找精准同名 Tag (如 Confused::6485456)
-        if (Array.isArray(markers) && def.markerName) {
-            const match = markers.find(m => m.name && m.name.toLowerCase() === def.markerName.toLowerCase());
-            if (match && match.tag) {
-                return match.tag;
+        // 1. 尝试在当前战役的自定义标记包中寻找匹配项 (通过 markerName 与 aliases 归一化双向匹配)
+        if (Array.isArray(markers)) {
+            const targets = [def.markerName, ...(def.aliases || [])].filter(Boolean);
+            for (const target of targets) {
+                const normTarget = this.normalizeKey(target);
+                const match = markers.find(m => {
+                    if (!m.name) return false;
+                    return m.name.toLowerCase() === target.toLowerCase() || this.normalizeKey(m.name) === normTarget;
+                });
+                if (match && match.tag) {
+                    return match.tag;
+                }
             }
         }
 
@@ -877,7 +966,8 @@ class Pf1eBuffManager {
         if (!character || !character.attribs || character._pf1eAttribsBound) return;
         character._pf1eAttribsBound = true;
 
-        character.attribs.on("change:current", async (attr, options) => {
+        const handleAttributeMutation = async (attr, options) => {
+            if (!attr) return;
             // 忽略脚本自主更新或正在批量修改，彻底切断震荡回路
             if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
 
@@ -901,7 +991,11 @@ class Pf1eBuffManager {
                     }
                 });
             }
-        });
+        };
+
+        // 同时监听属性值变更 (change:current) 与卡面首次勾选新建属性 (add)
+        character.attribs.on("change:current", handleAttributeMutation);
+        character.attribs.on("add", (attr, collection, options) => handleAttributeMutation(attr, options));
     }
 
     /**
@@ -2921,9 +3015,6 @@ class CanvasMarkerHoverObserver {
      * 监听棋子标记手动变动，实现棋子加/删标记自动反向联动人物卡/先攻栏 Debuff
      */
     static bindTokenMarkerChangeListeners() {
-        const page = Roll20Bridge.getCurrentPage();
-        if (!page || !page.thegraphics) return;
-
         const boundTokens = new Set();
         const tokenLastStatusMarkers = new Map();
 
@@ -2950,9 +3041,7 @@ class CanvasMarkerHoverObserver {
                 // 1. 查找新增的 tags (玩家手动在棋子上点击添加标记)
                 for (const tag of newTags) {
                     if (!oldTags.has(tag)) {
-                        const cleanTag = tag.split("::")[0];
-                        const normalized = cleanTag.replace(/_/g, " ");
-                        const def = Pf1eConditionRegistry.find(cleanTag) || Pf1eConditionRegistry.find(normalized) || Pf1eConditionRegistry.find(tag);
+                        const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子新增标记 [${tag}]，反向激活角色卡 Debuff: ${def.nameZh}`);
                             await Pf1eBuffManager.applyCondition(character, def.attrKey || def.id, -1);
@@ -2963,9 +3052,7 @@ class CanvasMarkerHoverObserver {
                 // 2. 查找移除的 tags (玩家手动在棋子上点击移除标记)
                 for (const tag of oldTags) {
                     if (!newTags.has(tag)) {
-                        const cleanTag = tag.split("::")[0];
-                        const normalized = cleanTag.replace(/_/g, " ");
-                        const def = Pf1eConditionRegistry.find(cleanTag) || Pf1eConditionRegistry.find(normalized) || Pf1eConditionRegistry.find(tag);
+                        const def = Pf1eConditionRegistry.find(tag);
                         if (def) {
                             console.log(`[CanvasMarkerHoverObserver] 检测到棋子移除标记 [${tag}]，反向解除角色卡 Debuff: ${def.nameZh}`);
                             await Pf1eBuffManager.removeCondition(character, def.attrKey || def.id);
@@ -2978,8 +3065,21 @@ class CanvasMarkerHoverObserver {
             });
         };
 
-        page.thegraphics.each(attachToToken);
-        page.thegraphics.on("add", attachToToken);
+        const attachAllCurrent = () => {
+            const page = Roll20Bridge.getCurrentPage();
+            if (!page || !page.thegraphics) return;
+            page.thegraphics.each(attachToToken);
+            page.thegraphics.on("add", attachToToken);
+        };
+
+        attachAllCurrent();
+
+        // 监听换页，确保新页面棋子同样挂载监听
+        if (window.Campaign) {
+            window.Campaign.on("change:playerpageid", () => {
+                setTimeout(attachAllCurrent, 500);
+            });
+        }
     }
 
     /**
