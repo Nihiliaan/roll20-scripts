@@ -155,6 +155,13 @@ export class BuffPanelDragDrop {
                 return;
             }
 
+            if (fromPane === "unit" && sourcePane === "unit") {
+                if ((draggedNode.rowId && draggedNode.rowId === node.rowId) || (draggedNode.id && draggedNode.id === node.id)) return;
+                if (onReorder) await onReorder(draggedNode, sourceList, sourceIdx, node, parentList, index);
+                setDraggedContext(null);
+                return;
+            }
+
             if (fromPane === "template" && sourcePane === "template" && sourceList) {
                 if (draggedNode.id === node.id) return;
                 if (onReorder) await onReorder(draggedNode, sourceList, sourceIdx, node, parentList, index, isPeerDrop);
@@ -168,20 +175,20 @@ export class BuffPanelDragDrop {
      */
     static setupTreeContainerDrop({ el, getDraggedContext, setDraggedContext, onCrossCopyRoot, onReorderRoot }) {
         el.addEventListener("dragover", (e) => {
-            if (e.target === el || e.target.classList.contains("r20-template-tree")) {
+            if (e.target === el || el.contains(e.target)) {
                 e.preventDefault();
                 el.classList.add("r20-drag-container-over");
             }
         });
 
         el.addEventListener("dragleave", (e) => {
-            if (e.target === el) {
+            if (!el.contains(e.relatedTarget)) {
                 el.classList.remove("r20-drag-container-over");
             }
         });
 
         el.addEventListener("drop", async (e) => {
-            if (e.target === el || e.target.classList.contains("r20-template-tree")) {
+            if (e.target === el || el.contains(e.target)) {
                 e.preventDefault();
                 el.classList.remove("r20-drag-container-over");
                 const dragged = getDraggedContext();

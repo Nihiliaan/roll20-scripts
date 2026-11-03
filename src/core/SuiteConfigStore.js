@@ -17,7 +17,7 @@ export class SuiteConfigStore {
      * 判断当前登录玩家是否具备 GM (裁判) 权限
      */
     static isGM() {
-        return window.isGM === true;
+        return Roll20Bridge.isGM();
     }
 
     /**
@@ -49,7 +49,33 @@ export class SuiteConfigStore {
 
         console.log("[SuiteConfigStore] 成功创建战役公共配置卡: " + this.DATABASE_CHARACTER_NAME);
         await Roll20Bridge.ensureCharacterAttributes(newChar);
+        if (typeof newChar.connectAttributesAndAbilities === "function" && (!newChar.attribs || newChar.attribs.length === 0)) {
+            await newChar.connectAttributesAndAbilities();
+        }
         return newChar;
+    }
+
+    /**
+     * 确保数据库角色卡可用（若不存在且当前是 GM，则原子创建并初始化）
+     * 无论是通过加号新建、拖拽复制、批量导入，往 Buff 模板库写入时均统一调用此入口
+     */
+    static async ensureDatabaseCharacter() {
+        let dbChar = this.findDatabaseCharacter();
+        if (!dbChar) {
+            if (this.isGM()) {
+                dbChar = await this.createDatabaseCharacter();
+            } else {
+                console.warn("[SuiteConfigStore] 未找到战役公共配置卡，且非 GM 用户无权创建");
+                return null;
+            }
+        }
+        if (dbChar) {
+            await Roll20Bridge.ensureCharacterAttributes(dbChar);
+            if (typeof dbChar.connectAttributesAndAbilities === "function" && (!dbChar.attribs || dbChar.attribs.length === 0)) {
+                await dbChar.connectAttributesAndAbilities();
+            }
+        }
+        return dbChar;
     }
 
     /**
@@ -162,13 +188,8 @@ export class SuiteConfigStore {
      * 仅保存目录拓扑结构（绝不覆写或误杀角色卡上的任何原生属性）
      */
     static async saveTopology(templates) {
-        let dbChar = this.findDatabaseCharacter();
-        if (!dbChar && this.isGM()) {
-            dbChar = await this.createDatabaseCharacter();
-        }
+        const dbChar = await this.ensureDatabaseCharacter();
         if (!dbChar) return false;
-
-        await Roll20Bridge.ensureCharacterAttributes(dbChar);
 
         const extractTopology = (nodes) => {
             return nodes.map(n => {
@@ -209,13 +230,8 @@ export class SuiteConfigStore {
      * 原子新增一个 Buff 到数据库角色卡
      */
     static async addBuffToDatabase(name, rounds = null, extraAttrs = null, initRounds = null) {
-        let dbChar = this.findDatabaseCharacter();
-        if (!dbChar && this.isGM()) {
-            dbChar = await this.createDatabaseCharacter();
-        }
+        const dbChar = await this.ensureDatabaseCharacter();
         if (!dbChar) return null;
-
-        await Roll20Bridge.ensureCharacterAttributes(dbChar);
 
         const rowId = window.generateUUID ? window.generateUUID() : ("-R20" + Math.random().toString(36).substr(2, 16));
         await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
@@ -228,10 +244,9 @@ export class SuiteConfigStore {
      * 原子更新数据库角色卡上的指定 Buff
      */
     static async updateBuffInDatabase(rowId, name, rounds = null, extraAttrs = null, initRounds = null) {
-        const dbChar = this.findDatabaseCharacter();
+        const dbChar = await this.ensureDatabaseCharacter();
         if (!dbChar || !rowId) return false;
 
-        await Roll20Bridge.ensureCharacterAttributes(dbChar);
         await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
 
         console.log("[SuiteConfigStore] 原子更新原生 Buff [" + name + "] (rowId: " + rowId + ", initRounds: " + initRounds + ")");

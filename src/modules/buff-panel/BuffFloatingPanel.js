@@ -69,8 +69,18 @@ export class BuffFloatingPanel {
             getDraggedContext: () => this._draggedContext,
             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
             onCrossCopyRoot: async (draggedNode) => {
-                await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs);
-                await this.renderTemplatePane();
+                const newRowId = await SuiteConfigStore.addBuffToDatabase(
+                    draggedNode.name, 
+                    draggedNode.rounds, 
+                    draggedNode.extraAttrs, 
+                    draggedNode.initRounds
+                );
+                if (newRowId) {
+                    this.showNotice(`已将 [${draggedNode.name}] 存入 Buff 模板库`);
+                    await this.renderTemplatePane();
+                } else {
+                    this.showNotice("⚠️ 存入模板库失败：仅主持人 (GM) 具备创建模板角色卡权限");
+                }
             },
             onReorderRoot: async (draggedNode, sourceList, sourceIdx) => {
                 sourceList.splice(sourceIdx, 1);
@@ -387,19 +397,21 @@ export class BuffFloatingPanel {
                     }
                 } else {
                     const newRowId = await SuiteConfigStore.addBuffToDatabase(name, rounds, extraAttrs, initRounds);
-                    if (newRowId) {
-                        this.currentTemplates.push({
-                            id: newRowId,
-                            rowId: newRowId,
-                            type: "buff",
-                            name,
-                            rounds,
-                            initRounds,
-                            extraAttrs
-                        });
-                        await SuiteConfigStore.saveTopology(this.currentTemplates);
+                    if (!newRowId) {
+                        this.showToast("⚠️ 创建模板失败：战役未初始化公共配置卡，仅主持人 (GM) 具备自动创建权限。", "warn");
+                        return;
                     }
-                    this.showToast("✨ 已创建 Buff [" + name + "]", "success");
+                    this.currentTemplates.push({
+                        id: newRowId,
+                        rowId: newRowId,
+                        type: "buff",
+                        name,
+                        rounds,
+                        initRounds,
+                        extraAttrs
+                    });
+                    await SuiteConfigStore.saveTopology(this.currentTemplates);
+                    this.showToast("✨ 已创建 Buff 模板 [" + name + "]", "success");
                     await this.renderTemplatePane();
                 }
                 mask.remove();
@@ -565,6 +577,31 @@ export class BuffFloatingPanel {
                         }
                         await SuiteConfigStore.saveTopology(this.currentTemplates);
                         await this.renderTemplatePane();
+                    },
+                    onCrossCopy: async (draggedNode, targetFolder) => {
+                        const newRowId = await SuiteConfigStore.addBuffToDatabase(
+                            draggedNode.name,
+                            draggedNode.rounds,
+                            draggedNode.extraAttrs,
+                            draggedNode.initRounds
+                        );
+                        if (newRowId) {
+                            if (!targetFolder.children) targetFolder.children = [];
+                            targetFolder.children.push({
+                                id: newRowId,
+                                rowId: newRowId,
+                                type: "buff",
+                                name: draggedNode.name,
+                                rounds: draggedNode.rounds,
+                                initRounds: draggedNode.initRounds,
+                                extraAttrs: draggedNode.extraAttrs
+                            });
+                            await SuiteConfigStore.saveTopology(this.currentTemplates);
+                            this.showNotice(`已将 [${draggedNode.name}] 存入文件夹 [${targetFolder.name}]`);
+                            await this.renderTemplatePane();
+                        } else {
+                            this.showNotice("⚠️ 存入模板库失败：仅主持人 (GM) 具备创建模板角色卡权限");
+                        }
                     }
                 });
             } else {
@@ -625,6 +662,32 @@ export class BuffFloatingPanel {
                         tgtList.splice(tgtIdx, 0, draggedNode);
                         await SuiteConfigStore.saveTopology(this.currentTemplates);
                         await this.renderTemplatePane();
+                    },
+                    onCrossCopy: async (draggedNode, targetNode, parentList, targetIdx) => {
+                        const newRowId = await SuiteConfigStore.addBuffToDatabase(
+                            draggedNode.name,
+                            draggedNode.rounds,
+                            draggedNode.extraAttrs,
+                            draggedNode.initRounds
+                        );
+                        if (newRowId) {
+                            if (parentList) {
+                                parentList.splice(targetIdx + 1, 0, {
+                                    id: newRowId,
+                                    rowId: newRowId,
+                                    type: "buff",
+                                    name: draggedNode.name,
+                                    rounds: draggedNode.rounds,
+                                    initRounds: draggedNode.initRounds,
+                                    extraAttrs: draggedNode.extraAttrs
+                                });
+                                await SuiteConfigStore.saveTopology(this.currentTemplates);
+                            }
+                            this.showNotice(`已将 [${draggedNode.name}] 存入 Buff 模板库`);
+                            await this.renderTemplatePane();
+                        } else {
+                            this.showNotice("⚠️ 存入模板库失败：仅主持人 (GM) 具备创建模板角色卡权限");
+                        }
                     }
                 });
             }
@@ -663,7 +726,20 @@ export class BuffFloatingPanel {
             details.open = true;
 
             const summary = document.createElement("summary");
-            summary.innerHTML = "<span>🛡️ " + tokenName + "</span>";
+            summary.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                    <span>🛡️ ${tokenName}</span>
+                    ${char ? `<button class="r20-btn-icon btn-recalc-char" title="强制触发角色卡加值重算 (recalc1)" style="font-size:11px; padding:0 4px; margin-right:4px; opacity:0.8;">🔄</button>` : ""}
+                </div>
+            `;
+            if (char) {
+                summary.querySelector(".btn-recalc-char")?.addEventListener("click", async (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    await Pf1eBuffManager.triggerRecalculate(char);
+                    this.showNotice(`已触发 [${tokenName}] 加值重算`);
+                });
+            }
             details.appendChild(summary);
 
             const content = document.createElement("div");
@@ -674,7 +750,7 @@ export class BuffFloatingPanel {
                 if (buffs.length === 0) {
                     content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(卡上暂无配置Buff)</div>';
                 } else {
-                    buffs.forEach(b => {
+                    buffs.forEach((b, bIdx) => {
                         const item = document.createElement("div");
                         const isEnabled = !!b.enabled;
                         const selectId = `u_${char.id}_${b.rowId}`;
@@ -714,15 +790,29 @@ export class BuffFloatingPanel {
 
                         content.appendChild(item);
 
-                        // 支持从单位栏反向拖拽至模板库另存为模板
+                        // 挂载拖拽排序与跨面板保存
                         BuffPanelDragDrop.setupItemDrag({
                             el: item,
                             node: b,
-                            parentList: null,
-                            index: 0,
+                            parentList: buffs,
+                            index: bIdx,
                             sourcePane: "unit",
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
+                            onReorder: async (draggedNode, sourceList, sourceIdx, targetNode, targetList, targetIdx) => {
+                                if (sourceIdx === targetIdx || sourceIdx < 0 || targetIdx < 0) return;
+                                const reordered = [...buffs];
+                                const [moved] = reordered.splice(sourceIdx, 1);
+                                reordered.splice(targetIdx, 0, moved);
+                                const rowIds = reordered.map(item => item.rowId).filter(Boolean).join(",");
+                                let orderAttr = char.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+                                if (!orderAttr) {
+                                    char.attribs.create({ name: "_reporder_repeating_buff2", current: rowIds });
+                                } else {
+                                    orderAttr.save({ current: rowIds });
+                                }
+                                await this.renderUnitPane();
+                            },
                             onCrossCopy: async (draggedNode) => {
                                 const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs, draggedNode.initRounds);
                                 if (newRowId) {
@@ -737,7 +827,7 @@ export class BuffFloatingPanel {
                 if (buffs.length === 0) {
                     content.innerHTML = '<div style="color:#78909c; font-size:10px; padding:4px;">(暂无激活Buff)</div>';
                 } else {
-                    buffs.forEach(b => {
+                    buffs.forEach((b, bIdx) => {
                         const item = document.createElement("div");
                         const selectId = `k_${tokenItem.token.id}_${encodeURIComponent(b.name)}`;
                         const isSelected = this.isEditMode && this.selectedNodeIds.has(selectId);
@@ -773,11 +863,19 @@ export class BuffFloatingPanel {
                         BuffPanelDragDrop.setupItemDrag({
                             el: item,
                             node: b,
-                            parentList: null,
-                            index: 0,
+                            parentList: buffs,
+                            index: bIdx,
                             sourcePane: "unit",
                             getDraggedContext: () => this._draggedContext,
                             setDraggedContext: (ctx) => { this._draggedContext = ctx; },
+                            onReorder: async (draggedNode, sourceList, sourceIdx, targetNode, targetList, targetIdx) => {
+                                if (sourceIdx === targetIdx || sourceIdx < 0 || targetIdx < 0) return;
+                                const reordered = [...buffs];
+                                const [moved] = reordered.splice(sourceIdx, 1);
+                                reordered.splice(targetIdx, 0, moved);
+                                TokenBuffManager.saveTokenBuffs(tokenItem.token, reordered);
+                                await this.renderUnitPane();
+                            },
                             onCrossCopy: async (draggedNode) => {
                                 const newRowId = await SuiteConfigStore.addBuffToDatabase(draggedNode.name, draggedNode.rounds, draggedNode.extraAttrs, draggedNode.initRounds);
                                 if (newRowId) {

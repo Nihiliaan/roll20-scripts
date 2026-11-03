@@ -596,7 +596,65 @@ export class Pf1eBuffManager {
             });
         }
 
+        // 按照 Roll20 官方 _reporder_repeating_buff2 顺序重排
+        const orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+        if (orderAttr && orderAttr.get("current")) {
+            const orderList = orderAttr.get("current").split(",").map(id => id.trim().toLowerCase()).filter(Boolean);
+            const orderMap = new Map();
+            orderList.forEach((id, idx) => orderMap.set(id, idx));
+
+            buffs.sort((a, b) => {
+                const idxA = orderMap.has(a.rowId.toLowerCase()) ? orderMap.get(a.rowId.toLowerCase()) : 9999;
+                const idxB = orderMap.has(b.rowId.toLowerCase()) ? orderMap.get(b.rowId.toLowerCase()) : 9999;
+                return idxA - idxB;
+            });
+        }
+
         return buffs;
+    }
+
+    /**
+     * 触发角色卡的 Sheet Worker 全量重算 (PFSheet.recalculate)
+     * 自动刷新攻击力、防御、豁免等所有骰子宏引用的计算属性
+     * @param {object} character 
+     */
+    static async triggerRecalculate(character) {
+        if (!character) return;
+        await Roll20Bridge.ensureCharacterAttributes(character);
+        if (!character.attribs) return;
+
+        console.log(`[Pf1eBuffManager] 正在自动触发角色 [${character.get("name")}] 的加值重算 (recalc1)...`);
+
+        // 1. 设置底层属性 recalc1 触发 Sheet Worker (on("change:recalc1"))
+        let recalcAttr = character.attribs.models.find(a => a.get("name") === "recalc1");
+        if (!recalcAttr) {
+            character.attribs.create({ name: "recalc1", current: "1" });
+        } else {
+            if (recalcAttr.get("current") === "1" || recalcAttr.get("current") === 1) {
+                recalcAttr.set({ current: "0" }, { silent: true });
+            }
+            recalcAttr.save({ current: "1" });
+        }
+
+        // 2. 检查是否有处于打开状态的人物卡窗口，如果有，直接触发 DOM 原生点击以加速双重响应
+        try {
+            const charId = character.id;
+            const dialogs = document.querySelectorAll(`.characterdialog[data-characterid="${charId}"], .characterdialog`);
+            dialogs.forEach(dlg => {
+                const recalcBtn = dlg.querySelector('input[name="attr_recalc1"], input[name$="_recalc1"]');
+                if (recalcBtn) {
+                    recalcBtn.click();
+                }
+                const iframes = dlg.querySelectorAll("iframe");
+                iframes.forEach(iframe => {
+                    try {
+                        const doc = iframe.contentDocument || iframe.contentWindow?.document;
+                        const frameBtn = doc?.querySelector('input[name="attr_recalc1"], input[name$="_recalc1"]');
+                        if (frameBtn) frameBtn.click();
+                    } catch (e) {}
+                });
+            });
+        } catch (domErr) {}
     }
 
     /**
@@ -685,10 +743,12 @@ export class Pf1eBuffManager {
             }
 
             console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 激活并刷新已有同名 Buff [${cleanName}], 轮数: ${effectiveRounds}`);
+            await this.triggerRecalculate(character);
             return { rowId, prefix, name: cleanName, rounds: effectiveRounds, isRefreshed: true };
         } else {
             // 不存在同名 Buff，新增一行
             const newBuff = await this.addBuff(character, cleanName, rounds, extraAttrs, initRounds);
+            await this.triggerRecalculate(character);
             return { ...newBuff, isRefreshed: false };
         }
     }
@@ -829,6 +889,7 @@ export class Pf1eBuffManager {
         }
 
         console.log(`[Pf1eBuffManager] 已${enable ? "启用" : "关停"} ${character.get("name")} 的 Buff (${rowId})`);
+        await this.triggerRecalculate(character);
         return true;
     }
 
@@ -874,6 +935,7 @@ export class Pf1eBuffManager {
         // 彻底物理销毁所有匹配的 Attribute 模型
         toDestroy.forEach(attr => attr.destroy());
         console.log(`[Pf1eBuffManager] 已物理彻底销毁 ${character.get("name")} 的 Buff [${rowId}] 共 ${toDestroy.length} 项原生属性`);
+        await this.triggerRecalculate(character);
         return true;
     }
 
@@ -963,6 +1025,7 @@ export class Pf1eBuffManager {
         }
 
         console.log(`[Pf1eBuffManager] 已更新 ${character.get("name")} 的 Buff [${name}] (${rowId})`);
+        await this.triggerRecalculate(character);
         return true;
     }
 

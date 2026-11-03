@@ -142,7 +142,7 @@ export class CharacterSheetBuffEnhancer {
 
     /**
      * 增强单行 Buff 条目
-     * 照抄原生“Buff 計算式” HTML 模板，不依赖运行时 DOM 是否已展开计算式
+     * 原汁原味复刻原生“Buff 計算式” HTML 模板，不依赖内联样式，借力宿主原生浮动与输入框排版
      */
     static enhanceRepItem(itemEl, character, groupName = "repeating_buff2") {
         if (!itemEl || !character) return;
@@ -159,7 +159,7 @@ export class CharacterSheetBuffEnhancer {
         }
         if (!rowId) return;
 
-        // 2. 找到名称 label (起始锚点)
+        // 2. 找到名称 label (即 label[1]，起始基准锚点)
         const nameInput = itemEl.querySelector('input[name="attr_name"], input[name$="_name"]');
         if (!nameInput) return;
 
@@ -175,19 +175,20 @@ export class CharacterSheetBuffEnhancer {
             ? "轮数计算式" 
             : (allText.includes("Name") && !allText.includes("名稱") ? "Rounds Formula" : "輪數計算式");
 
-        // 4. 照抄“Buff 計算式”的原生 HTML 结构模板 (单下划线底线透明输入框 + 加粗斜体居中文本)
+        // 4. 原汁原味固化复刻原生“Buff 計算式” HTML 模板 (small-label2 sect entry-med highlight)
+        // 借用原生 CSS 样式，杜绝任何冗余的 style 声明
         const tempDiv = document.createElement("div");
         tempDiv.innerHTML = `
-<label class="r20-suite-init-rounds-col" style="display:inline-block; vertical-align:top; width:70px; text-align:center; margin:0 2px; box-sizing:border-box;">
-    <input type="text" name="attr_init_rounds" class="r20-suite-init-rounds" placeholder="0" style="border:none; border-bottom:1px solid #000; border-radius:0; background:transparent; width:100%; height:24px; text-align:center; font-family:inherit; font-size:12px; color:inherit; box-sizing:border-box; padding:1px 2px;" title="预置初始轮数/公式（例如 10、@{level}*10、10+@{constitution_mod}）。开启 Buff 时借用原生引擎自动求值。">
-    <span class="r20-suite-init-rounds-label" style="display:block; text-align:center; font-weight:bold; font-style:italic; font-size:9px; color:#333; margin-top:2px; white-space:nowrap;">${labelText}</span>
+<label class="small-label2 sect entry-med highlight r20-suite-init-rounds-col">
+    <input class="macro-text-inline r20-suite-init-rounds" type="text" name="attr_init_rounds" placeholder="0" title="预置初始轮数/公式（例如 10、@{level}*10、10+@{constitution_mod}）。开启 Buff 时借用原生引擎自动求值。">
+    <span class="super note-a">${labelText}(a)</span>
 </label>
         `.trim();
 
         const newLabel = tempDiv.firstElementChild;
         const input = newLabel.querySelector("input");
 
-        // 5. 顺延插入在类型下拉框之前 (或名称后面)
+        // 5. 顺延插入：注入到 label[2] 位置，把原本的 label[2]（类型下拉框）向后顺延
         const typeSelect = itemEl.querySelector('select[name="attr_bufftype"], select[name$="_bufftype"], select[name*="bufftype"]');
         const typeLabel = typeSelect ? typeSelect.closest("label") : null;
         const targetBeforeNode = (typeLabel && typeLabel.parentNode === nameLabel.parentNode)
