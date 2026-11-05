@@ -85,6 +85,54 @@ export class Roll20Bridge {
      * @param {string|object} tokenOrId Token图元或TokenID
      * @returns {object|null} Character 模型
      */
+    static resolveBuffTargetMode(tokenOrId) {
+        const token = typeof tokenOrId === "string" ? this.getTokenGraphic(tokenOrId) : tokenOrId;
+        if (!token) {
+            return { mode: "token", char: null, token: null, isMook: false };
+        }
+
+        const char = this.getCharacterByToken(token);
+        if (!char) {
+            // 无人物卡的纯图元
+            return { mode: "token", char: null, token, isMook: false };
+        }
+
+        // 1. 检查人物卡是否为 NPC / Monster ("THIS is an NPC OR MONSTER" -> is_npc === "1")
+        const isNpcAttr = char.attribs ? char.attribs.models.find(a => a.get("name") === "is_npc") : null;
+        const isNpcVal = isNpcAttr ? String(isNpcAttr.get("current") ?? "").trim() : "";
+        const isNpc = isNpcVal === "1";
+
+        if (!isNpc) {
+            // 玩家角色卡 (PC)：无论当前地图或全战役有几个棋子（如镜像、多视角、跨图），始终代表同一人，统一持久化至人物卡
+            return { mode: "char", char, token, isMook: false };
+        }
+
+        // 2. 怪物卡 (NPC)：检查当前作战地图/所属集合中的棋子数量
+        let tokenCountOnPage = 1;
+        const charId = char.id;
+
+        if (token.collection && Array.isArray(token.collection.models)) {
+            tokenCountOnPage = token.collection.models.filter(g => g.get("represents") === charId).length;
+        } else {
+            const pageId = token.get("page_id") || token.get("_pageid");
+            const campaign = this.getCampaign();
+            if (campaign && campaign.pages && pageId) {
+                const page = campaign.pages.get(pageId);
+                if (page && page.thegraphics) {
+                    tokenCountOnPage = page.thegraphics.filter(g => g.get("represents") === charId).length;
+                }
+            }
+        }
+
+        if (tokenCountOnPage > 1) {
+            // 多棋子杂兵集群 (Mooks)：自动隔离降级至 Token 本地独立存储 (TokenBuffManager)
+            return { mode: "token", char, token, isMook: true };
+        }
+
+        // 独占有名怪 / Boss：走人物卡持久化
+        return { mode: "char", char, token, isMook: false };
+    }
+
     static getCharacterByToken(tokenOrId) {
         const token = typeof tokenOrId === "string" ? this.getTokenGraphic(tokenOrId) : tokenOrId;
         if (!token) return null;
@@ -259,5 +307,61 @@ export class Roll20Bridge {
         }
 
         return null;
+    }
+
+    /**
+     * 宿主免疫级失焦与点击外部监听器 (Host-Immune Synthetic Blur / Dismissal)
+     * 针对 Roll20 画布频繁调用 e.preventDefault() / e.stopPropagation() 的特殊环境，
+     * 在顶层 window 捕获阶段前置感知指针按下，结合 AbortController 实现原子级无残留注销。
+     * 
+     * @param {Element} targetEl 保持聚焦的目标 DOM 元素（输入框、菜单容器等）
+     * @param {Function} onDismiss 命中外部交互时的失焦回调
+     * @param {Object} [options]
+     * @param {boolean} [options.watchBlur=true] 是否同时监听切屏/切窗口 (window.blur)
+     * @param {boolean} [options.watchContext=true] 是否同时监听外部右击 (contextmenu)
+     * @returns {Function} 允许调用方提前主动注销监听的 cleanup() 函数
+     */
+    static watchDismissal(targetEl, onDismiss, options = {}) {
+        if (!targetEl || typeof onDismiss !== "function") return () => {};
+
+        const { watchBlur = true, watchContext = true } = options;
+        const ac = new AbortController();
+        const { signal } = ac;
+        let isCleanedUp = false;
+
+        const cleanup = () => {
+            if (isCleanedUp) return;
+            isCleanedUp = true;
+            ac.abort(); // 浏览器底层原子级全量注销该 signal 绑定的所有事件
+        };
+
+        const handlePointer = (e) => {
+            try {
+                if (!e.target || !(e.target instanceof Node) || !targetEl.contains(e.target)) {
+                    cleanup();
+                    onDismiss(e);
+                }
+            } catch (err) {
+                cleanup();
+                onDismiss(err);
+            }
+        };
+
+        // 延迟 10ms 挂载，防止触发当前菜单/进入编辑同一瞬间的手势自击穿
+        setTimeout(() => {
+            if (isCleanedUp) return;
+            window.addEventListener("pointerdown", handlePointer, { capture: true, signal });
+            if (watchContext) {
+                window.addEventListener("contextmenu", handlePointer, { capture: true, signal });
+            }
+            if (watchBlur) {
+                window.addEventListener("blur", () => {
+                    cleanup();
+                    onDismiss(new Event("blur"));
+                }, { signal });
+            }
+        }, 10);
+
+        return cleanup;
     }
 }

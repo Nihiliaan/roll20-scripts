@@ -12,6 +12,46 @@ export class SuiteConfigStore {
     static DATABASE_CHARACTER_NAME = "=== R20_SUITE_DATABASE ===";
     static DB_CHAR_NAME = this.DATABASE_CHARACTER_NAME;
     static ATTR_TREE_STRUCTURE = "buff_tree_structure";
+    static SETTINGS_STORAGE_KEY = "r20_suite_user_settings";
+
+    static defaultSettings = {
+        turnorder_buff_abbr: false, // 先攻条 Buff 首字缩写显示
+        debounce_recalc_enabled: false, // 是否在无操作后自动重算
+        debounce_recalc_ms: 2000, // 无操作多少毫秒后自动重算
+        buff_show_checkbox: false // 是否在 Buff 列表显示快速启停复选框
+    };
+
+    /**
+     * 获取全部用户偏好设置
+     */
+    static getSettings() {
+        try {
+            const raw = localStorage.getItem(this.SETTINGS_STORAGE_KEY);
+            return raw ? { ...this.defaultSettings, ...JSON.parse(raw) } : { ...this.defaultSettings };
+        } catch (e) {
+            return { ...this.defaultSettings };
+        }
+    }
+
+    /**
+     * 获取单项用户偏好设置
+     */
+    static getSetting(key, defaultVal) {
+        const settings = this.getSettings();
+        return settings[key] !== undefined ? settings[key] : (defaultVal !== undefined ? defaultVal : this.defaultSettings[key]);
+    }
+
+    /**
+     * 更新单项用户偏好设置并向全局广播事件
+     */
+    static setSetting(key, val) {
+        const settings = this.getSettings();
+        settings[key] = val;
+        try {
+            localStorage.setItem(this.SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+        } catch (e) {}
+        window.dispatchEvent(new CustomEvent("r20_suite_setting_changed", { detail: { key, val, settings } }));
+    }
 
     /**
      * 判断当前登录玩家是否具备 GM (裁判) 权限
@@ -22,16 +62,31 @@ export class SuiteConfigStore {
 
     /**
      * 查找战役中专用于存储 Suite 配置的公共人物卡
+     * 若当前为 GM，且发现既有卡片权限被放宽，自动执行静默收敛修复
      */
     static findDatabaseCharacter() {
         if (!window.Campaign || !window.Campaign.characters) return null;
-        return window.Campaign.characters.models.find(
+        const dbChar = window.Campaign.characters.models.find(
             c => c.get("name") === this.DATABASE_CHARACTER_NAME && !c.get("archived")
         ) || null;
+
+        if (dbChar && this.isGM()) {
+            const currentJournals = dbChar.get("inplayerjournals") || "";
+            const currentControlled = dbChar.get("controlledby") || "";
+            if (currentJournals !== "" || currentControlled !== "") {
+                dbChar.save({
+                    inplayerjournals: "",
+                    controlledby: ""
+                });
+                console.log("[SuiteConfigStore] 已静默收敛既有配置卡权限，恢复为仅 GM 独占 (inplayerjournals/controlledby 重置为空)");
+            }
+        }
+
+        return dbChar;
     }
 
     /**
-     * 自动新建战役配置人物卡（仅 GM 可调用）
+     * 自动新建战役配置人物卡（严格仅 GM 独占，杜绝 Journal 界面污染与越权修改）
      */
     static async createDatabaseCharacter() {
         if (!this.isGM()) {
@@ -42,12 +97,12 @@ export class SuiteConfigStore {
         const newChar = window.Campaign.characters.create({
             name: this.DATABASE_CHARACTER_NAME,
             avatar: "",
-            bio: "Roll20 Suite 战役全局状态 Buff 模板库存储卡。请勿手动修改本卡名称。",
-            inplayerjournals: "all",
-            controlledby: "all"
+            bio: "Roll20 Suite 战役全局状态 Buff 模板库存储卡。请勿手动修改本卡名称与权限设置。",
+            inplayerjournals: "",
+            controlledby: ""
         });
 
-        console.log("[SuiteConfigStore] 成功创建战役公共配置卡: " + this.DATABASE_CHARACTER_NAME);
+        console.log("[SuiteConfigStore] 成功创建仅 GM 专有配置卡: " + this.DATABASE_CHARACTER_NAME);
         await Roll20Bridge.ensureCharacterAttributes(newChar);
         if (typeof newChar.connectAttributesAndAbilities === "function" && (!newChar.attribs || newChar.attribs.length === 0)) {
             await newChar.connectAttributesAndAbilities();
@@ -233,8 +288,9 @@ export class SuiteConfigStore {
         const dbChar = await this.ensureDatabaseCharacter();
         if (!dbChar) return null;
 
+        const cleanAttrs = Pf1eBuffManager.sanitizeExtraAttrsForClone(extraAttrs);
         const rowId = window.generateUUID ? window.generateUUID() : ("-R20" + Math.random().toString(36).substr(2, 16));
-        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, cleanAttrs, initRounds);
 
         console.log("[SuiteConfigStore] 原子创建原生 Buff [" + name + "] (rowId: " + rowId + ", initRounds: " + initRounds + ")");
         return rowId;
@@ -247,7 +303,8 @@ export class SuiteConfigStore {
         const dbChar = await this.ensureDatabaseCharacter();
         if (!dbChar || !rowId) return false;
 
-        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, extraAttrs, initRounds);
+        const cleanAttrs = Pf1eBuffManager.sanitizeExtraAttrsForClone(extraAttrs);
+        await this.writeNativeBuffRow(dbChar, rowId, name, rounds, cleanAttrs, initRounds);
 
         console.log("[SuiteConfigStore] 原子更新原生 Buff [" + name + "] (rowId: " + rowId + ", initRounds: " + initRounds + ")");
         return true;

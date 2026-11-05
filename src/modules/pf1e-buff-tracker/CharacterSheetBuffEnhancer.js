@@ -1,7 +1,10 @@
+import { Pf1eBuffManager } from "./Pf1eBuffManager.js";
+
 /**
  * Roll20 Suite - 官方人物卡 Buff 增强注入器
- * 负责在官方人物卡 Buff 列表中动态注入“预置初始轮数/公式”输入框，
- * 采用原生“Buff 計算式”的原汁原味 HTML 模板结构，并与 Roll20 底层 Backbone 属性实现双向绑定。
+ * 遵循“原生人物卡 DOM 模板注入规范”与“自定义数据联动宿主行为合流原则”：
+ * 1. 直接在源头修改全局共享模板 (char.characterSheet.layouthtml) 以及原生 fieldset；
+ * 2. 挂钩官方人物卡保存入口 (CharacterView.prototype.saveSheetValues)，将轮数设置与开关激活合并在宿主同一行动中！
  */
 export class CharacterSheetBuffEnhancer {
     static isInitialized = false;
@@ -13,63 +16,226 @@ export class CharacterSheetBuffEnhancer {
         if (this.isInitialized) return;
         this.isInitialized = true;
 
-        console.log("[CharacterSheetBuffEnhancer] 启动官方人物卡 Buff 增强注入器...");
+        console.log("[CharacterSheetBuffEnhancer] 启动官方人物卡源头 DOM 模板注入器...");
 
-        // 1. 扫描当前已有的人物卡弹窗
-        this.scanAllDialogs();
+        // 1. 拦截官方人物卡 View 原型生命周期，确保任何卡片渲染前模板均已打好补丁
+        this.hookCharacterViewPrototype();
 
-        // 2. 监听后续打开的人物卡弹窗
-        const observer = new MutationObserver((mutations) => {
-            for (const m of mutations) {
-                for (const node of m.addedNodes) {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        if (node.matches?.(".characterdialog, .ui-dialog") || node.querySelector?.(".characterdialog")) {
-                            this.scanAllDialogs();
+        // 2. 直接对战役全局共享的 characterSheet 单例模板打补丁
+        this.patchGlobalCharacterSheetTemplate();
+
+        // 3. 对当前屏幕上已经打开的卡片进行一次性模板与既有项调和
+        this.patchOpenDialogs();
+    }
+
+    /**
+     * 拦截 CharacterView 原型生命周期 (postRender)，实现模板的零延时源头固化
+     */
+    static hookCharacterViewPrototype() {
+        try {
+            const char = window.Campaign?.characters?.at(0);
+            const proto = char?.view ? Object.getPrototypeOf(char.view) : null;
+            if (!proto || proto._r20SuiteTemplateHooked) return;
+
+            const origPostRender = proto.postRender;
+            if (typeof origPostRender === "function") {
+                proto.postRender = function() {
+                    try {
+                        if (this.model?.characterSheet) {
+                            CharacterSheetBuffEnhancer.patchLayoutHtml(this.model.characterSheet);
                         }
+                    } catch (e) {
+                        console.warn("[CharacterSheetBuffEnhancer] postRender 模板切面增强异常:", e);
                     }
+                    return origPostRender.apply(this, arguments);
+                };
+            }
+
+            // 挂钩 saveSheetValues：将官方人物卡 Enable 复选框开启与轮数重置合并在同一个原子行动中！
+            const origSaveSheetValues = proto.saveSheetValues;
+            if (typeof origSaveSheetValues === "function") {
+                proto.saveSheetValues = function(el, source) {
+                    const res = origSaveSheetValues.apply(this, arguments);
+                    try {
+                        if (el && window.$) {
+                            const $el = window.$(el);
+                            const nameAttr = $el.attr("name") || "";
+                            if (nameAttr.includes("enable_toggle") && $el.is(":checked")) {
+                                const repItem = $el.closest(".repitem");
+                                const rowId = repItem.attr("data-reprowid");
+                                if (rowId && this.model) {
+                                    Pf1eBuffManager.resetBuffRoundsToInitial(this.model, rowId);
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn("[CharacterSheetBuffEnhancer] saveSheetValues 原生合流切面异常:", e);
+                    }
+                    return res;
+                };
+            }
+
+            proto._r20SuiteTemplateHooked = true;
+            console.log("[CharacterSheetBuffEnhancer] 已成功挂钩 CharacterView 原型 postRender 与 saveSheetValues 生命周期");
+        } catch (err) {
+            console.warn("[CharacterSheetBuffEnhancer] 挂钩 CharacterView 原型异常:", err);
+        }
+    }
+
+    /**
+     * 对当前全局共享的 characterSheet 对象进行模板打补丁
+     */
+    static patchGlobalCharacterSheetTemplate() {
+        try {
+            const chars = window.Campaign?.characters?.models || [];
+            for (const char of chars) {
+                if (char.characterSheet?.layouthtml) {
+                    this.patchLayoutHtml(char.characterSheet);
+                    break; // 所有角色卡共享同一个 characterSheet 引用，修改一次即可
+                }
+            }
+        } catch (err) {
+            console.warn("[CharacterSheetBuffEnhancer] 修改全局 characterSheet 模板异常:", err);
+        }
+    }
+
+    /**
+     * 核心：对 layouthtml 字符串中的 repeating_buff2 原生 fieldset 模板进行修改
+     */
+    static patchLayoutHtml(characterSheet) {
+        if (!characterSheet || !characterSheet.layouthtml) return false;
+        if (characterSheet.layouthtml.includes('name="attr_init_rounds"')) {
+            return true; // 已打过补丁
+        }
+
+        const html = characterSheet.layouthtml;
+        const fsPos = html.indexOf('fieldset class="repeating_buff2"');
+        const altFsPos = html.indexOf("fieldset class='repeating_buff2'");
+        const startPos = fsPos !== -1 ? fsPos : altFsPos;
+        if (startPos === -1) return false;
+
+        const endFsPos = html.indexOf("</fieldset>", startPos);
+        if (endFsPos === -1) return false;
+
+        const fsSnippet = html.substring(startPos, endFsPos);
+        const nameIdx = fsSnippet.indexOf('name="attr_name"');
+        if (nameIdx === -1) return false;
+
+        // 确定语言标签风格
+        const labelText = fsSnippet.includes("名稱") ? "輪數計算式" : (fsSnippet.includes("名称") ? "轮数计算式" : "Rounds Formula");
+        const templateTag = this.buildTemplateHTML(labelText);
+
+        // 定位 name 字段所属的闭合 </label> 标签
+        const labelEndIdx = fsSnippet.indexOf("</label>", nameIdx);
+        if (labelEndIdx === -1) return false;
+
+        const insertOffset = startPos + labelEndIdx + "</label>".length;
+        const newHtml = html.substring(0, insertOffset) + "\n" + templateTag + html.substring(insertOffset);
+
+        characterSheet.layouthtml = newHtml;
+        console.log("[CharacterSheetBuffEnhancer] 已成功将初始轮数输入框固化至官方源头 characterSheet.layouthtml 模板中");
+        return true;
+    }
+
+    /**
+     * 生成标准原汁原味模板 HTML
+     */
+    static buildTemplateHTML(labelText = "輪數計算式") {
+        return `
+<label class="small-label2 entry-med highlight r20-suite-init-rounds-col">
+    <input class="macro-text-inline r20-suite-init-rounds" type="text" name="attr_init_rounds" placeholder="0" title="预置初始轮数/公式（例如 10、@{level}*10、10+@{constitution_mod}）。开启 Buff 时借用原生引擎自动求值。">
+    <span class="super note-a">${labelText}</span>
+</label>`.trim();
+    }
+
+    /**
+     * 对当前屏幕上已有的卡片弹窗进行一次性兜底调和
+     */
+    static patchOpenDialogs() {
+        const dialogEls = document.querySelectorAll(".characterdialog, .ui-dialog");
+        dialogEls.forEach(dialogEl => {
+            const iframes = dialogEl.querySelectorAll("iframe");
+            iframes.forEach(iframe => {
+                try {
+                    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+                    if (doc && doc.body) {
+                        this.patchDocumentDOM(doc, dialogEl);
+                    }
+                } catch (e) {}
+            });
+        });
+    }
+
+    /**
+     * 对具体 document 内部已生成的 fieldset 容器及已有条目进行调和
+     */
+    static patchDocumentDOM(doc, dialogEl) {
+        if (!doc) return;
+
+        // 1. 如果该 iframe 内部的 fieldset 尚未包含该字段，就地修补 fieldset.innerHTML（供用户点击 +Add 时直接克隆）
+        const fsList = doc.querySelectorAll('fieldset.repeating_buff2, fieldset[class*="repeating_buff2"]');
+        fsList.forEach(fs => {
+            if (!fs.innerHTML.includes('attr_init_rounds')) {
+                const labelText = fs.innerHTML.includes("名稱") ? "輪數計算式" : (fs.innerHTML.includes("名称") ? "轮数计算式" : "Rounds Formula");
+                const template = this.buildTemplateHTML(labelText);
+                const nameLabelRegex = /(<label[^>]*class="[^"]*entry-25p-shrink[^"]*"[^>]*>[\s\S]*?<\/label>)/i;
+                if (nameLabelRegex.test(fs.innerHTML)) {
+                    fs.innerHTML = fs.innerHTML.replace(nameLabelRegex, `$1\n${template}`);
                 }
             }
         });
 
-        observer.observe(document.body, { childList: true, subtree: true });
-
-        // 3. 辅助轮询扫描（低频 1.5s），确保异步 iframe 与动态 tab 切换被 100% 捕获
-        setInterval(() => {
-            this.scanAllDialogs();
-        }, 1500);
-    }
-
-    /**
-     * 扫描所有当前打开的人物卡对话框
-     */
-    static scanAllDialogs() {
-        const dialogEls = document.querySelectorAll(".characterdialog, .ui-dialog");
-        dialogEls.forEach(el => this.enhanceDialog(el));
-    }
-
-    /**
-     * 对单个对话框进行增强
-     */
-    static enhanceDialog(dialogEl) {
-        if (!dialogEl) return;
-
-        // 获取对应的 Character Backbone Model
+        // 2. 对当前已渲染好的既有条目，如果尚未包含该列，就地补齐
         const character = this.findCharacterFromDialog(dialogEl);
-        if (!character) return;
-
-        // 处理直接嵌入的 DOM
-        this.enhanceContainer(dialogEl, character);
-
-        // 如果人物卡内部有 iframe，深入 iframe 内部增强
-        const iframes = dialogEl.querySelectorAll("iframe");
-        iframes.forEach(iframe => {
-            try {
-                const doc = iframe.contentDocument || iframe.contentWindow?.document;
-                if (doc && doc.body) {
-                    this.enhanceContainer(doc.body, character);
+        const repItems = doc.querySelectorAll('.repcontainer[data-groupname="repeating_buff2"] .repitem');
+        repItems.forEach(item => {
+            const existingCol = item.querySelector('.r20-suite-init-rounds-col');
+            if (existingCol) {
+                existingCol.classList.remove("sect");
+                const na = existingCol.querySelector(".note-a");
+                if (na && na.textContent.includes("(a)")) {
+                    na.textContent = na.textContent.replace(/\(a\)/g, "").trim();
                 }
-            } catch (e) {
-                // 跨域或安全受限忽略
+                return;
+            }
+            if (item.querySelector('.r20-suite-init-rounds')) return;
+
+            const nameInput = item.querySelector('input[name="attr_name"], input[name$="_name"]');
+            if (!nameInput) return;
+            const nameLabel = nameInput.closest("label");
+            if (!nameLabel || !nameLabel.parentNode) return;
+
+            const allText = item.textContent || "";
+            const labelText = allText.includes("名稱") ? "輪數計算式" : (allText.includes("名称") ? "轮数计算式" : "Rounds Formula");
+
+            const tempDiv = document.createElement("div");
+            tempDiv.innerHTML = this.buildTemplateHTML(labelText);
+            const newLabel = tempDiv.firstElementChild;
+            const input = newLabel.querySelector("input");
+
+            const typeSelect = item.querySelector('select[name="attr_bufftype"], select[name$="_bufftype"], select[name*="bufftype"]');
+            const typeLabel = typeSelect ? typeSelect.closest("label") : null;
+            const targetBeforeNode = (typeLabel && typeLabel.parentNode === nameLabel.parentNode)
+                ? typeLabel
+                : nameLabel.nextElementSibling;
+
+            nameLabel.parentNode.insertBefore(newLabel, targetBeforeNode);
+
+            // 回填属性值
+            let rowId = item.getAttribute("data-reprowid");
+            if (!rowId) {
+                const namedInput = item.querySelector('input[name*="_name"], input[name*="_row_id"]');
+                if (namedInput) {
+                    const match = (namedInput.getAttribute("name") || "").match(/repeating_buff2?_([^_]+)_/);
+                    if (match) rowId = match[1];
+                }
+            }
+            if (character && rowId) {
+                const attrFullName = `repeating_buff2_${rowId}_init_rounds`;
+                const initAttr = character.attribs?.models?.find(a => a.get("name") === attrFullName);
+                if (initAttr && initAttr.get("current") !== undefined && initAttr.get("current") !== null) {
+                    input.value = initAttr.get("current");
+                }
             }
         });
     }
@@ -78,13 +244,11 @@ export class CharacterSheetBuffEnhancer {
      * 从对话框元素中定位 Character Backbone Model
      */
     static findCharacterFromDialog(dialogEl) {
-        if (!window.Campaign || !window.Campaign.characters) return null;
+        if (!dialogEl || !window.Campaign?.characters) return null;
 
-        // 1. 尝试从 dataset 中读取 characterid
         let charId = dialogEl.getAttribute("data-characterid") || 
                      dialogEl.querySelector("[data-characterid]")?.getAttribute("data-characterid");
 
-        // 2. 尝试从 jQuery data 中获取
         if (!charId && window.$) {
             try {
                 const charObj = window.$(dialogEl).data("character");
@@ -92,159 +256,12 @@ export class CharacterSheetBuffEnhancer {
             } catch (e) {}
         }
 
-        // 3. 尝试从对话框 ID 或类名解析 (如 #character-123456)
         if (!charId) {
             const idAttr = dialogEl.id || "";
             const match = idAttr.match(/character-([a-zA-Z0-9_-]+)/);
             if (match) charId = match[1];
         }
 
-        if (charId) {
-            return window.Campaign.characters.get(charId);
-        }
-
-        return null;
-    }
-
-    /**
-     * 在人物卡容器内寻找 repeating_buff2 重复列表并注入输入框
-     */
-    static enhanceContainer(containerEl, character) {
-        // 查找所有 repeating_buff2 与 repeating_buff 的容器
-        const repContainers = containerEl.querySelectorAll(
-            'div.repcontainer[data-groupname="repeating_buff2"], div.repcontainer[data-groupname="repeating_buff"]'
-        );
-
-        repContainers.forEach(repContainer => {
-            const groupName = repContainer.getAttribute("data-groupname") || "repeating_buff2";
-            const repItems = repContainer.querySelectorAll("div.repitem");
-
-            repItems.forEach(item => {
-                this.enhanceRepItem(item, character, groupName);
-            });
-
-            // 监听该重复容器内动态新增/删除的行
-            if (!repContainer._r20SuiteObserved) {
-                repContainer._r20SuiteObserved = true;
-                const itemObserver = new MutationObserver((mutations) => {
-                    for (const m of mutations) {
-                        for (const node of m.addedNodes) {
-                            if (node.nodeType === Node.ELEMENT_NODE && node.classList?.contains("repitem")) {
-                                this.enhanceRepItem(node, character, groupName);
-                            }
-                        }
-                    }
-                });
-                itemObserver.observe(repContainer, { childList: true });
-            }
-        });
-    }
-
-    /**
-     * 增强单行 Buff 条目
-     * 原汁原味复刻原生“Buff 計算式” HTML 模板，不依赖内联样式，借力宿主原生浮动与输入框排版
-     */
-    static enhanceRepItem(itemEl, character, groupName = "repeating_buff2") {
-        if (!itemEl || !character) return;
-
-        // 1. 获取 rowId
-        let rowId = itemEl.getAttribute("data-reprowid");
-        if (!rowId) {
-            const namedInput = itemEl.querySelector('input[name*="_name"], input[name*="_row_id"]');
-            if (namedInput) {
-                const nameAttr = namedInput.getAttribute("name") || "";
-                const match = nameAttr.match(/repeating_buff2?_([^_]+)_/);
-                if (match) rowId = match[1];
-            }
-        }
-        if (!rowId) return;
-
-        // 2. 找到名称 label (即 label[1]，起始基准锚点)
-        const nameInput = itemEl.querySelector('input[name="attr_name"], input[name$="_name"]');
-        if (!nameInput) return;
-
-        const nameLabel = nameInput.closest("label");
-        if (!nameLabel || !nameLabel.parentNode) return;
-
-        // 避免重复注入
-        if (nameLabel.parentNode.querySelector(".r20-suite-init-rounds-col, .r20-suite-init-rounds")) return;
-
-        // 3. 确定说明文字语言风格
-        const allText = itemEl.textContent || "";
-        const labelText = (allText.includes("名称") || allText.includes("计算式")) 
-            ? "轮数计算式" 
-            : (allText.includes("Name") && !allText.includes("名稱") ? "Rounds Formula" : "輪數計算式");
-
-        // 4. 原汁原味固化复刻原生“Buff 計算式” HTML 模板 (small-label2 sect entry-med highlight)
-        // 借用原生 CSS 样式，杜绝任何冗余的 style 声明
-        const tempDiv = document.createElement("div");
-        tempDiv.innerHTML = `
-<label class="small-label2 sect entry-med highlight r20-suite-init-rounds-col">
-    <input class="macro-text-inline r20-suite-init-rounds" type="text" name="attr_init_rounds" placeholder="0" title="预置初始轮数/公式（例如 10、@{level}*10、10+@{constitution_mod}）。开启 Buff 时借用原生引擎自动求值。">
-    <span class="super note-a">${labelText}(a)</span>
-</label>
-        `.trim();
-
-        const newLabel = tempDiv.firstElementChild;
-        const input = newLabel.querySelector("input");
-
-        // 5. 顺延插入：注入到 label[2] 位置，把原本的 label[2]（类型下拉框）向后顺延
-        const typeSelect = itemEl.querySelector('select[name="attr_bufftype"], select[name$="_bufftype"], select[name*="bufftype"]');
-        const typeLabel = typeSelect ? typeSelect.closest("label") : null;
-        const targetBeforeNode = (typeLabel && typeLabel.parentNode === nameLabel.parentNode)
-            ? typeLabel
-            : nameLabel.nextElementSibling;
-
-        nameLabel.parentNode.insertBefore(newLabel, targetBeforeNode);
-
-        // 6. 双向数据绑定
-        const attrFullName = `${groupName}_${rowId}_init_rounds`;
-
-        // 读取现有轮数公式值回填
-        const initAttr = character.attribs?.models?.find(a => a.get("name") === attrFullName);
-        if (initAttr && initAttr.get("current") !== undefined && initAttr.get("current") !== null) {
-            input.value = initAttr.get("current");
-        }
-
-        // 监听用户输入改动并写回 Backbone 属性
-        const handleSave = () => {
-            const val = input.value.trim();
-            let attr = character.attribs?.models?.find(a => a.get("name") === attrFullName);
-            if (!attr) {
-                if (val !== "") {
-                    character.attribs.create({
-                        name: attrFullName,
-                        current: val
-                    });
-                    console.log(`[CharacterSheetBuffEnhancer] 角色卡创建初始轮数公式属性 ${attrFullName} = ${val}`);
-                }
-            } else {
-                if (attr.get("current") !== val) {
-                    attr.save({ current: val });
-                    console.log(`[CharacterSheetBuffEnhancer] 角色卡更新初始轮数公式属性 ${attrFullName} = ${val}`);
-                }
-            }
-        };
-
-        input.addEventListener("change", handleSave);
-        input.addEventListener("blur", handleSave);
-        input.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-                input.blur();
-            }
-        });
-
-        // 监听外部模型数据变更反向同步到 input
-        if (character.attribs?.on) {
-            const syncFromModel = (changedAttr) => {
-                if (changedAttr.get("name") === attrFullName) {
-                    const cur = changedAttr.get("current") || "";
-                    if (input.value !== cur && document.activeElement !== input) {
-                        input.value = cur;
-                    }
-                }
-            };
-            character.attribs.on("change:current", syncFromModel);
-        }
+        return charId ? window.Campaign.characters.get(charId) : null;
     }
 }
