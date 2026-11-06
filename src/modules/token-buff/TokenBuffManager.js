@@ -121,6 +121,24 @@ export class TokenBuffManager {
     }
 
     /**
+     * 切换纯 Token 上指定 Buff 的激活状态
+     * @param {object} token Graphic 模型
+     * @param {string} buffName Buff 名称
+     * @param {boolean} enable 是否开启
+     */
+    static toggleBuff(token, buffName, enable) {
+        if (!token || !buffName) return false;
+        const list = this.getTokenBuffs(token);
+        const target = list.find(b => b.name === buffName);
+        if (target) {
+            target.enabled = !!enable;
+            this.saveTokenBuffs(token, list);
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * 从 Token 的 gmnotes 中提取当前所有激活的 Buff 列表
      * @param {object} token Graphic Backbone 模型
      * @returns {Array} [{ name, rounds, initialRounds }]

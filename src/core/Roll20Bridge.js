@@ -191,26 +191,51 @@ export class Roll20Bridge {
     }
 
     /**
+     * 判断当前用户对特定角色卡是否拥有完全控制权限
+     * @param {string|object} charOrId 角色卡对象或角色卡ID
+     * @returns {boolean}
+     */
+    static canControlCharacter(charOrId) {
+        if (this.isGM()) return true;
+        if (!charOrId) return false;
+        let char = null;
+        if (typeof charOrId === "string") {
+            const campaign = this.getCampaign();
+            char = campaign && campaign.characters ? campaign.characters.get(charOrId) : null;
+        } else if (charOrId && typeof charOrId.get === "function") {
+            char = charOrId;
+        }
+        if (!char) return false;
+        if (typeof char.currentPlayerControls === "function") {
+            return char.currentPlayerControls();
+        }
+        const myPlayerId = this.getCurrentPlayerId();
+        const controlledBy = (char.get("controlledby") || "").split(",");
+        return controlledBy.includes(myPlayerId) || controlledBy.includes("all");
+    }
+
+    /**
      * 判断当前用户对特定 Token/角色卡是否拥有完全控制或查看权限
      * （GM 拥有全域权限；普通玩家仅能控制自身或被授权全部人的单位）
-     * @param {string|object} tokenOrId Token对象或TokenID
+     * @param {string|object} tokenOrId Token对象或TokenID或角色卡ID
      * @returns {boolean}
      */
     static canControlToken(tokenOrId) {
         if (this.isGM()) return true;
 
         const token = typeof tokenOrId === "string" ? this.getTokenGraphic(tokenOrId) : tokenOrId;
-        if (!token) return false;
+        if (!token) {
+            // 兼容性：如果传入的 ID 为人物卡 ID 或直接为人物卡模型
+            if (typeof tokenOrId === "string" || (tokenOrId && typeof tokenOrId.get === "function")) {
+                return this.canControlCharacter(tokenOrId);
+            }
+            return false;
+        }
 
         // 1. 若关联了人物卡，优先依据人物卡的控制权限判定
         const character = this.getCharacterByToken(token);
         if (character) {
-            if (typeof character.currentPlayerControls === "function") {
-                return character.currentPlayerControls();
-            }
-            const myPlayerId = this.getCurrentPlayerId();
-            const controlledBy = (character.get("controlledby") || "").split(",");
-            return controlledBy.includes(myPlayerId) || controlledBy.includes("all");
+            return this.canControlCharacter(character);
         }
 
         // 2. 若为纯野怪 Token，依据 Token 自身控制权判定

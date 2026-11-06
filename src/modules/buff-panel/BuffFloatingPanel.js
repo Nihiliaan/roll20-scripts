@@ -428,6 +428,9 @@ export class BuffFloatingPanel {
         // 1. 构建左侧动态选区 Tab（严格排重：凡已钉选角色或已在独立窗口中的角色绝不在此重复出现）
         selectedTokens.forEach(t => {
             const token = t.token;
+            // 权限守卫：非 GM 玩家无权控制的单位跳过渲染
+            if (!Roll20Bridge.canControlToken(token)) return;
+
             const targetMode = Roll20Bridge.resolveBuffTargetMode(token);
             const type = targetMode.mode; // "char" 或 "token"
             const char = targetMode.mode === "char" ? targetMode.char : null;
@@ -505,6 +508,9 @@ export class BuffFloatingPanel {
         // 2. 构建右侧常驻固定角色 Tab（若在选区中则呈现选中高亮；若已在独立窗口中则排除）
         this.pinnedCharIds.forEach((charId, pIdx) => {
             if (detachedCharIds.has(charId)) return;
+            // 权限守卫：非 GM 玩家无权控制该角色时，严防泄漏，跳过渲染
+            if (!Roll20Bridge.canControlCharacter(charId)) return;
+
             const char = window.Campaign?.characters?.get(charId);
             const name = char ? (char.get("name") || "未命名") : "(未知角色)";
             const isActive = this.activeTarget && this.activeTarget.id === charId && this.activeTarget.type === "char";
@@ -665,6 +671,8 @@ export class BuffFloatingPanel {
         // 2. 常驻固定角色目标（已在独立窗口中的角色排除）
         this.pinnedCharIds.forEach(id => {
             if (detachedCharIds.has(id)) return;
+            // 权限守卫：非 GM 玩家跳过无权控制的目标
+            if (!Roll20Bridge.canControlCharacter(id)) return;
             const char = window.Campaign?.characters?.get(id);
             if (char) {
                 availableTargets.push({ type: "char", id, name: char.get("name") || "未命名" });
@@ -705,6 +713,20 @@ export class BuffFloatingPanel {
         }
 
         const { type, id, name } = this.activeTarget;
+
+        // 权限脱敏拦截守卫：非 GM 玩家无权控制该目标时，严防泄漏，直接展示未授权提示
+        if (!Roll20Bridge.isGM()) {
+            const hasControl = type === "char" ? Roll20Bridge.canControlCharacter(id) : Roll20Bridge.canControlToken(id);
+            if (!hasControl) {
+                viewport.innerHTML = `
+                    <div class="r20-empty-view">
+                        🔒 无权查看 [${name || "该单位"}] 的 Buff 信息
+                    </div>
+                `;
+                return;
+            }
+        }
+
         let char = null;
         let token = null;
 
@@ -1151,6 +1173,12 @@ export class BuffFloatingPanel {
                     if (char) {
                         await Pf1eBuffManager.toggleBuff(char, b.rowId, e.target.checked);
                         this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
+                        await this.renderViewport();
+                    } else if (token) {
+                        TokenBuffManager.toggleBuff(token, b.name, e.target.checked);
+                        this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
                         await this.renderViewport();
                     }
                 });
@@ -1340,10 +1368,16 @@ export class BuffFloatingPanel {
 
                 // 双击条目快速切换激活/关停
                 item.addEventListener("dblclick", async (e) => {
-                    if (e.target.closest("button, .btn-unlink")) return;
+                    if (e.target.closest("button, .btn-unlink, .r20-buff-toggle, input, select, textarea")) return;
                     if (char) {
                         await Pf1eBuffManager.toggleBuff(char, b.rowId, !isEnabled);
                         this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
+                        await this.renderViewport();
+                    } else if (token) {
+                        TokenBuffManager.toggleBuff(token, b.name, !isEnabled);
+                        this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
                         await this.renderViewport();
                     }
                 });
@@ -1861,7 +1895,12 @@ export class BuffFloatingPanel {
         document.querySelector(".r20-pinned-char-picker")?.remove();
 
         const characters = window.Campaign?.characters?.models || [];
-        const unpinned = characters.filter(c => !c.get("archived") && !this.pinnedCharIds.includes(c.id));
+        const unpinned = characters.filter(c => {
+            if (c.get("archived")) return false;
+            if (this.pinnedCharIds.includes(c.id)) return false;
+            if (!Roll20Bridge.canControlCharacter(c)) return false;
+            return true;
+        });
 
         const menu = document.createElement("div");
         menu.className = "r20-context-menu r20-pinned-char-picker";

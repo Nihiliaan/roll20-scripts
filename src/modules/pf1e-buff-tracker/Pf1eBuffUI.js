@@ -890,7 +890,12 @@ export class Pf1eBuffUI {
                         } catch (err) {
                             console.error("[Pf1eBuffUI] 保存 Debuff 轮数异常:", err);
                         }
-                        await this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        await this.refreshRowBadge(row, tokenId, { force: true });
                         await this.notifyPanelsRefresh();
                     };
 
@@ -898,7 +903,12 @@ export class Pf1eBuffUI {
                         if (committed) return;
                         committed = true;
                         cleanupDismiss();
-                        this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        this.refreshRowBadge(row, tokenId, { force: true });
                     };
 
                     input.addEventListener("keydown", (ke) => {
@@ -939,7 +949,7 @@ export class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Debuff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId);
+                    await this.refreshRowBadge(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 
@@ -1015,7 +1025,12 @@ export class Pf1eBuffUI {
                         } catch (err) {
                             console.error("[Pf1eBuffUI] 保存 Buff 轮数异常:", err);
                         }
-                        await this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        await this.refreshRowBadge(row, tokenId, { force: true });
                         await this.notifyPanelsRefresh();
                     };
 
@@ -1023,7 +1038,12 @@ export class Pf1eBuffUI {
                         if (committed) return;
                         committed = true;
                         cleanupDismiss();
-                        this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        this.refreshRowBadge(row, tokenId, { force: true });
                     };
 
                     input.addEventListener("keydown", (ke) => {
@@ -1050,7 +1070,6 @@ export class Pf1eBuffUI {
 
                 roundSpan?.addEventListener("click", startInlineEdit);
                 pill.querySelector(".r20-pill-name")?.addEventListener("click", startInlineEdit);
-                pill.querySelector(".r20-pill-name")?.addEventListener("click", startInlineEdit);
 
                 // 右键快速关停解除
                 pill.addEventListener("contextmenu", async (e) => {
@@ -1067,7 +1086,7 @@ export class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Buff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId);
+                    await this.refreshRowBadge(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 

@@ -1,6 +1,7 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
 import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
+import { Pf1eBuffUI } from "../pf1e-buff-tracker/Pf1eBuffUI.js";
 import { BuffFloatingPanel } from "./BuffFloatingPanel.js";
 
 /**
@@ -225,6 +226,7 @@ export class BuffDetachedWindow {
         tabsContainer.innerHTML = "";
 
         this.charIds.forEach((charId, idx) => {
+            if (!Roll20Bridge.canControlCharacter(charId)) return;
             const char = window.Campaign?.characters?.get(charId);
             const name = char ? (char.get("name") || "未命名") : "(未知角色)";
             const isActive = this.activeCharId === charId;
@@ -301,6 +303,11 @@ export class BuffDetachedWindow {
 
         if (!this.activeCharId) {
             viewport.innerHTML = `<div class="r20-empty-view">请选择或拖入角色标签</div>`;
+            return;
+        }
+
+        if (!Roll20Bridge.isGM() && !Roll20Bridge.canControlCharacter(this.activeCharId)) {
+            viewport.innerHTML = `<div class="r20-empty-view">🔒 无权查看该角色的 Buff 信息</div>`;
             return;
         }
 
@@ -438,6 +445,7 @@ export class BuffDetachedWindow {
                     if (char) {
                         await Pf1eBuffManager.toggleBuff(char, b.rowId, e.target.checked);
                         BuffFloatingPanel.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
                         await this.renderViewport();
                     }
                 });
@@ -624,6 +632,7 @@ export class BuffDetachedWindow {
                     if (e.target.closest("button, input, select, textarea, .btn-unlink, .r20-buff-round-num, .r20-input-round-inline, .r20-buff-toggle")) return;
                     await Pf1eBuffManager.toggleBuff(char, b.rowId, !isEnabled);
                     BuffFloatingPanel.notifyBuffMutation();
+                    await Pf1eBuffUI.refreshAllBadges();
                     await this.renderViewport();
                 });
 

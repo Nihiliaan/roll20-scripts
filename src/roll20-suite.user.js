@@ -212,26 +212,51 @@ class Roll20Bridge {
     }
 
     /**
+     * 判断当前用户对特定角色卡是否拥有完全控制权限
+     * @param {string|object} charOrId 角色卡对象或角色卡ID
+     * @returns {boolean}
+     */
+    static canControlCharacter(charOrId) {
+        if (this.isGM()) return true;
+        if (!charOrId) return false;
+        let char = null;
+        if (typeof charOrId === "string") {
+            const campaign = this.getCampaign();
+            char = campaign && campaign.characters ? campaign.characters.get(charOrId) : null;
+        } else if (charOrId && typeof charOrId.get === "function") {
+            char = charOrId;
+        }
+        if (!char) return false;
+        if (typeof char.currentPlayerControls === "function") {
+            return char.currentPlayerControls();
+        }
+        const myPlayerId = this.getCurrentPlayerId();
+        const controlledBy = (char.get("controlledby") || "").split(",");
+        return controlledBy.includes(myPlayerId) || controlledBy.includes("all");
+    }
+
+    /**
      * 判断当前用户对特定 Token/角色卡是否拥有完全控制或查看权限
      * （GM 拥有全域权限；普通玩家仅能控制自身或被授权全部人的单位）
-     * @param {string|object} tokenOrId Token对象或TokenID
+     * @param {string|object} tokenOrId Token对象或TokenID或角色卡ID
      * @returns {boolean}
      */
     static canControlToken(tokenOrId) {
         if (this.isGM()) return true;
 
         const token = typeof tokenOrId === "string" ? this.getTokenGraphic(tokenOrId) : tokenOrId;
-        if (!token) return false;
+        if (!token) {
+            // 兼容性：如果传入的 ID 为人物卡 ID 或直接为人物卡模型
+            if (typeof tokenOrId === "string" || (tokenOrId && typeof tokenOrId.get === "function")) {
+                return this.canControlCharacter(tokenOrId);
+            }
+            return false;
+        }
 
         // 1. 若关联了人物卡，优先依据人物卡的控制权限判定
         const character = this.getCharacterByToken(token);
         if (character) {
-            if (typeof character.currentPlayerControls === "function") {
-                return character.currentPlayerControls();
-            }
-            const myPlayerId = this.getCurrentPlayerId();
-            const controlledBy = (character.get("controlledby") || "").split(",");
-            return controlledBy.includes(myPlayerId) || controlledBy.includes("all");
+            return this.canControlCharacter(character);
         }
 
         // 2. 若为纯野怪 Token，依据 Token 自身控制权判定
@@ -2793,6 +2818,24 @@ class TokenBuffManager {
     }
 
     /**
+     * 切换纯 Token 上指定 Buff 的激活状态
+     * @param {object} token Graphic 模型
+     * @param {string} buffName Buff 名称
+     * @param {boolean} enable 是否开启
+     */
+    static toggleBuff(token, buffName, enable) {
+        if (!token || !buffName) return false;
+        const list = this.getTokenBuffs(token);
+        const target = list.find(b => b.name === buffName);
+        if (target) {
+            target.enabled = !!enable;
+            this.saveTokenBuffs(token, list);
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * 从 Token 的 gmnotes 中提取当前所有激活的 Buff 列表
      * @param {object} token Graphic Backbone 模型
      * @returns {Array} [{ name, rounds, initialRounds }]
@@ -3871,7 +3914,12 @@ class Pf1eBuffUI {
                         } catch (err) {
                             console.error("[Pf1eBuffUI] 保存 Debuff 轮数异常:", err);
                         }
-                        await this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        await this.refreshRowBadge(row, tokenId, { force: true });
                         await this.notifyPanelsRefresh();
                     };
 
@@ -3879,7 +3927,12 @@ class Pf1eBuffUI {
                         if (committed) return;
                         committed = true;
                         cleanupDismiss();
-                        this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        this.refreshRowBadge(row, tokenId, { force: true });
                     };
 
                     input.addEventListener("keydown", (ke) => {
@@ -3920,7 +3973,7 @@ class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Debuff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId);
+                    await this.refreshRowBadge(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 
@@ -3996,7 +4049,12 @@ class Pf1eBuffUI {
                         } catch (err) {
                             console.error("[Pf1eBuffUI] 保存 Buff 轮数异常:", err);
                         }
-                        await this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        await this.refreshRowBadge(row, tokenId, { force: true });
                         await this.notifyPanelsRefresh();
                     };
 
@@ -4004,7 +4062,12 @@ class Pf1eBuffUI {
                         if (committed) return;
                         committed = true;
                         cleanupDismiss();
-                        this.refreshRowBadge(row, tokenId);
+                        if (input.parentNode === pill && currentRoundSpan) {
+                            input.replaceWith(currentRoundSpan);
+                        } else {
+                            input.remove();
+                        }
+                        this.refreshRowBadge(row, tokenId, { force: true });
                     };
 
                     input.addEventListener("keydown", (ke) => {
@@ -4031,7 +4094,6 @@ class Pf1eBuffUI {
 
                 roundSpan?.addEventListener("click", startInlineEdit);
                 pill.querySelector(".r20-pill-name")?.addEventListener("click", startInlineEdit);
-                pill.querySelector(".r20-pill-name")?.addEventListener("click", startInlineEdit);
 
                 // 右键快速关停解除
                 pill.addEventListener("contextmenu", async (e) => {
@@ -4048,7 +4110,7 @@ class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Buff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId);
+                    await this.refreshRowBadge(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 
@@ -5713,6 +5775,7 @@ class BuffDetachedWindow {
         tabsContainer.innerHTML = "";
 
         this.charIds.forEach((charId, idx) => {
+            if (!Roll20Bridge.canControlCharacter(charId)) return;
             const char = window.Campaign?.characters?.get(charId);
             const name = char ? (char.get("name") || "未命名") : "(未知角色)";
             const isActive = this.activeCharId === charId;
@@ -5789,6 +5852,11 @@ class BuffDetachedWindow {
 
         if (!this.activeCharId) {
             viewport.innerHTML = `<div class="r20-empty-view">请选择或拖入角色标签</div>`;
+            return;
+        }
+
+        if (!Roll20Bridge.isGM() && !Roll20Bridge.canControlCharacter(this.activeCharId)) {
+            viewport.innerHTML = `<div class="r20-empty-view">🔒 无权查看该角色的 Buff 信息</div>`;
             return;
         }
 
@@ -5926,6 +5994,7 @@ class BuffDetachedWindow {
                     if (char) {
                         await Pf1eBuffManager.toggleBuff(char, b.rowId, e.target.checked);
                         BuffFloatingPanel.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
                         await this.renderViewport();
                     }
                 });
@@ -6112,6 +6181,7 @@ class BuffDetachedWindow {
                     if (e.target.closest("button, input, select, textarea, .btn-unlink, .r20-buff-round-num, .r20-input-round-inline, .r20-buff-toggle")) return;
                     await Pf1eBuffManager.toggleBuff(char, b.rowId, !isEnabled);
                     BuffFloatingPanel.notifyBuffMutation();
+                    await Pf1eBuffUI.refreshAllBadges();
                     await this.renderViewport();
                 });
 
@@ -6779,6 +6849,9 @@ class BuffFloatingPanel {
         // 1. 构建左侧动态选区 Tab（严格排重：凡已钉选角色或已在独立窗口中的角色绝不在此重复出现）
         selectedTokens.forEach(t => {
             const token = t.token;
+            // 权限守卫：非 GM 玩家无权控制的单位跳过渲染
+            if (!Roll20Bridge.canControlToken(token)) return;
+
             const targetMode = Roll20Bridge.resolveBuffTargetMode(token);
             const type = targetMode.mode; // "char" 或 "token"
             const char = targetMode.mode === "char" ? targetMode.char : null;
@@ -6856,6 +6929,9 @@ class BuffFloatingPanel {
         // 2. 构建右侧常驻固定角色 Tab（若在选区中则呈现选中高亮；若已在独立窗口中则排除）
         this.pinnedCharIds.forEach((charId, pIdx) => {
             if (detachedCharIds.has(charId)) return;
+            // 权限守卫：非 GM 玩家无权控制该角色时，严防泄漏，跳过渲染
+            if (!Roll20Bridge.canControlCharacter(charId)) return;
+
             const char = window.Campaign?.characters?.get(charId);
             const name = char ? (char.get("name") || "未命名") : "(未知角色)";
             const isActive = this.activeTarget && this.activeTarget.id === charId && this.activeTarget.type === "char";
@@ -7016,6 +7092,8 @@ class BuffFloatingPanel {
         // 2. 常驻固定角色目标（已在独立窗口中的角色排除）
         this.pinnedCharIds.forEach(id => {
             if (detachedCharIds.has(id)) return;
+            // 权限守卫：非 GM 玩家跳过无权控制的目标
+            if (!Roll20Bridge.canControlCharacter(id)) return;
             const char = window.Campaign?.characters?.get(id);
             if (char) {
                 availableTargets.push({ type: "char", id, name: char.get("name") || "未命名" });
@@ -7056,6 +7134,20 @@ class BuffFloatingPanel {
         }
 
         const { type, id, name } = this.activeTarget;
+
+        // 权限脱敏拦截守卫：非 GM 玩家无权控制该目标时，严防泄漏，直接展示未授权提示
+        if (!Roll20Bridge.isGM()) {
+            const hasControl = type === "char" ? Roll20Bridge.canControlCharacter(id) : Roll20Bridge.canControlToken(id);
+            if (!hasControl) {
+                viewport.innerHTML = `
+                    <div class="r20-empty-view">
+                        🔒 无权查看 [${name || "该单位"}] 的 Buff 信息
+                    </div>
+                `;
+                return;
+            }
+        }
+
         let char = null;
         let token = null;
 
@@ -7502,6 +7594,12 @@ class BuffFloatingPanel {
                     if (char) {
                         await Pf1eBuffManager.toggleBuff(char, b.rowId, e.target.checked);
                         this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
+                        await this.renderViewport();
+                    } else if (token) {
+                        TokenBuffManager.toggleBuff(token, b.name, e.target.checked);
+                        this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
                         await this.renderViewport();
                     }
                 });
@@ -7691,10 +7789,16 @@ class BuffFloatingPanel {
 
                 // 双击条目快速切换激活/关停
                 item.addEventListener("dblclick", async (e) => {
-                    if (e.target.closest("button, .btn-unlink")) return;
+                    if (e.target.closest("button, .btn-unlink, .r20-buff-toggle, input, select, textarea")) return;
                     if (char) {
                         await Pf1eBuffManager.toggleBuff(char, b.rowId, !isEnabled);
                         this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
+                        await this.renderViewport();
+                    } else if (token) {
+                        TokenBuffManager.toggleBuff(token, b.name, !isEnabled);
+                        this.notifyBuffMutation();
+                        await Pf1eBuffUI.refreshAllBadges();
                         await this.renderViewport();
                     }
                 });
@@ -8212,7 +8316,12 @@ class BuffFloatingPanel {
         document.querySelector(".r20-pinned-char-picker")?.remove();
 
         const characters = window.Campaign?.characters?.models || [];
-        const unpinned = characters.filter(c => !c.get("archived") && !this.pinnedCharIds.includes(c.id));
+        const unpinned = characters.filter(c => {
+            if (c.get("archived")) return false;
+            if (this.pinnedCharIds.includes(c.id)) return false;
+            if (!Roll20Bridge.canControlCharacter(c)) return false;
+            return true;
+        });
 
         const menu = document.createElement("div");
         menu.className = "r20-context-menu r20-pinned-char-picker";

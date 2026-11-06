@@ -1,0 +1,656 @@
+/**
+ * Pf1eConditionRegistry.js
+ * 严格按照 Pathfinder 1e 核心规则书 (CRB, Appendix 1: Conditions) 整理的完全状态注册表
+ * 集中管理状态元数据、角色卡属性映射、战役自定义棋子标记 (Token Markers) 与中文规则悬浮提示
+ */
+
+export const PF1E_CONDITIONS = {
+    "bleed": {
+        id: "bleed",
+        nameZh: "流血",
+        nameEn: "Bleed",
+        isNativeSheet: true,
+        attrKey: "condition-Bleed",
+        roundsKey: "condition-Bleed_rounds",
+        markerName: "Bleeding Out",
+        fallbackMarker: "death-zone",
+        aliases: ["Bleeding Out", "Bleeding_Out", "Bleed", "death-zone"],
+        description: "每轮开始受持续伤害，直至受DC 15医疗检定或治疗法术"
+    },
+    "blinded": {
+        id: "blinded",
+        nameZh: "目盲",
+        nameEn: "Blinded",
+        isNativeSheet: true,
+        attrKey: "condition-Blinded",
+        roundsKey: "condition-Blinded_rounds",
+        markerName: "Blinded",
+        fallbackMarker: "bleeding-eye",
+        aliases: ["Blinded", "Blind", "bleeding-eye"],
+        description: "AC -2，失去敏捷加值，察觉检定自动失败，全隐蔽(50%失手)"
+    },
+    "confused": {
+        id: "confused",
+        nameZh: "困惑",
+        nameEn: "Confused",
+        isNativeSheet: false, // CRB 核心状态，卡面无原生复选框
+        attrKey: "custom_cond_confused",
+        roundsKey: "custom_cond_confused_rounds",
+        markerName: "Confused",
+        fallbackMarker: "brain-freeze",
+        aliases: ["Confused", "brain-freeze"],
+        description: "无法自主行动，每轮掷 d100 决定行为(攻击盟友/发呆/正常)"
+    },
+    "cowering": {
+        id: "cowering",
+        nameZh: "畏縮",
+        nameEn: "Cowering",
+        isNativeSheet: true,
+        attrKey: "condition-Cowering",
+        roundsKey: "condition-Cowering_rounds",
+        markerName: "Cowering",
+        fallbackMarker: "broken-skull",
+        aliases: ["Cowering", "broken-skull"],
+        description: "极度恐惧冻结，AC -2，失去敏捷加值，无法采取任何动作"
+    },
+    "dazed": {
+        id: "dazed",
+        nameZh: "暈眩",
+        nameEn: "Dazed",
+        isNativeSheet: true,
+        attrKey: "condition-Dazed",
+        roundsKey: "condition-Dazed_rounds",
+        markerName: "half-haze",
+        fallbackMarker: "half-haze",
+        aliases: ["Dazed", "half-haze"],
+        description: "无法采取任何动作，AC 不受直接减值"
+    },
+    "dazzled": {
+        id: "dazzled",
+        nameZh: "目眩",
+        nameEn: "Dazzled",
+        isNativeSheet: true,
+        attrKey: "condition-Dazzled",
+        roundsKey: "condition-Dazzled_rounds",
+        markerName: "aura",
+        fallbackMarker: "aura",
+        aliases: ["Dazzled", "aura"],
+        description: "强光致盲，攻击检定与视力察觉检定承受 -1 减值"
+    },
+    "dead": {
+        id: "dead",
+        nameZh: "死亡",
+        nameEn: "Dead",
+        isNativeSheet: true,
+        attrKey: "condition-Dead",
+        roundsKey: "condition-Dead_rounds",
+        markerName: "006-Dead",
+        fallbackMarker: "dead",
+        aliases: ["006-Dead", "dead", "skull"],
+        description: "生命值降至负体质值以下，无法行动与自行恢复"
+    },
+    "deafened": {
+        id: "deafened",
+        nameZh: "耳聾",
+        nameEn: "Deafened",
+        isNativeSheet: true,
+        attrKey: "condition-Deafened",
+        roundsKey: "condition-Deafened_rounds",
+        markerName: "Deafened",
+        fallbackMarker: "edge-crack",
+        aliases: ["Deafened", "edge-crack"],
+        description: "先攻检定 -4，听力察觉自动失败，言语成分法术 20% 失败率"
+    },
+    "disabled": {
+        id: "disabled",
+        nameZh: "癱瘓",
+        nameEn: "Disabled",
+        isNativeSheet: true,
+        attrKey: "condition-Disabled",
+        roundsKey: "condition-Disabled_rounds",
+        markerName: "Disabled",
+        fallbackMarker: "snail",
+        aliases: ["Disabled", "snail"],
+        description: "生命恰为 0，每轮只能做单个移动或标动，做标动受 1 伤害转濒死"
+    },
+    "drowning": {
+        id: "drowning",
+        nameZh: "溺水",
+        nameEn: "Drowning",
+        isNativeSheet: true,
+        attrKey: "condition-Drowning",
+        roundsKey: "condition-Drowning_rounds",
+        markerName: "bubble",
+        fallbackMarker: "bubble",
+        aliases: ["Drowning", "bubble"],
+        description: "溺水缺氧，无法呼吸，陷入昏迷与濒死"
+    },
+    "dying": {
+        id: "dying",
+        nameZh: "瀕死",
+        nameEn: "Dying",
+        isNativeSheet: true,
+        attrKey: "condition-Dying",
+        roundsKey: "condition-Dying_rounds",
+        markerName: "half-heart",
+        fallbackMarker: "half-heart",
+        aliases: ["Dying", "half-heart"],
+        description: "生命值为负，处于昏迷无助，每轮需体质检定否则流失生命"
+    },
+    "entangled": {
+        id: "entangled",
+        nameZh: "糾纏",
+        nameEn: "Entangled",
+        isNativeSheet: true,
+        attrKey: "condition-Entangled",
+        roundsKey: "condition-Entangled_rounds",
+        markerName: "Entangle",
+        fallbackMarker: "fishing-net",
+        aliases: ["Entangle", "Entangled", "601-Entangled-Grappled", "fishing-net"],
+        description: "移动半速无法奔跑，敏捷 -4，攻击检定 -2，施法需集中检定"
+    },
+    "exhausted": {
+        id: "exhausted",
+        nameZh: "力竭",
+        nameEn: "Exhausted",
+        isNativeSheet: true,
+        attrKey: "condition-Exhausted",
+        roundsKey: "condition-Exhausted_rounds",
+        markerName: "Exhausted",
+        fallbackMarker: "broken-shield",
+        aliases: ["Exhausted", "broken-shield"],
+        description: "移动半速，力量和敏捷受到 -6 减值，休息 1 小时转为疲乏"
+    },
+    "fascinated": {
+        id: "fascinated",
+        nameZh: "迷魂",
+        nameEn: "Fascinated",
+        isNativeSheet: true,
+        attrKey: "condition-Fascinated",
+        roundsKey: "condition-Fascinated_rounds",
+        markerName: "Charmed",
+        fallbackMarker: "all-for-one",
+        aliases: ["Fascinated", "Charmed", "all-for-one"],
+        description: "驻足注视目标，察觉等技能受到 -4 减值，受到潜在威胁解除"
+    },
+    "fatigued": {
+        id: "fatigued",
+        nameZh: "疲乏",
+        nameEn: "Fatigued",
+        isNativeSheet: true,
+        attrKey: "condition-Fatigued",
+        roundsKey: "condition-Fatigued_rounds",
+        markerName: "Fatigued",
+        fallbackMarker: "back-pain",
+        aliases: ["Fatigued", "back-pain"],
+        description: "无法奔跑或冲锋，力量和敏捷受到 -2 减值，休息 8 小时解除"
+    },
+    "flat_footed": {
+        id: "flat_footed",
+        nameZh: "措手不及",
+        nameEn: "Flat-Footed",
+        isNativeSheet: true,
+        attrKey: "condition-Flat-Footed",
+        roundsKey: "condition-Flat-Footed_rounds",
+        markerName: "arrowed",
+        fallbackMarker: "arrowed",
+        aliases: ["Flat-Footed", "Flat_Footed", "FlatFooted", "arrowed"],
+        description: "未行动前失去敏捷加值与直觉动作，无法借机攻击"
+    },
+    "frightened": {
+        id: "frightened",
+        nameZh: "恐慌",
+        nameEn: "Frightened",
+        isNativeSheet: true,
+        attrKey: "condition-Fear",
+        roundsKey: "condition-Fear_rounds",
+        markerName: "Frightened",
+        fallbackMarker: "screaming",
+        aliases: ["Frightened", "Cause of Fear", "Cause_of_Fear", "Fear", "screaming"],
+        description: "恐惧逃离源头，攻击检定/豁免/技能受到 -2 减值，无法自主接近威胁"
+    },
+    "grappled": {
+        id: "grappled",
+        nameZh: "擒抱",
+        nameEn: "Grappled",
+        isNativeSheet: true,
+        attrKey: "condition-Grappled",
+        roundsKey: "condition-Grappled_rounds",
+        markerName: "Grappled",
+        fallbackMarker: "grab",
+        aliases: ["Grappled", "601-Entangled-Grappled", "grab"],
+        description: "无法移动，敏捷 -4，攻击与战技检定 -2，施法需集中检定"
+    },
+    "helpless": {
+        id: "helpless",
+        nameZh: "無助",
+        nameEn: "Helpless",
+        isNativeSheet: true,
+        attrKey: "condition-Helpless",
+        roundsKey: "condition-Helpless_rounds",
+        markerName: "Helpless",
+        fallbackMarker: "chained-heart",
+        aliases: ["Helpless", "chained-heart"],
+        description: "完全无法防卫，敏捷视同为 0 (-5 AC)，近战受击可被政变"
+    },
+    "incorporeal": {
+        id: "incorporeal",
+        nameZh: "虛體",
+        nameEn: "Incorporeal",
+        isNativeSheet: true,
+        attrKey: "condition-Incorporeal",
+        roundsKey: "condition-Incorporeal_rounds",
+        markerName: "Incorporeal",
+        fallbackMarker: "white-tower",
+        aliases: ["Incorporeal", "white-tower"],
+        description: "无实体，免疫非魔法攻击，魔法武器伤害半额，可穿透实物"
+    },
+    "invisible": {
+        id: "invisible",
+        nameZh: "隱形",
+        nameEn: "Invisible",
+        isNativeSheet: true,
+        attrKey: "condition-Invisible",
+        roundsKey: "condition-Invisible_rounds",
+        markerName: "Invisible",
+        fallbackMarker: "ninja-mask",
+        aliases: ["Invisible", "ninja-mask"],
+        description: "视觉不可见，拥有全隐蔽(50%失手)，攻击有视觉目标 +2"
+    },
+    "nauseated": {
+        id: "nauseated",
+        nameZh: "反胃",
+        nameEn: "Nauseated",
+        isNativeSheet: true,
+        attrKey: "condition-Nauseated",
+        roundsKey: "condition-Nauseated_rounds",
+        markerName: "Nauseated",
+        fallbackMarker: "chemical-bolt",
+        aliases: ["Nauseated", "Nausea", "Sick", "chemical-bolt"],
+        description: "极度胃部不适，每轮只能做单个移动动作，不可攻击或施法"
+    },
+    "panicked": {
+        id: "panicked",
+        nameZh: "驚懼",
+        nameEn: "Panicked",
+        isNativeSheet: false, // CRB 核心状态
+        attrKey: "custom_cond_panicked",
+        roundsKey: "custom_cond_panicked_rounds",
+        markerName: "Panicked",
+        fallbackMarker: "fluffy-wing",
+        aliases: ["Panicked", "fluffy-wing"],
+        description: "扔下持有物全速逃离危险，防御检定承受 -2 减值，被逼角落时陷入畏缩"
+    },
+    "paralyzed": {
+        id: "paralyzed",
+        nameZh: "麻痺",
+        nameEn: "Paralyzed",
+        isNativeSheet: true,
+        attrKey: "condition-Paralyzed",
+        roundsKey: "condition-Paralyzed_rounds",
+        markerName: "Paralyzed",
+        fallbackMarker: "pummeled",
+        aliases: ["Paralyzed", "pummeled"],
+        description: "肌肉僵直，力量敏捷视同为 0，完全无助，无法移动或发声"
+    },
+    "petrified": {
+        id: "petrified",
+        nameZh: "石化",
+        nameEn: "Petrified",
+        isNativeSheet: true,
+        attrKey: "condition-Petrified",
+        roundsKey: "condition-Petrified_rounds",
+        markerName: "Petrified",
+        fallbackMarker: "frozen-orb",
+        aliases: ["Petrified", "frozen-orb", "interdiction"],
+        description: "身躯化为石质，完全无助昏迷，硬度 8，具有伤害减免"
+    },
+    "pinned": {
+        id: "pinned",
+        nameZh: "壓制",
+        nameEn: "Pinned",
+        isNativeSheet: true,
+        attrKey: "condition-Pinned",
+        roundsKey: "condition-Pinned_rounds",
+        markerName: "Pinned",
+        fallbackMarker: "padlock",
+        aliases: ["Pinned", "padlock"],
+        description: "紧紧受制无法移动，AC -4 并失去敏捷加值，无法施展躯体法术"
+    },
+    "prone": {
+        id: "prone",
+        nameZh: "俯臥",
+        nameEn: "Prone",
+        isNativeSheet: true,
+        attrKey: "condition-Prone",
+        roundsKey: "condition-Prone_rounds",
+        markerName: "Prone",
+        fallbackMarker: "tread",
+        aliases: ["Prone", "101-KnockedDown", "tread"],
+        description: "倒地卧姿，近战攻击检定 -4，近战受击 AC -4，远程受击 AC +4"
+    },
+    "shaken": {
+        id: "shaken",
+        nameZh: "戰慄",
+        nameEn: "Shaken",
+        isNativeSheet: false, // CRB 核心状态
+        attrKey: "custom_cond_shaken",
+        roundsKey: "custom_cond_shaken_rounds",
+        markerName: "Shaken",
+        fallbackMarker: "broken-heart",
+        aliases: ["Shaken", "broken-heart"],
+        description: "轻微恐惧，攻击检定、豁免检定与技能检定承受 -2 减值"
+    },
+    "sickened": {
+        id: "sickened",
+        nameZh: "噁心",
+        nameEn: "Sickened",
+        isNativeSheet: true,
+        attrKey: "condition-Sickened",
+        roundsKey: "condition-Sickened_rounds",
+        markerName: "Sickened",
+        fallbackMarker: "drink-me",
+        aliases: ["Sickened", "Sick", "drink-me", "three-leaves"],
+        description: "身体不适恶心，攻击检定、武器伤害、豁免与技能检定承受 -2 减值"
+    },
+    "stable": {
+        id: "stable",
+        nameZh: "穩定",
+        nameEn: "Stable",
+        isNativeSheet: true,
+        attrKey: "condition-Stable",
+        roundsKey: "condition-Stable_rounds",
+        markerName: "Stabilized",
+        fallbackMarker: "spanner",
+        aliases: ["Stabilized", "Stable", "spanner"],
+        description: "濒死但伤势稳定，不再每轮流失生命，生命恢复正值前仍昏迷"
+    },
+    "staggered": {
+        id: "staggered",
+        nameZh: "恍惚",
+        nameEn: "Staggered",
+        isNativeSheet: true,
+        attrKey: "condition-Staggered",
+        roundsKey: "condition-Staggered_rounds",
+        markerName: "Staggered",
+        fallbackMarker: "stopwatch",
+        aliases: ["Staggered", "stopwatch"],
+        description: "重创踉跄，每轮只能执行单个标动或移动动作，可做直觉动作"
+    },
+    "stunned": {
+        id: "stunned",
+        nameZh: "震懾",
+        nameEn: "Stunned",
+        isNativeSheet: true,
+        attrKey: "condition-Stunned",
+        roundsKey: "condition-Stunned_rounds",
+        markerName: "Stunned",
+        fallbackMarker: "fist",
+        aliases: ["Stunned", "fist", "lightning-helix"],
+        description: "掉落持有物，无法采取动作，AC -2 并失去敏捷加值"
+    },
+    "suffocating": {
+        id: "suffocating",
+        nameZh: "窒息",
+        nameEn: "Suffocating",
+        isNativeSheet: true,
+        attrKey: "condition-Suffocating",
+        roundsKey: "condition-Suffocating_rounds",
+        markerName: "bubble",
+        fallbackMarker: "bubble",
+        aliases: ["Suffocating", "bubble"],
+        description: "严重缺氧，逐轮消耗体质，进入濒死并迅速死亡"
+    },
+    "unconscious": {
+        id: "unconscious",
+        nameZh: "昏迷",
+        nameEn: "Unconscious",
+        isNativeSheet: true,
+        attrKey: "condition-Unconscious",
+        roundsKey: "condition-Unconscious_rounds",
+        markerName: "Unconcious",
+        fallbackMarker: "sleepy",
+        aliases: ["Unconscious", "Unconcious", "005-Unconscious", "sleepy"],
+        description: "失去知觉并倒地，完全无助，无法采取任何动作"
+    }
+};
+
+/**
+ * 状态注册管理类
+ */
+export class Pf1eConditionRegistry {
+    /**
+     * 字符串归一化（去除 ::id，替换 _ 和 - 为无符号小写纯字母）
+     */
+    static normalizeKey(str) {
+        if (!str) return "";
+        return String(str)
+            .split("::")[0]
+            .trim()
+            .toLowerCase()
+            .replace(/[_-\s]+/g, "");
+    }
+
+    /**
+     * 根据任意键名、属性名、中文名、自定义 Tag 或别名匹配状态定义
+     */
+    static find(keyOrName) {
+        if (!keyOrName) return null;
+        let rawKey = String(keyOrName).trim();
+
+        // 0. 尝试在当前战役 token_markers 中通过完整 tag 逆向获取自定义标记名称
+        if (window.Campaign) {
+            try {
+                const markers = JSON.parse(window.Campaign.get("token_markers") || "[]");
+                if (Array.isArray(markers)) {
+                    const cleanTag = rawKey.replace(/@\d+$/, "");
+                    const found = markers.find(m => m && (m.tag === rawKey || m.tag === cleanTag));
+                    if (found && found.name) {
+                        rawKey = found.name;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        const raw = rawKey.split("::")[0].trim();
+        const lower = raw.toLowerCase();
+        const norm = this.normalizeKey(raw);
+
+        // 1. 直接 ID 匹配
+        if (PF1E_CONDITIONS[lower]) return PF1E_CONDITIONS[lower];
+        if (PF1E_CONDITIONS[norm]) return PF1E_CONDITIONS[norm];
+
+        // 2. 遍历匹配各项属性与别名
+        for (const def of Object.values(PF1E_CONDITIONS)) {
+            if (def.id === lower || def.id === norm) return def;
+            if (def.attrKey && (def.attrKey.toLowerCase() === lower || this.normalizeKey(def.attrKey) === norm)) return def;
+            if (def.nameZh && def.nameZh === raw) return def;
+            if (def.nameEn && (def.nameEn.toLowerCase() === lower || this.normalizeKey(def.nameEn) === norm)) return def;
+            if (def.markerName && (def.markerName.toLowerCase() === lower || this.normalizeKey(def.markerName) === norm)) return def;
+            if (def.fallbackMarker && (def.fallbackMarker.toLowerCase() === lower || this.normalizeKey(def.fallbackMarker) === norm)) return def;
+
+            // 3. 别名列表匹配
+            if (Array.isArray(def.aliases)) {
+                for (const alias of def.aliases) {
+                    if (alias.toLowerCase() === lower || this.normalizeKey(alias) === norm) {
+                        return def;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 动态匹配当前战役中可用的 Marker Tag (优先自定义 Marker，回退默认)
+     * @param {string} condId 状态 ID
+     * @param {Array} campaignMarkers 当前战役 Campaign.get("token_markers") 数组
+     * @returns {string} 可直接写入 statusmarkers 的 Tag
+     */
+    static resolveMarkerTag(condId, campaignMarkers = null) {
+        const def = this.find(condId);
+        if (!def) return "";
+
+        let markers = campaignMarkers;
+        if (!markers && window.Campaign) {
+            try {
+                markers = JSON.parse(window.Campaign.get("token_markers") || "[]");
+            } catch (e) {
+                markers = [];
+            }
+        }
+
+        // 1. 尝试在当前战役的自定义标记包中寻找匹配项 (通过 markerName 与 aliases 归一化双向匹配)
+        if (Array.isArray(markers)) {
+            const targets = [def.markerName, ...(def.aliases || [])].filter(Boolean);
+            for (const target of targets) {
+                const normTarget = this.normalizeKey(target);
+                const match = markers.find(m => {
+                    if (!m.name) return false;
+                    return m.name.toLowerCase() === target.toLowerCase() || this.normalizeKey(m.name) === normTarget;
+                });
+                if (match && match.tag) {
+                    return match.tag;
+                }
+            }
+        }
+
+        // 2. 回退到默认内置标记
+        return def.fallbackMarker || def.markerName || "";
+    }
+
+    /**
+     * 规范化 statusmarkers 字符串：绝不添加数字，自动滤除已有数字 (@数字)
+     * @param {string} currentMarkers 当前 statusmarkers 字符串
+     * @param {string} tagToAdd 拟添加的标记 Tag
+     * @param {boolean} add 是否添加 (true 为添加，false 为移除)
+     * @returns {string} 干净的 statusmarkers 字符串
+     */
+    static mutateStatusmarkers(currentMarkers, tagToAdd, add = true) {
+        if (!tagToAdd) return currentMarkers || "";
+
+        // 拆分现有标记，并一律剥离 @数字
+        const existing = (currentMarkers || "")
+            .split(",")
+            .map(s => s.trim().replace(/@\d+$/, ""))
+            .filter(Boolean);
+
+        const cleanTag = tagToAdd.replace(/@\d+$/, "").trim();
+
+        const tagSet = new Set(existing);
+        if (add) {
+            tagSet.add(cleanTag);
+        } else {
+            tagSet.delete(cleanTag);
+            // 同时兼容无 tag 后缀的简写名称移除
+            const namePart = cleanTag.split("::")[0];
+            for (const item of [...tagSet]) {
+                if (item === namePart || item.startsWith(`${namePart}::`)) {
+                    tagSet.delete(item);
+                }
+            }
+        }
+
+        return Array.from(tagSet).join(",");
+    }
+
+    /**
+     * 将单个 markerTag 解析为纯中文名称（精简无英文无冒号效果）
+     * @param {string} tag 例如 "Blinded::6485443" 或 "skull"
+     * @returns {string} 例如 "目盲"
+     */
+    static getTooltipForMarker(tag) {
+        if (!tag) return "";
+        const cleanTag = tag.split("::")[0].trim();
+        const normalizedTag = cleanTag.replace(/_/g, " ");
+
+        // 1. 尝试从 34 项核心状态注册表中匹配
+        const def = this.find(cleanTag) || this.find(normalizedTag) || this.find(tag);
+        if (def) {
+            return def.nameZh;
+        }
+
+        // 2. 战役常见扩展 Buff/Debuff、官方经典图标与自定义包纯中文映射字典
+        const EXTRA_ZH_MAP = {
+            // 基础颜色球
+            "red": "紅", "blue": "藍", "green": "綠", "brown": "棕",
+            "purple": "紫", "pink": "粉", "yellow": "黃", "dead": "死亡",
+
+            // 战役常见状态与法术 (支持驼峰与下划线)
+            "Hex": "惡咒", "Poisoned": "中毒", "Raging": "狂暴", "Blessed": "祝福術",
+            "Hasted": "加速術", "Slowed": "緩慢", "Flying": "飛行", "MageArmor": "法師護甲",
+            "Shield of Faith": "虔誠之盾", "Shield_of_Faith": "虔誠之盾",
+            "Bulls Strength": "公牛之力", "Bulls_Strength": "公牛之力",
+            "Cats Grace": "貓之優雅", "Cats_Grace": "貓之優雅",
+            "Bears Endurance": "巨熊堅韌", "Bears_Endurance": "巨熊堅韌",
+            "Foxs Cunning": "狐之狡黠", "Foxs_Cunning": "狐之狡黠",
+            "Owls Wisdom": "梟之睿智", "Owls_Wisdom": "梟之睿智",
+            "Eagles Splendor": "鷹之光彩", "Eagles_Splendor": "鷹之光彩",
+            "Advantage": "優勢", "Disadvantage": "劣勢",
+            "OnFire": "著火", "Possessed": "附身", "Symbio": "共生",
+            "Blink": "閃現術", "Blur": "朦朧術", "Mirror Image": "鏡像術", "Mirror_Image": "鏡像術",
+            "Sanctuary": "聖域術", "Truesight": "真知術",
+            "Spirit Guardians": "守護之靈", "Spirit_Guardians": "守護之靈",
+            "DivineFavor": "神恩", "Stabilized": "傷勢穩定", "Unconcious": "昏迷",
+            "Cause_of_Fear": "恐懼", "Cause of Fear": "恐懼",
+            "Bleeding_Out": "流血", "Bleeding Out": "流血",
+            "Concentration": "專注", "Petrified": "石化",
+            "Slayers_Prey": "獵手印記", "Slayers Prey": "獵手印記",
+            "Warding_Bond": "守護之鏈", "Warding Bond": "守護之鏈",
+            "Shifted": "變形", "Natural_Armor": "天生防禦", "Natural Armor": "天生防禦",
+            "Incorporeal": "虛體", "Gaze": "凝視", "Highlighted": "高亮", "Inspired": "激勵",
+            "Reaction_Used": "已反應", "Reaction Used": "已反應",
+            "Dodge_Action": "全迴避", "Dodge Action": "全迴避",
+            "Hexblades_Curse": "咒刃詛咒", "Hexblades Curse": "咒刃詛咒",
+            "Baned": "破滅術", "Mark": "標記", "cobweb": "蛛網", "flying-flag": "戰旗",
+            "strong": "強韌", "bolt-shield": "護盾", "drink-me": "藥劑",
+
+            // Roll20 原生内置经典图标
+            "skull": "顱骨", "sleepy": "沉睡", "half-heart": "半心", "half-haze": "迷濛",
+            "interdiction": "禁制", "snail": "緩慢", "lightning-helix": "閃電", "spanner": "扳手",
+            "chained-heart": "鎖心", "chemical-bolt": "化學箭", "death-zone": "死亡領域",
+            "edge-crack": "碎裂", "ninja-mask": "忍者面罩", "stopwatch": "碼錶", "fishing-net": "漁網",
+            "overdrive": "超載", "fist": "重拳", "padlock": "鎖具", "three-leaves": "三葉",
+            "fluffy-wing": "羽翼", "pummeled": "痛擊", "tread": "踐踏", "arrowed": "中箭",
+            "aura": "光環", "back-pain": "背痛", "black-flag": "黑旗", "bleeding-eye": "流血之眼",
+            "broken-heart": "碎心", "broken-shield": "破盾", "radioactive": "輻射", "trophy": "獎盃",
+            "broken-skull": "碎顱", "frozen-orb": "冰球", "rolling-bomb": "炸彈", "white-tower": "白塔",
+            "grab": "擒拿", "screaming": "尖叫", "grenade": "手榴彈", "sentry-gun": "哨戒砲",
+            "all-for-one": "萬眾一心", "angel-outfit": "天使", "archery-target": "箭靶"
+        };
+
+        if (EXTRA_ZH_MAP[cleanTag]) return EXTRA_ZH_MAP[cleanTag];
+        if (EXTRA_ZH_MAP[normalizedTag]) return EXTRA_ZH_MAP[normalizedTag];
+
+        // 3. 自定义编号前缀处理 (如 403-Attack-Debuff -> 攻擊減值)
+        if (cleanTag.includes("-")) {
+            const stripped = cleanTag.replace(/^\d+-/, "");
+            if (EXTRA_ZH_MAP[stripped]) return EXTRA_ZH_MAP[stripped];
+        }
+
+        // 绝不回退到 className 或 statusicon，仅返回最干净的可读名称
+        return cleanTag;
+    }
+
+    /**
+     * 将当前 Token 拥有的状态标记解析为纯中文文本列表（供悬浮 Tooltip 提示）
+     * @param {string} statusmarkersStr 
+     * @returns {string[]} 中文状态名称数组
+     */
+    static getReadableNamesFromMarkers(statusmarkersStr) {
+        if (!statusmarkersStr) return [];
+        const tags = statusmarkersStr.split(",").map(s => s.trim().replace(/@\d+$/, "")).filter(Boolean);
+        const names = [];
+
+        for (const tag of tags) {
+            const tagName = tag.split("::")[0];
+            const def = this.find(tagName) || this.find(tag);
+            if (def) {
+                names.push(`${def.nameZh} (${def.nameEn})`);
+            } else {
+                names.push(tagName);
+            }
+        }
+        return names;
+    }
+}
