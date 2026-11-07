@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.26
+// @version      0.9.27
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @license      MIT
@@ -35,7 +35,7 @@
         }
     }
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.26...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.27...");
 
     // 致命异常浮动通知横条
     function showFatalErrorBanner(reason, details) {
@@ -46,7 +46,7 @@
         const safeReason = (typeof Roll20Bridge !== "undefined" && Roll20Bridge.escapeHtml) ? Roll20Bridge.escapeHtml(reason) : reason;
         banner.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-                <strong style="color:#ff6b6b;font-size:13px;">⚠️ Roll20 Suite (v0.9.26) 启动受阻</strong>
+                <strong style="color:#ff6b6b;font-size:13px;">⚠️ Roll20 Suite (v0.9.27) 启动受阻</strong>
                 <button id="r20-fatal-close" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;padding:0 4px;line-height:1;">&times;</button>
             </div>
             <div style="margin-bottom:8px;color:#eee;">${safeReason}</div>
@@ -61,7 +61,7 @@
         if (copyBtn) {
             copyBtn.onclick = (e) => {
                 const diag = {
-                    version: "0.9.26",
+                    version: "0.9.27",
                     time: new Date().toISOString(),
                     href: window.location.href,
                     hasCampaign: typeof window.Campaign !== "undefined",
@@ -4646,6 +4646,402 @@ class Pf1eBuffUI {
 }
 
     // ==========================================
+    // 8. CharacterSheetTitleCopier (官方人物卡 Title 属性快捷复制助手)
+    // ==========================================
+/**
+ * Roll20 Suite - 官方人物卡控件 Title 宏属性快速复制助手
+ * 
+ * 核心功能：
+ * 1. 双通道快捷复制：Alt + 鼠标左键点击 或 鼠标滚轮中键点击 任意带有 title 属性的控件/标签，直接复制 title 内容到系统剪贴板；
+ * 2. 智能解析 repeating section：若 title 中包含 $X，自动向上追溯 .repitem 替换为当前行真实的 data-reprowid；
+ * 3. 即时 Toast 反馈：在光标点击位置上方弹出轻量 HUD 气泡，提示“已复制: @{...}”并在 1.2 秒内平滑淡出，附带目标微光高亮；
+ * 4. 事件委托与 iframe 全局穿透：自动监听当前与后续所有动态打开的人物卡 iframe，零性能开销。
+ */
+class CharacterSheetTitleCopier {
+    static isInitialized = false;
+    static boundDocuments = new WeakSet();
+    static observer = null;
+
+    /**
+     * 全局初始化
+     */
+    static init() {
+        if (this.isInitialized) return;
+        this.isInitialized = true;
+
+        console.log("[CharacterSheetTitleCopier] 启动官方人物卡 Title 属性快捷复制助手 (Alt+点击 / 滚轮中键)...");
+
+        // 1. 监听主窗口 document（针对非 iframe 渲染的卡片与原生弹窗）
+        if (typeof document !== "undefined") {
+            this.attachToDocument(document);
+        }
+
+        // 2. 扫描并监听当前已打开的所有人物卡 iframe
+        this.scanAndAttachAllFrames();
+
+        // 3. 启动 MutationObserver 监听未来动态打开的人物卡弹窗与 iframe
+        this.startFrameObserver();
+    }
+
+    /**
+     * 将事件委托挂载到指定的 document 上
+     */
+    static attachToDocument(doc) {
+        if (!doc || !doc.body) return;
+        if (this.boundDocuments.has(doc)) return;
+        this.boundDocuments.add(doc);
+
+        // 注入 Toast 与高亮动画所需的轻量 CSS
+        this.injectStyles(doc);
+
+        // 统一在捕获阶段监听 click 与 auxclick 事件
+        const clickHandler = (e) => this.handleEvent(e, doc);
+        
+        doc.addEventListener("click", clickHandler, true);
+        doc.addEventListener("auxclick", clickHandler, true);
+    }
+
+    /**
+     * 核心事件处理逻辑
+     */
+    static handleEvent(e, doc) {
+        // 判定触发条件：Alt + 左键 (button 0) 或 滚轮中键 (button 1)
+        const isAltLeft = e.altKey && e.button === 0;
+        const isMiddleClick = e.button === 1;
+        if (!isAltLeft && !isMiddleClick) return;
+
+        // 查找目标控件及 title 属性
+        const targetInfo = this.findTargetTitle(e.target);
+        if (!targetInfo || !targetInfo.rawTitle) return;
+
+        // 阻止默认行为与原生事件冒泡，避免误触表单提交、打字选区或勾选框翻转
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") {
+            e.stopImmediatePropagation();
+        }
+
+        // 智能解析宏公式语法（展开 repeating 行中的 $X）
+        const resolvedText = this.resolveMacroTitle(targetInfo.rawTitle, targetInfo.element);
+
+        // 执行剪贴板复制
+        this.copyToClipboard(resolvedText, doc).then((success) => {
+            if (success) {
+                this.showFeedback(resolvedText, targetInfo.element, e, doc);
+            }
+        });
+    }
+
+    /**
+     * 精确查找带有有效 title 的目标元素
+     */
+    static findTargetTitle(startEl) {
+        if (!startEl || typeof startEl.getAttribute !== "function") return null;
+
+        // 1. 直接检查自身
+        const directTitle = startEl.getAttribute("title");
+        if (directTitle && directTitle.trim()) {
+            return { element: startEl, rawTitle: directTitle.trim() };
+        }
+
+        // 2. 如果点击的是 label 或 label 内的文本，优先检查内部的输入控件
+        const label = startEl.closest("label");
+        if (label) {
+            const innerCtrl = label.querySelector("input[title], select[title], textarea[title], button[title]");
+            if (innerCtrl) {
+                const innerTitle = innerCtrl.getAttribute("title");
+                if (innerTitle && innerTitle.trim()) {
+                    return { element: innerCtrl, rawTitle: innerTitle.trim() };
+                }
+            }
+            const labelTitle = label.getAttribute("title");
+            if (labelTitle && labelTitle.trim()) {
+                return { element: label, rawTitle: labelTitle.trim() };
+            }
+        }
+
+        // 3. 向上回溯查找最近的父级（最多 3 层）
+        let curr = startEl.parentElement;
+        let depth = 0;
+        while (curr && depth < 3) {
+            if (curr.tagName === "BODY" || curr.tagName === "HTML" || curr.classList?.contains("characterdialog")) {
+                break;
+            }
+            const parentTitle = curr.getAttribute("title");
+            if (parentTitle && parentTitle.trim()) {
+                return { element: curr, rawTitle: parentTitle.trim() };
+            }
+            curr = curr.parentElement;
+            depth++;
+        }
+
+        return null;
+    }
+
+    /**
+     * 智能宏文本解析：自动将 Repeating Section 中的 $X 替换为具体 rowId
+     */
+    static resolveMacroTitle(rawTitle, element) {
+        let text = rawTitle.trim();
+
+        if (/\$[Xx]/.test(text)) {
+            const repItem = element.closest(".repitem");
+            if (repItem) {
+                let rowId = repItem.getAttribute("data-reprowid");
+                if (!rowId) {
+                    const namedInput = repItem.querySelector('input[name*="repeating_"]');
+                    if (namedInput) {
+                        const m = (namedInput.getAttribute("name") || "").match(/repeating_[^_]+_([^_]+)_/);
+                        if (m) rowId = m[1];
+                    }
+                }
+                if (rowId) {
+                    text = text.replace(/\$[Xx]/g, rowId);
+                }
+            }
+        }
+
+        return text;
+    }
+
+    /**
+     * 跨环境剪贴板复制，具备多层容错
+     */
+    static async copyToClipboard(text, doc = document) {
+        if (!text) return false;
+
+        // 优先使用主窗口的 navigator.clipboard
+        try {
+            if (window.navigator?.clipboard?.writeText) {
+                await window.navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (e) {}
+
+        // 回退机制：使用临时 textarea 元素触发 execCommand('copy')
+        try {
+            const targetDoc = doc || document;
+            const ta = targetDoc.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            ta.style.pointerEvents = "none";
+            ta.style.left = "-9999px";
+            ta.style.top = "-9999px";
+            (targetDoc.body || targetDoc.documentElement).appendChild(ta);
+            ta.focus();
+            ta.select();
+            const res = targetDoc.execCommand("copy");
+            ta.remove();
+            if (res) return true;
+        } catch (err) {
+            console.warn("[CharacterSheetTitleCopier] execCommand 复制失败:", err);
+        }
+
+        return false;
+    }
+
+    /**
+     * 显示视觉反馈（Toast 气泡与控件高亮）
+     */
+    static showFeedback(copiedText, element, event, doc) {
+        try {
+            // 1. 控件高亮微光动画
+            if (element && element.classList) {
+                element.classList.remove("r20-suite-copied-highlight");
+                void element.offsetWidth; // 触发 reflow 重置动画
+                element.classList.add("r20-suite-copied-highlight");
+                if (typeof setTimeout !== "undefined") {
+                    setTimeout(() => {
+                        try { element.classList.remove("r20-suite-copied-highlight"); } catch (e) {}
+                    }, 800);
+                }
+            }
+
+            // 2. 移除旧 Toast（防止快速连击导致堆叠）
+            const oldToast = doc.getElementById("r20-suite-title-toast");
+            if (oldToast) oldToast.remove();
+
+            // 3. 构建全新 Toast DOM
+            const toast = doc.createElement("div");
+            toast.id = "r20-suite-title-toast";
+            toast.className = "r20-suite-title-toast";
+
+            // 格式化展示文本（超长截断展示，实际已全量复制）
+            const displaySnippet = copiedText.length > 40 ? copiedText.substring(0, 37) + "..." : copiedText;
+            const safeDisplay = typeof Roll20Bridge !== "undefined" && Roll20Bridge.escapeHtml 
+                ? Roll20Bridge.escapeHtml(displaySnippet) 
+                : displaySnippet.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+            toast.innerHTML = `<span style="color:#60a5fa;margin-right:4px;">📋 已复制:</span><strong style="color:#fcd34d;">${safeDisplay}</strong>`;
+
+            // 计算精准定位坐标
+            let posX = event?.pageX;
+            let posY = event?.pageY;
+
+            if (posX === undefined || posY === undefined) {
+                const rect = element.getBoundingClientRect ? element.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+                const scrollX = doc.defaultView?.pageXOffset || doc.documentElement?.scrollLeft || 0;
+                const scrollY = doc.defaultView?.pageYOffset || doc.documentElement?.scrollTop || 0;
+                posX = rect.left + rect.width / 2 + scrollX;
+                posY = rect.top + scrollY;
+            }
+
+            toast.style.left = `${posX}px`;
+            toast.style.top = `${Math.max(8, posY - 30)}px`;
+
+            const container = doc.body || doc.documentElement;
+            if (container && typeof container.appendChild === "function") {
+                container.appendChild(toast);
+            }
+
+            // 1.2 秒后自动销毁
+            if (typeof setTimeout !== "undefined") {
+                setTimeout(() => {
+                    if (toast && toast.parentNode) {
+                        toast.remove();
+                    }
+                }, 1200);
+            }
+        } catch (e) {
+            console.warn("[CharacterSheetTitleCopier] 显示 Toast 反馈异常:", e);
+        }
+    }
+
+    /**
+     * 注入自洽样式
+     */
+    static injectStyles(doc) {
+        try {
+            if (!doc || doc.getElementById("r20-suite-title-copier-style")) return;
+            const style = doc.createElement("style");
+            style.id = "r20-suite-title-copier-style";
+            style.textContent = `
+@keyframes r20SuiteToastFadeUp {
+    0% { opacity: 0; transform: translate(-50%, 6px); }
+    15% { opacity: 1; transform: translate(-50%, 0); }
+    80% { opacity: 1; transform: translate(-50%, 0); }
+    100% { opacity: 0; transform: translate(-50%, -10px); }
+}
+@keyframes r20SuitePulseBorder {
+    0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); outline: 1px solid #3b82f6; }
+    50% { box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.3); outline: 1px solid #60a5fa; }
+    100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); outline: none; }
+}
+.r20-suite-title-toast {
+    position: absolute;
+    z-index: 9999999;
+    background: rgba(18, 22, 28, 0.95);
+    border: 1px solid #3b82f6;
+    border-radius: 5px;
+    color: #f1f5f9;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 4px 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+    animation: r20SuiteToastFadeUp 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    white-space: nowrap;
+    max-width: 380px;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
+.r20-suite-copied-highlight {
+    animation: r20SuitePulseBorder 0.6s ease-out !important;
+}
+`;
+            (doc.head || doc.body || doc.documentElement).appendChild(style);
+        } catch (e) {}
+    }
+
+    /**
+     * 扫描并挂载所有已有的 iframe
+     */
+    static scanAndAttachAllFrames() {
+        try {
+            if (typeof document === "undefined") return;
+            const iframes = document.querySelectorAll(".characterdialog iframe, iframe.charactersheet, iframe");
+            iframes.forEach(iframe => {
+                try {
+                    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+                    if (doc && doc.body) {
+                        this.attachToDocument(doc);
+                    }
+                    // 监听 iframe 的 load 事件，确保重新加载后依然挂载
+                    iframe.removeEventListener("load", iframe._r20SuiteFrameLoadHandler);
+                    iframe._r20SuiteFrameLoadHandler = () => {
+                        try {
+                            const newDoc = iframe.contentDocument || iframe.contentWindow?.document;
+                            if (newDoc && newDoc.body) {
+                                CharacterSheetTitleCopier.attachToDocument(newDoc);
+                            }
+                        } catch (err) {}
+                    };
+                    iframe.addEventListener("load", iframe._r20SuiteFrameLoadHandler);
+                } catch (e) {}
+            });
+        } catch (e) {}
+    }
+
+    /**
+     * 监听后续动态打开的人物卡 iframe
+     */
+    static startFrameObserver() {
+        if (this.observer || typeof MutationObserver === "undefined" || typeof document === "undefined") return;
+
+        this.observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType === 1) { // ELEMENT_NODE
+                            if (node.tagName === "IFRAME") {
+                                this.handleIframeNode(node);
+                            } else if (node.querySelectorAll) {
+                                const iframes = node.querySelectorAll("iframe");
+                                iframes.forEach(frame => this.handleIframeNode(frame));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        if (document.body) {
+            this.observer.observe(document.body, { childList: true, subtree: true });
+        }
+    }
+
+    static handleIframeNode(iframe) {
+        try {
+            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+            if (doc && doc.body) {
+                this.attachToDocument(doc);
+            }
+            iframe.addEventListener("load", () => {
+                try {
+                    const newDoc = iframe.contentDocument || iframe.contentWindow?.document;
+                    if (newDoc && newDoc.body) {
+                        this.attachToDocument(newDoc);
+                    }
+                } catch (e) {}
+            });
+        } catch (e) {}
+    }
+
+    /**
+     * 销毁与注销
+     */
+    static destroy() {
+        if (this.observer) {
+            this.observer.disconnect();
+            this.observer = null;
+        }
+        this.isInitialized = false;
+    }
+}
+
+    // ==========================================
     // 9. CharacterSheetBuffEnhancer (官方人物卡 Buff 预置初始轮数注入增强器)
     // ==========================================
 /**
@@ -4674,6 +5070,9 @@ class CharacterSheetBuffEnhancer {
 
         // 3. 对当前屏幕上已经打开的卡片进行一次性模板与既有项调和
         this.patchOpenDialogs();
+
+        // 4. 启动官方人物卡 title 快捷复制功能（Alt+点击 / 滚轮中键）
+        CharacterSheetTitleCopier.init();
     }
 
     /**
@@ -4867,6 +5266,9 @@ class CharacterSheetBuffEnhancer {
      */
     static patchDocumentDOM(doc, dialogEl) {
         if (!doc) return;
+
+        // 挂载 title 快捷复制功能到当前 document（带 WeakSet 防重）
+        CharacterSheetTitleCopier.attachToDocument(doc);
 
         // 1. 如果该 iframe 内部的 fieldset 尚未包含该字段，就地修补 fieldset.innerHTML（供用户点击 +Add 时直接克隆）
         const fsList = doc.querySelectorAll('fieldset.repeating_buff2, fieldset[class*="repeating_buff2"]');
@@ -5091,21 +5493,36 @@ class BuffPanelStyles {
                 display: none !important;
             }
 
-            /* 靠左动态选区标签容器 */
+            /* 靠左动态选区标签容器（支持横向滚动，极细滚动条） */
             .r20-tabs-dynamic {
                 display: flex !important;
                 flex-direction: row !important;
                 align-items: center !important;
                 gap: 3px !important;
                 flex: 1 1 auto !important;
+                min-width: 0 !important;
                 overflow-x: auto !important;
-                scrollbar-width: none !important;
+                overflow-y: hidden !important;
+                scrollbar-width: thin !important;
+                scrollbar-color: #37474f transparent !important;
+                padding-bottom: 2px !important;
             }
             .r20-tabs-dynamic::-webkit-scrollbar {
-                display: none !important;
+                height: 3px !important;
+                display: block !important;
+            }
+            .r20-tabs-dynamic::-webkit-scrollbar-track {
+                background: transparent !important;
+            }
+            .r20-tabs-dynamic::-webkit-scrollbar-thumb {
+                background: #37474f !important;
+                border-radius: 3px !important;
+            }
+            .r20-tabs-dynamic::-webkit-scrollbar-thumb:hover {
+                background: #607d8b !important;
             }
 
-            /* 靠右固定角色标签容器（自适应最小宽度） */
+            /* 靠右固定角色标签容器（自适应最小宽度，支持溢出滚动） */
             .r20-tabs-pinned {
                 display: flex !important;
                 flex-direction: row !important;
@@ -5114,11 +5531,54 @@ class BuffPanelStyles {
                 flex: 0 0 auto !important;
                 width: auto !important;
                 min-width: 0 !important;
-                max-width: fit-content !important;
-                padding: 0 0 0 4px !important;
+                max-width: 50% !important;
+                overflow-x: auto !important;
+                overflow-y: hidden !important;
+                scrollbar-width: thin !important;
+                scrollbar-color: #37474f transparent !important;
+                padding: 0 0 2px 4px !important;
                 margin: 0 !important;
                 border-left: 1px solid #263238 !important;
                 box-sizing: border-box !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar {
+                height: 3px !important;
+                display: block !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar-track {
+                background: transparent !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar-thumb {
+                background: #37474f !important;
+                border-radius: 3px !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar-thumb:hover {
+                background: #607d8b !important;
+            }
+            /* 钉选区域空态占位 */
+            .r20-tabs-pinned:empty {
+                min-width: 24px !important;
+                height: 38px !important;
+                border: 1px dashed rgba(55, 71, 79, 0.6) !important;
+                border-radius: 4px !important;
+                margin-left: 3px !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                opacity: 0.5 !important;
+                transition: all 0.2s ease !important;
+            }
+            .r20-tabs-pinned:empty::after {
+                content: "📌" !important;
+                font-size: 11px !important;
+                opacity: 0.4 !important;
+                pointer-events: none !important;
+            }
+            .r20-tabs-pinned:empty:hover,
+            .r20-tabs-pinned.r20-pin-zone-hover {
+                opacity: 1 !important;
+                background: rgba(33, 150, 243, 0.15) !important;
+                border-color: #2196f3 !important;
             }
 
             /* 单个选项卡（方形人物图标设计，尺寸大，手感舒适） */
@@ -5190,8 +5650,9 @@ class BuffPanelStyles {
                 font-weight: 700 !important;
                 border-radius: 4px !important;
             }
-            /* 悬停或常驻小叉号 */
-            .r20-tab-close {
+            /* 悬停或常驻小叉号 / 钉选小图钉 */
+            .r20-tab-close,
+            .r20-tab-pin {
                 position: absolute !important;
                 top: -5px !important;
                 right: -5px !important;
@@ -5209,31 +5670,19 @@ class BuffPanelStyles {
                 box-shadow: 0 2px 5px rgba(0,0,0,0.6) !important;
                 z-index: 5 !important;
                 cursor: pointer !important;
+                user-select: none !important;
             }
-            .r20-tab:hover .r20-tab-close {
+            .r20-tab:hover .r20-tab-close,
+            .r20-tab:hover .r20-tab-pin {
                 display: flex !important;
             }
             .r20-tab-close:hover {
                 background: #ef5350 !important;
                 color: #fff !important;
             }
-            .btn-add-pinned-char {
-                width: 22px !important;
-                height: 34px !important;
-                min-width: 22px !important;
-                border-radius: 4px !important;
-                font-size: 11px !important;
-                padding: 0 !important;
-                display: inline-flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                background: rgba(255, 255, 255, 0.04) !important;
-                border: 1px dashed #37474f !important;
-            }
-            .btn-add-pinned-char:hover {
-                background: rgba(33, 150, 243, 0.15) !important;
-                border-color: #2196f3 !important;
-                color: #90caf9 !important;
+            .r20-tab-pin:hover {
+                background: #1976d2 !important;
+                color: #fff !important;
             }
 
             /* 拖拽悬停高亮 */
@@ -5692,9 +6141,7 @@ class BuffPanelTemplates {
             <div class="r20-panel-content-drawer">
                 <div class="r20-tab-strip">
                     <div class="r20-tabs-dynamic" title="当前画布选中单位（靠左展示，可向右拖拽固定）"></div>
-                    <div class="r20-tabs-pinned" title="固定常驻角色（靠右展示）">
-                        <button class="r20-btn-icon btn-add-pinned-char" title="钉选指定角色到常驻标签栏">➕</button>
-                    </div>
+                    <div class="r20-tabs-pinned" title="固定常驻角色（靠右展示，可拖拽或点击棋子钉选）"></div>
                 </div>
                 <div class="r20-tab-viewport">
                     <div class="r20-empty-view">正在连接单位数据...</div>
@@ -6817,11 +7264,18 @@ class BuffFloatingPanel {
             panel.style.display = "none";
         });
 
-        // 钉选新角色按钮
-        panel.querySelector(".btn-add-pinned-char")?.addEventListener("click", (e) => {
-            e.stopPropagation();
-            this.showAddPinnedCharMenu(e.currentTarget);
-        });
+        // 标签栏滚轮水平横向滚动支持（直接用鼠标滚轮在棋子栏滑动查看溢出棋子）
+        const setupHorizontalScroll = (el) => {
+            if (!el) return;
+            el.addEventListener("wheel", (e) => {
+                if (e.deltaY !== 0) {
+                    e.preventDefault();
+                    el.scrollLeft += e.deltaY;
+                }
+            }, { passive: false });
+        };
+        setupHorizontalScroll(panel.querySelector(".r20-tabs-dynamic"));
+        setupHorizontalScroll(panel.querySelector(".r20-tabs-pinned"));
 
         // 右侧固定区域监听动态 Tab 拖入（升格）或独立窗口 Tab 拖回合并
         const pinnedContainer = panel.querySelector(".r20-tabs-pinned");
@@ -7049,12 +7503,10 @@ class BuffFloatingPanel {
     static renderTabs() {
         const dynamicContainer = this.panelEl.querySelector(".r20-tabs-dynamic");
         const pinnedContainer = this.panelEl.querySelector(".r20-tabs-pinned");
-        const addBtn = pinnedContainer.querySelector(".btn-add-pinned-char");
         if (!dynamicContainer || !pinnedContainer) return;
 
         dynamicContainer.innerHTML = "";
-        // 清理除 ➕ 按钮以外的固定标签
-        Array.from(pinnedContainer.querySelectorAll(".r20-tab")).forEach(el => el.remove());
+        pinnedContainer.innerHTML = "";
 
         const selectedTokens = this.getSelectedTokens();
         const detachedCharIds = BuffDetachedWindow.getAllDetachedTargetIds();
@@ -7084,17 +7536,17 @@ class BuffFloatingPanel {
 
             const tab = document.createElement("div");
             tab.className = `r20-tab${isActive ? " active" : ""}`;
-            tab.title = `${name} (选区单位，可拖至右侧固定)`;
+            tab.title = `${name} (选区单位，点击右上角 📌 钉选)`;
             tab.draggable = true;
             tab.innerHTML = `
                 ${this.getAvatarHtml(name, avatarUrl)}
-                <span class="r20-tab-close" title="取消选中此单位">✕</span>
+                <span class="r20-tab-pin" title="钉选此角色到常驻栏">📌</span>
             `;
 
             tab.addEventListener("click", (e) => {
-                if (e.target.classList.contains("r20-tab-close")) {
+                if (e.target.classList.contains("r20-tab-pin")) {
                     e.stopPropagation();
-                    this.deselectToken(token);
+                    this.pinTargetToken(token, { type, id, name, char });
                     return;
                 }
                 this.activeTarget = { type, id, name };
@@ -7232,7 +7684,7 @@ class BuffFloatingPanel {
             });
 
             this.bindTabBuffHover(tab, { type: "char", id: charId, name });
-            pinnedContainer.insertBefore(tab, addBtn);
+            pinnedContainer.appendChild(tab);
         });
 
         // 3. 自动调和与回退当前激活的 Tab 目标
@@ -8440,97 +8892,32 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 弹出添加固定角色菜单（带实时搜索框、滚动条与边界自适应翻转）
+     * 将动态选区的单位钉选至常驻标签栏
      */
-    static showAddPinnedCharMenu(anchorBtn) {
-        document.querySelector(".r20-pinned-char-picker")?.remove();
-
-        const characters = window.Campaign?.characters?.models || [];
-        const unpinned = characters.filter(c => {
-            if (c.get("archived")) return false;
-            if (this.pinnedCharIds.includes(c.id)) return false;
-            if (!Roll20Bridge.canViewCharacterBuffs(c)) return false;
-            return true;
-        });
-
-        const menu = document.createElement("div");
-        menu.className = "r20-context-menu r20-pinned-char-picker";
-        menu.style.width = "220px";
-        menu.style.maxHeight = "320px";
-        menu.style.display = "flex";
-        menu.style.flexDirection = "column";
-        menu.style.padding = "6px";
-        menu.style.boxSizing = "border-box";
-        menu.style.zIndex = "10050";
-
-        // 智能定位：下方空间不足时向上翻转
-        const rect = anchorBtn.getBoundingClientRect();
-        const pickerHeight = 300;
-        const spaceBelow = window.innerHeight - rect.bottom;
-        if (spaceBelow < pickerHeight && rect.top > pickerHeight) {
-            menu.style.top = `${rect.top - pickerHeight - 4}px`;
-        } else {
-            menu.style.top = `${rect.bottom + 4}px`;
-        }
-        menu.style.right = `${Math.max(10, window.innerWidth - rect.right)}px`;
-
-        // 搜索输入框
-        const searchBox = document.createElement("div");
-        searchBox.style.cssText = "margin-bottom:6px; flex-shrink:0;";
-        searchBox.innerHTML = `
-            <input type="text" class="r20-pinned-search" placeholder="🔍 搜索角色名称..." 
-                style="width:100%; box-sizing:border-box; background:#141b22; border:1px solid #37474f; color:#fff; padding:5px 8px; border-radius:4px; font-size:11px; outline:none;">
-        `;
-        menu.appendChild(searchBox);
-
-        // 滚动列表容器
-        const listContainer = document.createElement("div");
-        listContainer.style.cssText = "flex:1 1 auto; overflow-y:auto; max-height:240px; scrollbar-width:thin;";
-
-        if (unpinned.length === 0) {
-            listContainer.innerHTML = `<div style="padding:10px; color:#78909c; font-size:11px; text-align:center;">无可用未钉选角色</div>`;
-        } else {
-            const itemNodes = [];
-            unpinned.forEach(c => {
-                const name = c.get("name") || "未命名";
-                const item = document.createElement("div");
-                item.className = "r20-context-menu-item";
-                item.style.cssText = "padding:5px 8px; border-radius:3px; cursor:pointer;";
-                item.innerHTML = `<span>🛡️</span><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(name)}</span>`;
-                item.addEventListener("click", async () => {
-                    menu.remove();
-                    this.pinnedCharIds.push(c.id);
-                    this.savePinnedChars();
-                    await this.renderDispatcher();
-                });
-                listContainer.appendChild(item);
-                itemNodes.push({ el: item, name });
-            });
-
-            // 搜索过滤
-            const searchInput = searchBox.querySelector(".r20-pinned-search");
-            searchInput.addEventListener("input", (e) => {
-                const q = e.target.value.trim().toLowerCase();
-                itemNodes.forEach(({ el, name }) => {
-                    const match = !q || name.toLowerCase().includes(q);
-                    el.style.display = match ? "flex" : "none";
-                });
-            });
-
-            setTimeout(() => searchInput.focus(), 50);
-        }
-
-        menu.appendChild(listContainer);
-
-        const closeHandler = (e) => {
-            if (!menu.contains(e.target) && e.target !== anchorBtn) {
-                menu.remove();
-                document.removeEventListener("mousedown", closeHandler);
+    static pinTargetToken(token, { type, id, name, char }) {
+        let charId = null;
+        if (type === "char") {
+            charId = id;
+        } else if (char?.id) {
+            charId = char.id;
+        } else if (token) {
+            const resolvedChar = Roll20Bridge.getCharacterByToken(token);
+            if (resolvedChar?.id) {
+                charId = resolvedChar.id;
             }
-        };
-        setTimeout(() => document.addEventListener("mousedown", closeHandler), 10);
+        }
 
-        document.body.appendChild(menu);
+        if (!charId) {
+            this.showNotice(`该单位未关联人物卡，无法钉选`);
+            return;
+        }
+
+        if (!this.pinnedCharIds.includes(charId)) {
+            this.pinnedCharIds.push(charId);
+            this.savePinnedChars();
+            this.showNotice(`已将【${name}】钉选至常驻标签栏`);
+            this.renderDispatcher();
+        }
     }
 
     /**
@@ -9091,6 +9478,7 @@ class BuffFloatingPanel {
             // 4. 启动官方人物卡 Buff 预置初始轮数增强注入器
             try {
                 CharacterSheetBuffEnhancer.init();
+                registerCleanup(() => CharacterSheetTitleCopier.destroy());
                 console.log("[Roll20Suite] CharacterSheetBuffEnhancer 官方人物卡增强器挂载成功");
             } catch (enhancerErr) {
                 console.error("[Roll20Suite] CharacterSheetBuffEnhancer 挂载异常:", enhancerErr);
@@ -9106,7 +9494,7 @@ class BuffFloatingPanel {
 
             // 6. 挂载命名空间供外部或开发者排查联动
             window.Roll20Suite = {
-                __version: "0.9.26",
+                __version: "0.9.27",
                 __teardown: () => {
                     console.log("[Roll20Suite] 正在执行全系统注销与资源清理...");
                     while (cleanups.length > 0) {
@@ -9125,6 +9513,7 @@ class BuffFloatingPanel {
                 TurnOrderObserver,
                 TokenBuffManager,
                 Pf1eBuffUI,
+                CharacterSheetTitleCopier,
                 CharacterSheetBuffEnhancer,
                 BuffDetachedWindow,
                 SuiteSettingsPanel,

@@ -13,6 +13,7 @@ const bConfigStore = cleanModule(fs.readFileSync(path.join(rootDir, 'src/core/Su
 const bTurnObserver = cleanModule(fs.readFileSync(path.join(rootDir, 'src/core/TurnOrderObserver.js'), 'utf8'));
 const bTokenManager = cleanModule(fs.readFileSync(path.join(rootDir, 'src/modules/token-buff/TokenBuffManager.js'), 'utf8'));
 const bPf1eUI = cleanModule(fs.readFileSync(path.join(rootDir, 'src/modules/pf1e-buff-tracker/Pf1eBuffUI.js'), 'utf8'));
+const bTitleCopier = cleanModule(fs.readFileSync(path.join(rootDir, 'src/modules/pf1e-buff-tracker/CharacterSheetTitleCopier.js'), 'utf8'));
 const bSheetEnhancer = cleanModule(fs.readFileSync(path.join(rootDir, 'src/modules/pf1e-buff-tracker/CharacterSheetBuffEnhancer.js'), 'utf8'));
 const bPanelStyles = cleanModule(fs.readFileSync(path.join(rootDir, 'src/modules/buff-panel/BuffPanelStyles.js'), 'utf8'));
 const bPanelTemplates = cleanModule(fs.readFileSync(path.join(rootDir, 'src/modules/buff-panel/BuffPanelTemplates.js'), 'utf8'));
@@ -137,6 +138,11 @@ bTokenManager.trim(),
 '    // 7. Pf1eBuffUI (先攻列表徽章交互层)',
 '    // ==========================================',
 bPf1eUI.trim(),
+'',
+'    // ==========================================',
+'    // 8. CharacterSheetTitleCopier (官方人物卡 Title 属性快捷复制助手)',
+'    // ==========================================',
+bTitleCopier.trim(),
 '',
 '    // ==========================================',
 '    // 9. CharacterSheetBuffEnhancer (官方人物卡 Buff 预置初始轮数注入增强器)',
@@ -269,6 +275,7 @@ bPanel.trim(),
 '            // 4. 启动官方人物卡 Buff 预置初始轮数增强注入器',
 '            try {',
 '                CharacterSheetBuffEnhancer.init();',
+'                registerCleanup(() => CharacterSheetTitleCopier.destroy());',
 '                console.log("[Roll20Suite] CharacterSheetBuffEnhancer 官方人物卡增强器挂载成功");',
 '            } catch (enhancerErr) {',
 '                console.error("[Roll20Suite] CharacterSheetBuffEnhancer 挂载异常:", enhancerErr);',
@@ -303,6 +310,7 @@ bPanel.trim(),
 '                TurnOrderObserver,',
 '                TokenBuffManager,',
 '                Pf1eBuffUI,',
+'                CharacterSheetTitleCopier,',
 '                CharacterSheetBuffEnhancer,',
 '                BuffDetachedWindow,',
 '                SuiteSettingsPanel,',

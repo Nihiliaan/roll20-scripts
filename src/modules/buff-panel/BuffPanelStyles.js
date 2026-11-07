@@ -124,21 +124,36 @@ export class BuffPanelStyles {
                 display: none !important;
             }
 
-            /* 靠左动态选区标签容器 */
+            /* 靠左动态选区标签容器（支持横向滚动，极细滚动条） */
             .r20-tabs-dynamic {
                 display: flex !important;
                 flex-direction: row !important;
                 align-items: center !important;
                 gap: 3px !important;
                 flex: 1 1 auto !important;
+                min-width: 0 !important;
                 overflow-x: auto !important;
-                scrollbar-width: none !important;
+                overflow-y: hidden !important;
+                scrollbar-width: thin !important;
+                scrollbar-color: #37474f transparent !important;
+                padding-bottom: 2px !important;
             }
             .r20-tabs-dynamic::-webkit-scrollbar {
-                display: none !important;
+                height: 3px !important;
+                display: block !important;
+            }
+            .r20-tabs-dynamic::-webkit-scrollbar-track {
+                background: transparent !important;
+            }
+            .r20-tabs-dynamic::-webkit-scrollbar-thumb {
+                background: #37474f !important;
+                border-radius: 3px !important;
+            }
+            .r20-tabs-dynamic::-webkit-scrollbar-thumb:hover {
+                background: #607d8b !important;
             }
 
-            /* 靠右固定角色标签容器（自适应最小宽度） */
+            /* 靠右固定角色标签容器（自适应最小宽度，支持溢出滚动） */
             .r20-tabs-pinned {
                 display: flex !important;
                 flex-direction: row !important;
@@ -147,11 +162,54 @@ export class BuffPanelStyles {
                 flex: 0 0 auto !important;
                 width: auto !important;
                 min-width: 0 !important;
-                max-width: fit-content !important;
-                padding: 0 0 0 4px !important;
+                max-width: 50% !important;
+                overflow-x: auto !important;
+                overflow-y: hidden !important;
+                scrollbar-width: thin !important;
+                scrollbar-color: #37474f transparent !important;
+                padding: 0 0 2px 4px !important;
                 margin: 0 !important;
                 border-left: 1px solid #263238 !important;
                 box-sizing: border-box !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar {
+                height: 3px !important;
+                display: block !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar-track {
+                background: transparent !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar-thumb {
+                background: #37474f !important;
+                border-radius: 3px !important;
+            }
+            .r20-tabs-pinned::-webkit-scrollbar-thumb:hover {
+                background: #607d8b !important;
+            }
+            /* 钉选区域空态占位 */
+            .r20-tabs-pinned:empty {
+                min-width: 24px !important;
+                height: 38px !important;
+                border: 1px dashed rgba(55, 71, 79, 0.6) !important;
+                border-radius: 4px !important;
+                margin-left: 3px !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                opacity: 0.5 !important;
+                transition: all 0.2s ease !important;
+            }
+            .r20-tabs-pinned:empty::after {
+                content: "📌" !important;
+                font-size: 11px !important;
+                opacity: 0.4 !important;
+                pointer-events: none !important;
+            }
+            .r20-tabs-pinned:empty:hover,
+            .r20-tabs-pinned.r20-pin-zone-hover {
+                opacity: 1 !important;
+                background: rgba(33, 150, 243, 0.15) !important;
+                border-color: #2196f3 !important;
             }
 
             /* 单个选项卡（方形人物图标设计，尺寸大，手感舒适） */
@@ -223,8 +281,9 @@ export class BuffPanelStyles {
                 font-weight: 700 !important;
                 border-radius: 4px !important;
             }
-            /* 悬停或常驻小叉号 */
-            .r20-tab-close {
+            /* 悬停或常驻小叉号 / 钉选小图钉 */
+            .r20-tab-close,
+            .r20-tab-pin {
                 position: absolute !important;
                 top: -5px !important;
                 right: -5px !important;
@@ -242,31 +301,19 @@ export class BuffPanelStyles {
                 box-shadow: 0 2px 5px rgba(0,0,0,0.6) !important;
                 z-index: 5 !important;
                 cursor: pointer !important;
+                user-select: none !important;
             }
-            .r20-tab:hover .r20-tab-close {
+            .r20-tab:hover .r20-tab-close,
+            .r20-tab:hover .r20-tab-pin {
                 display: flex !important;
             }
             .r20-tab-close:hover {
                 background: #ef5350 !important;
                 color: #fff !important;
             }
-            .btn-add-pinned-char {
-                width: 22px !important;
-                height: 34px !important;
-                min-width: 22px !important;
-                border-radius: 4px !important;
-                font-size: 11px !important;
-                padding: 0 !important;
-                display: inline-flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                background: rgba(255, 255, 255, 0.04) !important;
-                border: 1px dashed #37474f !important;
-            }
-            .btn-add-pinned-char:hover {
-                background: rgba(33, 150, 243, 0.15) !important;
-                border-color: #2196f3 !important;
-                color: #90caf9 !important;
+            .r20-tab-pin:hover {
+                background: #1976d2 !important;
+                color: #fff !important;
             }
 
             /* 拖拽悬停高亮 */

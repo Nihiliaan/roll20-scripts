@@ -236,11 +236,18 @@ export class BuffFloatingPanel {
             panel.style.display = "none";
         });
 
-        // 钉选新角色按钮
-        panel.querySelector(".btn-add-pinned-char")?.addEventListener("click", (e) => {
-            e.stopPropagation();
-            this.showAddPinnedCharMenu(e.currentTarget);
-        });
+        // 标签栏滚轮水平横向滚动支持（直接用鼠标滚轮在棋子栏滑动查看溢出棋子）
+        const setupHorizontalScroll = (el) => {
+            if (!el) return;
+            el.addEventListener("wheel", (e) => {
+                if (e.deltaY !== 0) {
+                    e.preventDefault();
+                    el.scrollLeft += e.deltaY;
+                }
+            }, { passive: false });
+        };
+        setupHorizontalScroll(panel.querySelector(".r20-tabs-dynamic"));
+        setupHorizontalScroll(panel.querySelector(".r20-tabs-pinned"));
 
         // 右侧固定区域监听动态 Tab 拖入（升格）或独立窗口 Tab 拖回合并
         const pinnedContainer = panel.querySelector(".r20-tabs-pinned");
@@ -468,12 +475,10 @@ export class BuffFloatingPanel {
     static renderTabs() {
         const dynamicContainer = this.panelEl.querySelector(".r20-tabs-dynamic");
         const pinnedContainer = this.panelEl.querySelector(".r20-tabs-pinned");
-        const addBtn = pinnedContainer.querySelector(".btn-add-pinned-char");
         if (!dynamicContainer || !pinnedContainer) return;
 
         dynamicContainer.innerHTML = "";
-        // 清理除 ➕ 按钮以外的固定标签
-        Array.from(pinnedContainer.querySelectorAll(".r20-tab")).forEach(el => el.remove());
+        pinnedContainer.innerHTML = "";
 
         const selectedTokens = this.getSelectedTokens();
         const detachedCharIds = BuffDetachedWindow.getAllDetachedTargetIds();
@@ -503,17 +508,17 @@ export class BuffFloatingPanel {
 
             const tab = document.createElement("div");
             tab.className = `r20-tab${isActive ? " active" : ""}`;
-            tab.title = `${name} (选区单位，可拖至右侧固定)`;
+            tab.title = `${name} (选区单位，点击右上角 📌 钉选)`;
             tab.draggable = true;
             tab.innerHTML = `
                 ${this.getAvatarHtml(name, avatarUrl)}
-                <span class="r20-tab-close" title="取消选中此单位">✕</span>
+                <span class="r20-tab-pin" title="钉选此角色到常驻栏">📌</span>
             `;
 
             tab.addEventListener("click", (e) => {
-                if (e.target.classList.contains("r20-tab-close")) {
+                if (e.target.classList.contains("r20-tab-pin")) {
                     e.stopPropagation();
-                    this.deselectToken(token);
+                    this.pinTargetToken(token, { type, id, name, char });
                     return;
                 }
                 this.activeTarget = { type, id, name };
@@ -651,7 +656,7 @@ export class BuffFloatingPanel {
             });
 
             this.bindTabBuffHover(tab, { type: "char", id: charId, name });
-            pinnedContainer.insertBefore(tab, addBtn);
+            pinnedContainer.appendChild(tab);
         });
 
         // 3. 自动调和与回退当前激活的 Tab 目标
@@ -1859,97 +1864,32 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 弹出添加固定角色菜单（带实时搜索框、滚动条与边界自适应翻转）
+     * 将动态选区的单位钉选至常驻标签栏
      */
-    static showAddPinnedCharMenu(anchorBtn) {
-        document.querySelector(".r20-pinned-char-picker")?.remove();
-
-        const characters = window.Campaign?.characters?.models || [];
-        const unpinned = characters.filter(c => {
-            if (c.get("archived")) return false;
-            if (this.pinnedCharIds.includes(c.id)) return false;
-            if (!Roll20Bridge.canViewCharacterBuffs(c)) return false;
-            return true;
-        });
-
-        const menu = document.createElement("div");
-        menu.className = "r20-context-menu r20-pinned-char-picker";
-        menu.style.width = "220px";
-        menu.style.maxHeight = "320px";
-        menu.style.display = "flex";
-        menu.style.flexDirection = "column";
-        menu.style.padding = "6px";
-        menu.style.boxSizing = "border-box";
-        menu.style.zIndex = "10050";
-
-        // 智能定位：下方空间不足时向上翻转
-        const rect = anchorBtn.getBoundingClientRect();
-        const pickerHeight = 300;
-        const spaceBelow = window.innerHeight - rect.bottom;
-        if (spaceBelow < pickerHeight && rect.top > pickerHeight) {
-            menu.style.top = `${rect.top - pickerHeight - 4}px`;
-        } else {
-            menu.style.top = `${rect.bottom + 4}px`;
-        }
-        menu.style.right = `${Math.max(10, window.innerWidth - rect.right)}px`;
-
-        // 搜索输入框
-        const searchBox = document.createElement("div");
-        searchBox.style.cssText = "margin-bottom:6px; flex-shrink:0;";
-        searchBox.innerHTML = `
-            <input type="text" class="r20-pinned-search" placeholder="🔍 搜索角色名称..." 
-                style="width:100%; box-sizing:border-box; background:#141b22; border:1px solid #37474f; color:#fff; padding:5px 8px; border-radius:4px; font-size:11px; outline:none;">
-        `;
-        menu.appendChild(searchBox);
-
-        // 滚动列表容器
-        const listContainer = document.createElement("div");
-        listContainer.style.cssText = "flex:1 1 auto; overflow-y:auto; max-height:240px; scrollbar-width:thin;";
-
-        if (unpinned.length === 0) {
-            listContainer.innerHTML = `<div style="padding:10px; color:#78909c; font-size:11px; text-align:center;">无可用未钉选角色</div>`;
-        } else {
-            const itemNodes = [];
-            unpinned.forEach(c => {
-                const name = c.get("name") || "未命名";
-                const item = document.createElement("div");
-                item.className = "r20-context-menu-item";
-                item.style.cssText = "padding:5px 8px; border-radius:3px; cursor:pointer;";
-                item.innerHTML = `<span>🛡️</span><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(name)}</span>`;
-                item.addEventListener("click", async () => {
-                    menu.remove();
-                    this.pinnedCharIds.push(c.id);
-                    this.savePinnedChars();
-                    await this.renderDispatcher();
-                });
-                listContainer.appendChild(item);
-                itemNodes.push({ el: item, name });
-            });
-
-            // 搜索过滤
-            const searchInput = searchBox.querySelector(".r20-pinned-search");
-            searchInput.addEventListener("input", (e) => {
-                const q = e.target.value.trim().toLowerCase();
-                itemNodes.forEach(({ el, name }) => {
-                    const match = !q || name.toLowerCase().includes(q);
-                    el.style.display = match ? "flex" : "none";
-                });
-            });
-
-            setTimeout(() => searchInput.focus(), 50);
-        }
-
-        menu.appendChild(listContainer);
-
-        const closeHandler = (e) => {
-            if (!menu.contains(e.target) && e.target !== anchorBtn) {
-                menu.remove();
-                document.removeEventListener("mousedown", closeHandler);
+    static pinTargetToken(token, { type, id, name, char }) {
+        let charId = null;
+        if (type === "char") {
+            charId = id;
+        } else if (char?.id) {
+            charId = char.id;
+        } else if (token) {
+            const resolvedChar = Roll20Bridge.getCharacterByToken(token);
+            if (resolvedChar?.id) {
+                charId = resolvedChar.id;
             }
-        };
-        setTimeout(() => document.addEventListener("mousedown", closeHandler), 10);
+        }
 
-        document.body.appendChild(menu);
+        if (!charId) {
+            this.showNotice(`该单位未关联人物卡，无法钉选`);
+            return;
+        }
+
+        if (!this.pinnedCharIds.includes(charId)) {
+            this.pinnedCharIds.push(charId);
+            this.savePinnedChars();
+            this.showNotice(`已将【${name}】钉选至常驻标签栏`);
+            this.renderDispatcher();
+        }
     }
 
     /**

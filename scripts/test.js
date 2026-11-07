@@ -43,6 +43,7 @@ function loadModuleInContext(filePath, sandbox = {}) {
             try { if (typeof Pf1eBuffManager !== 'undefined') ctx.Pf1eBuffManager = Pf1eBuffManager; } catch(e){}
             try { if (typeof TurnOrderObserver !== 'undefined') ctx.TurnOrderObserver = TurnOrderObserver; } catch(e){}
             try { if (typeof Pf1eBuffUI !== 'undefined') ctx.Pf1eBuffUI = Pf1eBuffUI; } catch(e){}
+            try { if (typeof CharacterSheetTitleCopier !== 'undefined') ctx.CharacterSheetTitleCopier = CharacterSheetTitleCopier; } catch(e){}
             try { if (typeof SuiteConfigStore !== 'undefined') ctx.SuiteConfigStore = SuiteConfigStore; } catch(e){}
         })(this);
     `;
@@ -431,6 +432,175 @@ async function runAllTests() {
         assert.strictEqual(res['melee-ability'], 'STR-mod');
         // 验证 4: 不存在的普通属性返回空字符串
         assert.strictEqual(res.non_existent_key, '');
+
+        RecalcService.destroy();
+    });
+
+    // 8. 测试 CharacterSheetTitleCopier 属性查找、语法替换与事件触发
+    const copierContext = loadModuleInContext('src/modules/pf1e-buff-tracker/CharacterSheetTitleCopier.js', {
+        window: {
+            navigator: { clipboard: { writeText: async () => true } }
+        },
+        document: {
+            createElement: () => ({ style: {}, appendChild: () => {}, remove: () => {}, select: () => {} }),
+            execCommand: () => true,
+            getElementById: () => null
+        },
+        setTimeout: setTimeout,
+        clearTimeout: clearTimeout,
+        console: console
+    });
+    const { CharacterSheetTitleCopier } = copierContext;
+
+    await test('CharacterSheetTitleCopier.findTargetTitle 准确捕获直接属性与关联控件', () => {
+        // 场景 A: 自身具有 title
+        const elA = {
+            getAttribute: (k) => k === 'title' ? '@{STR-mod}' : null
+        };
+        const resA = CharacterSheetTitleCopier.findTargetTitle(elA);
+        assert.ok(resA);
+        assert.strictEqual(resA.rawTitle, '@{STR-mod}');
+        assert.strictEqual(resA.element, elA);
+
+        // 场景 B: 点击 label 内部无 title 的 span，但 label 内有带 title 的 input
+        const innerInput = {
+            getAttribute: (k) => k === 'title' ? '@{bab}' : null
+        };
+        const labelEl = {
+            getAttribute: () => null,
+            querySelector: (sel) => sel.includes('input') ? innerInput : null
+        };
+        const childSpan = {
+            getAttribute: () => null,
+            closest: (sel) => sel === 'label' ? labelEl : null
+        };
+        const resB = CharacterSheetTitleCopier.findTargetTitle(childSpan);
+        assert.ok(resB);
+        assert.strictEqual(resB.rawTitle, '@{bab}');
+        assert.strictEqual(resB.element, innerInput);
+
+        // 场景 C: 向上回溯查找到父级 title
+        const parentDiv = {
+            tagName: 'DIV',
+            classList: { contains: () => false },
+            getAttribute: (k) => k === 'title' ? 'Action Tip' : null,
+            parentElement: null
+        };
+        const leafDiv = {
+            tagName: 'DIV',
+            classList: { contains: () => false },
+            getAttribute: () => null,
+            closest: () => null,
+            parentElement: parentDiv
+        };
+        const resC = CharacterSheetTitleCopier.findTargetTitle(leafDiv);
+        assert.ok(resC);
+        assert.strictEqual(resC.rawTitle, 'Action Tip');
+        assert.strictEqual(resC.element, parentDiv);
+
+        // 场景 D: 无 title
+        const emptyEl = {
+            getAttribute: () => null,
+            closest: () => null,
+            parentElement: null
+        };
+        assert.strictEqual(CharacterSheetTitleCopier.findTargetTitle(emptyEl), null);
+    });
+
+    await test('CharacterSheetTitleCopier.resolveMacroTitle 智能展开 Repeating Section $X', () => {
+        // 场景 A: 普通宏属性，原样返回
+        const elNormal = { closest: () => null };
+        assert.strictEqual(CharacterSheetTitleCopier.resolveMacroTitle('@{character_name}', elNormal), '@{character_name}');
+
+        // 场景 B: Repeating 宏，包含 $X 且位于 .repitem 中
+        const mockRepItem = {
+            getAttribute: (k) => k === 'data-reprowid' ? '-Nz8xyz123' : null
+        };
+        const elInRepeating = {
+            closest: (sel) => sel === '.repitem' ? mockRepItem : null
+        };
+        assert.strictEqual(
+            CharacterSheetTitleCopier.resolveMacroTitle('@{repeating_buff2_$X_name}', elInRepeating),
+            '@{repeating_buff2_-Nz8xyz123_name}'
+        );
+        assert.strictEqual(
+            CharacterSheetTitleCopier.resolveMacroTitle('repeating_buff2_$X_b1_bonus', elInRepeating),
+            'repeating_buff2_-Nz8xyz123_b1_bonus'
+        );
+
+        // 场景 C: 小写 $x 占位符兼容
+        assert.strictEqual(
+            CharacterSheetTitleCopier.resolveMacroTitle('@{repeating_ability_$x_description}', elInRepeating),
+            '@{repeating_ability_-Nz8xyz123_description}'
+        );
+    });
+
+    await test('CharacterSheetTitleCopier.handleEvent 精确阻断与双通道触发', async () => {
+        let copiedText = '';
+        const mockDoc = {
+            body: { appendChild: () => {} },
+            getElementById: () => null,
+            createElement: () => ({ style: {}, appendChild: () => {}, remove: () => {} })
+        };
+        copierContext.window.navigator.clipboard.writeText = async (text) => {
+            copiedText = text;
+            return true;
+        };
+
+        const targetEl = {
+            getAttribute: (k) => k === 'title' ? '@{AC}' : null,
+            classList: { remove: () => {}, add: () => {} },
+            getBoundingClientRect: () => ({ left: 10, top: 20, width: 30, height: 40 })
+        };
+
+        // 触发 A: Alt + 左键 (altKey: true, button: 0)
+        let defaultPrevented = false;
+        let propagationStopped = false;
+        const eventAltLeft = {
+            altKey: true,
+            button: 0,
+            target: targetEl,
+            preventDefault: () => { defaultPrevented = true; },
+            stopPropagation: () => { propagationStopped = true; },
+            stopImmediatePropagation: () => {}
+        };
+        CharacterSheetTitleCopier.handleEvent(eventAltLeft, mockDoc);
+        await new Promise(r => setTimeout(r, 10));
+        assert.ok(defaultPrevented, '必须阻止原生行为');
+        assert.ok(propagationStopped, '必须阻止原生冒泡');
+        assert.strictEqual(copiedText, '@{AC}');
+
+        // 触发 B: 鼠标中键点击 (button: 1)
+        copiedText = '';
+        defaultPrevented = false;
+        const eventMiddle = {
+            altKey: false,
+            button: 1,
+            target: targetEl,
+            preventDefault: () => { defaultPrevented = true; },
+            stopPropagation: () => { propagationStopped = true; },
+            stopImmediatePropagation: () => {}
+        };
+        CharacterSheetTitleCopier.handleEvent(eventMiddle, mockDoc);
+        await new Promise(r => setTimeout(r, 10));
+        assert.ok(defaultPrevented);
+        assert.strictEqual(copiedText, '@{AC}');
+
+        // 负例 C: 普通左键点击 (altKey: false, button: 0) -> 绝不触发
+        copiedText = '';
+        defaultPrevented = false;
+        const eventNormalLeft = {
+            altKey: false,
+            button: 0,
+            target: targetEl,
+            preventDefault: () => { defaultPrevented = true; },
+            stopPropagation: () => {},
+            stopImmediatePropagation: () => {}
+        };
+        CharacterSheetTitleCopier.handleEvent(eventNormalLeft, mockDoc);
+        await new Promise(r => setTimeout(r, 10));
+        assert.strictEqual(defaultPrevented, false, '普通左键点击严禁被拦截');
+        assert.strictEqual(copiedText, '', '普通左键点击严禁复制');
 
         RecalcService.destroy();
     });

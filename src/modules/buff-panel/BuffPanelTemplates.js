@@ -21,9 +21,7 @@ export class BuffPanelTemplates {
             <div class="r20-panel-content-drawer">
                 <div class="r20-tab-strip">
                     <div class="r20-tabs-dynamic" title="当前画布选中单位（靠左展示，可向右拖拽固定）"></div>
-                    <div class="r20-tabs-pinned" title="固定常驻角色（靠右展示）">
-                        <button class="r20-btn-icon btn-add-pinned-char" title="钉选指定角色到常驻标签栏">➕</button>
-                    </div>
+                    <div class="r20-tabs-pinned" title="固定常驻角色（靠右展示，可拖拽或点击棋子钉选）"></div>
                 </div>
                 <div class="r20-tab-viewport">
                     <div class="r20-empty-view">正在连接单位数据...</div>

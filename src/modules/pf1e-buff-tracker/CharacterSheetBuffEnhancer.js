@@ -1,4 +1,5 @@
 import { Pf1eBuffManager } from "./Pf1eBuffManager.js";
+import { CharacterSheetTitleCopier } from "./CharacterSheetTitleCopier.js";
 
 /**
  * Roll20 Suite - 官方人物卡 Buff 增强注入器
@@ -26,6 +27,9 @@ export class CharacterSheetBuffEnhancer {
 
         // 3. 对当前屏幕上已经打开的卡片进行一次性模板与既有项调和
         this.patchOpenDialogs();
+
+        // 4. 启动官方人物卡 title 快捷复制功能（Alt+点击 / 滚轮中键）
+        CharacterSheetTitleCopier.init();
     }
 
     /**
@@ -219,6 +223,9 @@ export class CharacterSheetBuffEnhancer {
      */
     static patchDocumentDOM(doc, dialogEl) {
         if (!doc) return;
+
+        // 挂载 title 快捷复制功能到当前 document（带 WeakSet 防重）
+        CharacterSheetTitleCopier.attachToDocument(doc);
 
         // 1. 如果该 iframe 内部的 fieldset 尚未包含该字段，就地修补 fieldset.innerHTML（供用户点击 +Add 时直接克隆）
         const fsList = doc.querySelectorAll('fieldset.repeating_buff2, fieldset[class*="repeating_buff2"]');
