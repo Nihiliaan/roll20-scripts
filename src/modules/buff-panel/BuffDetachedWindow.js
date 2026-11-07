@@ -66,11 +66,15 @@ export class BuffDetachedWindow {
         this.initDOM(x, y);
         this.render();
 
-        window.addEventListener("r20_suite_setting_changed", (e) => {
+        this._boundSettingHandler = (e) => {
             if (e.detail?.key === "buff_show_checkbox") {
                 this.renderViewport();
+            } else if (e.detail?.key === "party_buffs_visible") {
+                this.renderTabs();
+                this.renderViewport();
             }
-        });
+        };
+        window.addEventListener("r20_suite_setting_changed", this._boundSettingHandler);
     }
 
     initDOM(x, y) {
@@ -206,12 +210,35 @@ export class BuffDetachedWindow {
     }
 
     destroy() {
+        if (this._boundSettingHandler) {
+            window.removeEventListener("r20_suite_setting_changed", this._boundSettingHandler);
+            this._boundSettingHandler = null;
+        }
+        if (this._renderViewportDebounceTimer) {
+            clearTimeout(this._renderViewportDebounceTimer);
+            this._renderViewportDebounceTimer = null;
+        }
+        this._renderViewportPendingResolvers = [];
         if (this.domEl) {
             this.domEl.remove();
             this.domEl = null;
         }
         BuffDetachedWindow.instances.delete(this.id);
         this.notifyMainPanelRefresh();
+    }
+
+    /**
+     * 销毁并回收所有活动的独立窗口（热重载与完全卸载支持）
+     */
+    static destroyAll() {
+        for (const [id, win] of Array.from(this.instances.entries())) {
+            try {
+                win.destroy();
+            } catch (e) {
+                console.error("[BuffDetachedWindow] 销毁独立窗口异常:", id, e);
+            }
+        }
+        this.instances.clear();
     }
 
     render() {
@@ -226,7 +253,7 @@ export class BuffDetachedWindow {
         tabsContainer.innerHTML = "";
 
         this.charIds.forEach((charId, idx) => {
-            if (!Roll20Bridge.canControlCharacter(charId)) return;
+            if (!Roll20Bridge.canViewCharacterBuffs(charId)) return;
             const char = window.Campaign?.characters?.get(charId);
             const name = char ? (char.get("name") || "未命名") : "(未知角色)";
             const isActive = this.activeCharId === charId;
@@ -295,7 +322,38 @@ export class BuffDetachedWindow {
         });
     }
 
-    async renderViewport() {
+    /**
+     * 渲染独立视口区
+     * 具备 35ms 微任务批处理防抖：多属性连击修改时仅执行一次完整 DOM 构建与读取
+     */
+    renderViewport(options = {}) {
+        if (!this.domEl) return Promise.resolve();
+        if (options.force) {
+            return this._doRenderViewport();
+        }
+        return new Promise((resolve) => {
+            if (!this._renderViewportPendingResolvers) this._renderViewportPendingResolvers = [];
+            this._renderViewportPendingResolvers.push(resolve);
+            if (this._renderViewportDebounceTimer) return;
+            this._renderViewportDebounceTimer = setTimeout(async () => {
+                this._renderViewportDebounceTimer = null;
+                const resolvers = this._renderViewportPendingResolvers;
+                this._renderViewportPendingResolvers = [];
+                try {
+                    await this._doRenderViewport();
+                } catch (err) {
+                    console.error("[BuffDetachedWindow] renderViewport 执行异常:", err);
+                } finally {
+                    for (const r of resolvers) {
+                        try { r(); } catch (e) {}
+                    }
+                }
+            }, 35);
+        });
+    }
+
+    async _doRenderViewport() {
+        if (!this.domEl) return;
         const viewport = this.domEl.querySelector(".r20-tab-viewport");
         if (!viewport) return;
 
@@ -306,10 +364,12 @@ export class BuffDetachedWindow {
             return;
         }
 
-        if (!Roll20Bridge.isGM() && !Roll20Bridge.canControlCharacter(this.activeCharId)) {
+        if (!Roll20Bridge.isGM() && !Roll20Bridge.canViewCharacterBuffs(this.activeCharId)) {
             viewport.innerHTML = `<div class="r20-empty-view">🔒 无权查看该角色的 Buff 信息</div>`;
             return;
         }
+
+        const hasControl = Roll20Bridge.isGM() || Roll20Bridge.canControlCharacter(this.activeCharId);
 
         const char = window.Campaign?.characters?.get(this.activeCharId);
         const name = char ? (char.get("name") || "未命名") : "(未知角色)";
@@ -330,13 +390,23 @@ export class BuffDetachedWindow {
         // 工具条
         const toolbar = document.createElement("div");
         toolbar.className = "r20-viewport-toolbar";
-        toolbar.innerHTML = `
-            <div class="r20-toolbar-target-name">
-                <span>${name}</span>
-            </div>
-            <div style="display:flex; align-items:center; gap:4px;">
+        const partyBadgeHtml = !hasControl
+            ? `<span style="margin-left:6px; font-size:10px; padding:1px 5px; border-radius:3px; background:#334155; color:#38bdf8; font-weight:normal;" title="当前作为队伍成员只读查看此单位 Buff">👀 队友查看</span>`
+            : "";
+        const controlsHtml = hasControl
+            ? `
                 <button class="r20-btn-icon btn-deactivate-all" title="一键取消激活该单位身上的所有 Buff" style="color:#ffb74d;">🚫 全关</button>
                 <button class="r20-btn-icon btn-add-buff-to-active" title="为此角色添加新 Buff">➕ Buff</button>
+            `
+            : `<span style="font-size:11px; color:#64748b; padding:2px 6px; background:#0f172a; border-radius:3px; border:1px solid #334155;">只读查看</span>`;
+
+        toolbar.innerHTML = `
+            <div class="r20-toolbar-target-name">
+                <span>${Roll20Bridge.escapeHtml(name)}</span>
+                ${partyBadgeHtml}
+            </div>
+            <div style="display:flex; align-items:center; gap:4px;">
+                ${controlsHtml}
             </div>
         `;
 
@@ -346,6 +416,9 @@ export class BuffDetachedWindow {
                 await Pf1eBuffManager.toggleBuff(char, b.rowId, false);
             }
             BuffFloatingPanel.showNotice(`已取消激活 [${name}] 的全部 Buff`);
+            if (typeof Pf1eBuffUI !== "undefined") {
+                Pf1eBuffUI.requestTokenRefresh(char.id);
+            }
             await this.renderViewport();
         });
 
@@ -389,17 +462,17 @@ export class BuffDetachedWindow {
                 : `该单位当前无任何 Buff<br>从其他标签拖拽 Buff 放置即可施加`;
             fragment.appendChild(emptyEl);
         } else {
+            const showCheckbox = SuiteConfigStore.getSetting("buff_show_checkbox", false);
             buffs.forEach(b => {
                 const item = document.createElement("div");
                 const isEnabled = !!b.enabled;
                 const isSelected = this.selectedBuffRowIds.has(b.rowId);
                 item.className = `r20-buff-item ${isEnabled ? "is-active" : "is-inactive"} ${isSelected ? "is-selected" : ""}`;
                 item.dataset.rowid = b.rowId;
-                item.draggable = true;
+                item.draggable = hasControl;
 
-                const showCheckbox = SuiteConfigStore.getSetting("buff_show_checkbox", false);
                 const toggleCheckboxHtml = showCheckbox
-                    ? `<input type="checkbox" class="r20-buff-toggle" ${isEnabled ? "checked" : ""} title="快速启停 Buff">`
+                    ? `<input type="checkbox" class="r20-buff-toggle" ${isEnabled ? "checked" : ""} ${!hasControl ? "disabled" : ""} title="${!hasControl ? "只读模式不可修改" : "快速启停 Buff"}">`
                     : "";
 
                 const curVal = (b.rounds !== null && b.rounds !== undefined && b.rounds !== "") ? b.rounds : null;
@@ -408,9 +481,9 @@ export class BuffDetachedWindow {
                 const initDisplay = initVal !== null ? `${initVal}` : "-";
                 const roundsHtml = `
                     <span class="r20-buff-rounds">
-                        <span class="r20-buff-round-num r20-buff-round-cur" title="点击就地修改当前轮数">${curDisplay}</span>
+                        <span class="r20-buff-round-num r20-buff-round-cur" title="${hasControl ? "点击就地修改当前轮数" : "当前轮数 (只读)"}">${curDisplay}</span>
                         <span class="r20-buff-round-sep">/</span>
-                        <span class="r20-buff-round-num r20-buff-round-init" title="点击就地修改初始轮数或公式">${initDisplay}</span>
+                        <span class="r20-buff-round-num r20-buff-round-init" title="${hasControl ? "点击就地修改初始轮数或公式" : "初始轮数 (只读)"}">${initDisplay}</span>
                     </span>
                 `;
 
@@ -420,28 +493,33 @@ export class BuffDetachedWindow {
                     const hostAvatar = hostChar?.get("avatar") || "";
                     const hostName = hostChar?.get("name") || "未知施法者";
                     linkBadgeHtml = `
-                        <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${hostName}]，点击解除链接转为独立副本">
+                        <span class="r20-buff-link-badge ${hasControl ? "btn-unlink" : ""}" title="🔗 链接自 [${escapeHtml(hostName)}]${hasControl ? "，点击解除链接转为独立副本" : ""}">
                             🔗
-                            ${hostAvatar ? `<img src="${hostAvatar}" class="r20-buff-host-avatar" alt="${hostName}">` : ""}
+                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
                         </span>
                     `;
                 }
 
+                const buffActionsHtml = hasControl
+                    ? `<div style="display:flex; align-items:center; gap:2px;">
+                        <button class="r20-btn-icon btn-edit-buff-row" title="编辑细目">✏️</button>
+                    </div>`
+                    : "";
+
                 item.innerHTML = `
                     <div class="r20-buff-left">
                         ${toggleCheckboxHtml}
-                        <span class="r20-buff-name" title="${b.name}">${b.name}</span>
+                        <span class="r20-buff-name" title="${escapeHtml(b.name)}">${escapeHtml(b.name)}</span>
                         ${linkBadgeHtml}
                         ${roundsHtml}
                     </div>
-                    <div style="display:flex; align-items:center; gap:2px;">
-                        <button class="r20-btn-icon btn-edit-buff-row" title="编辑细目">✏️</button>
-                    </div>
+                    ${buffActionsHtml}
                 `;
 
                 // 快速启停复选框
                 item.querySelector(".r20-buff-toggle")?.addEventListener("click", async (e) => {
                     e.stopPropagation();
+                    if (!hasControl) return;
                     if (char) {
                         await Pf1eBuffManager.toggleBuff(char, b.rowId, e.target.checked);
                         BuffFloatingPanel.notifyBuffMutation();
@@ -455,66 +533,32 @@ export class BuffDetachedWindow {
                 curEl?.addEventListener("click", (e) => {
                     e.stopPropagation();
                     e.preventDefault();
+                    if (!hasControl) return;
                     if (!char) return;
 
-                    const input = document.createElement("input");
-                    input.type = "text";
-                    input.className = "r20-input-round-inline";
-                    input.value = curVal !== null ? curVal : "";
-                    input.placeholder = "永久";
-
-                    ["click", "dblclick", "mousedown", "contextmenu"].forEach(evtName => {
-                        input.addEventListener(evtName, ev => ev.stopPropagation());
-                    });
-
-                    let committed = false;
-                    const cleanupDismiss = Roll20Bridge.watchDismissal(input, () => commit());
-
-                    const commit = async () => {
-                        if (committed) return;
-                        committed = true;
-                        cleanupDismiss();
-
-                        const raw = input.value.trim();
-                        let newRounds = "";
-                        if (raw !== "" && raw !== "永久" && raw !== "-") {
-                            if (!isNaN(Number(raw))) {
-                                newRounds = Number(raw);
-                            } else {
-                                try {
-                                    const evaled = await Roll20Bridge.evalNativeFormula(raw, char);
-                                    newRounds = (!isNaN(Number(evaled)) && evaled !== null) ? Number(evaled) : raw;
-                                } catch (err) {
-                                    newRounds = raw;
+                    Roll20Bridge.attachInlineRoundEditor(curEl, {
+                        initialValue: curVal !== null ? curVal : "",
+                        placeholder: "永久",
+                        className: "r20-input-round-inline",
+                        onCommit: async (raw) => {
+                            let newRounds = "";
+                            if (raw !== "" && raw !== "永久" && raw !== "-") {
+                                if (!isNaN(Number(raw))) {
+                                    newRounds = Number(raw);
+                                } else {
+                                    try {
+                                        const evaled = await Roll20Bridge.evalNativeFormula(raw, char);
+                                        newRounds = (!isNaN(Number(evaled)) && evaled !== null) ? Number(evaled) : raw;
+                                    } catch (err) {
+                                        newRounds = raw;
+                                    }
                                 }
                             }
-                        }
-                        await Pf1eBuffManager.setBuffRounds(char, b.rowId, newRounds);
-                        BuffFloatingPanel.notifyBuffMutation();
-                        await this.renderViewport();
-                    };
-
-                    const cancel = async () => {
-                        if (committed) return;
-                        committed = true;
-                        cleanupDismiss();
-                        await this.renderViewport();
-                    };
-
-                    input.addEventListener("keydown", (ke) => {
-                        if (ke.key === "Enter") {
-                            ke.preventDefault();
-                            commit();
-                        } else if (ke.key === "Escape") {
-                            ke.preventDefault();
-                            cancel();
+                            await Pf1eBuffManager.setBuffRounds(char, b.rowId, newRounds);
+                            BuffFloatingPanel.notifyBuffMutation();
+                            await this.renderViewport();
                         }
                     });
-                    input.addEventListener("blur", () => commit());
-
-                    curEl.replaceWith(input);
-                    input.focus();
-                    input.select();
                 });
 
                 // 点击初始轮数：在原本数字所在位置就地渲染输入框快速编辑
@@ -522,53 +566,19 @@ export class BuffDetachedWindow {
                 initEl?.addEventListener("click", (e) => {
                     e.stopPropagation();
                     e.preventDefault();
+                    if (!hasControl) return;
                     if (!char) return;
 
-                    const input = document.createElement("input");
-                    input.type = "text";
-                    input.className = "r20-input-round-inline";
-                    input.value = initVal !== null ? initVal : "";
-                    input.placeholder = "-";
-
-                    ["click", "dblclick", "mousedown", "contextmenu"].forEach(evtName => {
-                        input.addEventListener(evtName, ev => ev.stopPropagation());
-                    });
-
-                    let committed = false;
-                    const cleanupDismiss = Roll20Bridge.watchDismissal(input, () => commit());
-
-                    const commit = async () => {
-                        if (committed) return;
-                        committed = true;
-                        cleanupDismiss();
-
-                        const raw = input.value.trim();
-                        await Pf1eBuffManager.setBuffInitRounds(char, b.rowId, raw);
-                        BuffFloatingPanel.notifyBuffMutation();
-                        await this.renderViewport();
-                    };
-
-                    const cancel = async () => {
-                        if (committed) return;
-                        committed = true;
-                        cleanupDismiss();
-                        await this.renderViewport();
-                    };
-
-                    input.addEventListener("keydown", (ke) => {
-                        if (ke.key === "Enter") {
-                            ke.preventDefault();
-                            commit();
-                        } else if (ke.key === "Escape") {
-                            ke.preventDefault();
-                            cancel();
+                    Roll20Bridge.attachInlineRoundEditor(initEl, {
+                        initialValue: initVal !== null ? initVal : "",
+                        placeholder: "-",
+                        className: "r20-input-round-inline",
+                        onCommit: async (raw) => {
+                            await Pf1eBuffManager.setBuffInitRounds(char, b.rowId, raw);
+                            BuffFloatingPanel.notifyBuffMutation();
+                            await this.renderViewport();
                         }
                     });
-                    input.addEventListener("blur", () => commit());
-
-                    initEl.replaceWith(input);
-                    input.focus();
-                    input.select();
                 });
 
                 // 点击 🔗 解除链接（直接断开，无需二次确认）
@@ -629,6 +639,7 @@ export class BuffDetachedWindow {
 
                 // 双击条目快速切换激活/关停
                 item.addEventListener("dblclick", async (e) => {
+                    if (!hasControl) return;
                     if (e.target.closest("button, input, select, textarea, .btn-unlink, .r20-buff-round-num, .r20-input-round-inline, .r20-buff-toggle")) return;
                     await Pf1eBuffManager.toggleBuff(char, b.rowId, !isEnabled);
                     BuffFloatingPanel.notifyBuffMutation();
@@ -640,6 +651,10 @@ export class BuffDetachedWindow {
                 item.addEventListener("contextmenu", (e) => {
                     e.preventDefault();
                     e.stopPropagation();
+                    if (!hasControl) {
+                        BuffFloatingPanel.showNotice("只读查看队友 Buff，无修改权限");
+                        return;
+                    }
                     if (!this.selectedBuffRowIds.has(b.rowId)) {
                         if (!e.ctrlKey && !e.metaKey) {
                             this.selectedBuffRowIds.clear();

@@ -40,20 +40,41 @@ export class TurnOrderObserver {
         // 1. 挂载本地用户操作捕获（委托到 document 捕获阶段，精准识别亲手点击）
         this.bindLocalIntentListeners();
 
-        // 2. 绑定 Backbone 事件
-        window.Campaign.on("change:turnorder", (campaign, newJson) => {
+        // 2. 绑定 Backbone 事件（保存引用以支持 teardown 解绑，杜绝多实例双重扣轮）
+        this._boundCampaignHandler = (campaign, newJson) => {
             this.handleTurnorderChange(newJson);
-        });
+        };
+        window.Campaign.on("change:turnorder", this._boundCampaignHandler);
 
         this.isInitialized = true;
         console.log("[TurnOrderObserver] 先攻事件监听器已就绪，当前排头:", this.getHeadTokenId());
     }
 
     /**
+     * 停止监听并注销所有事件（热重载清理支持）
+     */
+    stop() {
+        if (!this.isInitialized) return;
+        if (this._boundCampaignHandler && typeof window.Campaign !== "undefined" && typeof window.Campaign.off === "function") {
+            window.Campaign.off("change:turnorder", this._boundCampaignHandler);
+            this._boundCampaignHandler = null;
+        }
+        if (this._boundClickListener) {
+            document.removeEventListener("click", this._boundClickListener, true);
+            this._boundClickListener = null;
+        }
+        this.isInitialized = false;
+        console.log("[TurnOrderObserver] 先攻事件监听器已成功卸载");
+    }
+
+    /**
      * 监听本地先攻条前进/后退按钮点击，精准捕获本地发起者身份
      */
     bindLocalIntentListeners() {
-        document.addEventListener("click", (e) => {
+        if (this._boundClickListener) {
+            document.removeEventListener("click", this._boundClickListener, true);
+        }
+        this._boundClickListener = (e) => {
             const target = e.target;
             if (!target) return;
 
@@ -65,7 +86,8 @@ export class TurnOrderObserver {
             else if (target.closest?.(".turn-tracker__back, .ui-icon-seek-prev, [data-action='prev']")) {
                 this._lastLocalIntent = { action: "back", timestamp: Date.now() };
             }
-        }, true);
+        };
+        document.addEventListener("click", this._boundClickListener, true);
     }
 
     /**
@@ -112,13 +134,23 @@ export class TurnOrderObserver {
             return;
         }
 
-        // 1. 判定正向轮转 (Next Turn): 循环左移 [A, B, C] -> [B, C, A]
-        const isNextTurn = (newList[newList.length - 1].id === oldList[0].id) &&
-                           (newList[0].id === oldList[1].id);
+        // 1. 判定正向轮转 (Next Turn): 
+        // 正常循环左移 [A, B, C] -> [B, C, A]
+        // 单战斗单位特判 (P0-4): [A] -> [A] 且有本地点击前进操作
+        const isSingleUnit = oldList.length === 1 && newList.length === 1 && oldList[0].id === newList[0].id;
+        const isNextTurn = (isSingleUnit && this._lastLocalIntent.action === "forward" && (Date.now() - this._lastLocalIntent.timestamp < 1500)) ||
+                           (!isSingleUnit &&
+                            (newList[newList.length - 1].id === oldList[0].id) &&
+                            (newList[0].id === oldList[1].id));
 
-        // 2. 判定反向回退 (Previous Turn): 循环右移 [B, C, A] -> [A, B, C]
-        const isPrevTurn = (oldList[oldList.length - 1].id === newList[0].id) &&
-                           (oldList[0].id === newList[1].id);
+        // 2. 判定反向回退 (Previous Turn): 
+        // 正常循环右移 [B, C, A] -> [A, B, C]
+        // 单战斗单位特判 (P0-4): [A] -> [A] 且有本地点击后退操作
+        const isPrevTurn = !isNextTurn && (
+                           (isSingleUnit && this._lastLocalIntent.action === "back" && (Date.now() - this._lastLocalIntent.timestamp < 1500)) ||
+                           (!isSingleUnit &&
+                            (oldList[oldList.length - 1].id === newList[0].id) &&
+                            (oldList[0].id === newList[1].id)));
 
         if (isNextTurn) {
             const endedTokenId = oldList[0].id;

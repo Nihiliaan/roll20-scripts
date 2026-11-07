@@ -33,8 +33,8 @@
 ## 六、标准版本发布流与禁则 (Release Workflow Standards)
 面对发布指令（如“发布一个版本”）：
 1. **严格遵循四步流水线 (Strict Four-Step Pipeline)**：
-   - 第一步（自增与打包）：在 `cache/bundle.js` 中递增版本号，运行 `node cache/bundle.js` 生成 `src/roll20-suite.user.js`，并运行 `node -c src/roll20-suite.user.js` 通过语法校验；
-   - 第二步（暂存与提交）：执行 `git add src/ cache/bundle.js`，提交语义化 Commit（`git commit -m "..."`）；
+   - 第一步（自增与打包）：在 `scripts/bundle.js` 中递增版本号，运行 `node scripts/bundle.js` 生成 `src/roll20-suite.user.js`，并运行 `node -c src/roll20-suite.user.js` 通过语法校验；
+   - 第二步（暂存与提交）：执行 `git add src/ scripts/bundle.js`，提交语义化 Commit（`git commit -m "..."`）；
    - 第三步（本地打标签）：执行 `git tag -a v<版本号> -m "Release v<版本号>: ..."`；
    - 第四步（推送远端）：执行 `git push origin master --tags`，至此发布流程即刻结案。
 2. **严禁节外生枝与多余工具链调用 (No Extraneous Tooling Overhead)**：
@@ -44,7 +44,7 @@
 ## 七、权限与安全边界不变量原则 (Permission & Security Invariants)
 - **严禁擅自变更权限策略**：严禁为了实现局部功能或绕过数据读取限制，擅自修改任何实体、接口、数据源或角色的权限配置（如 Roll20 角色卡的 `controlledby`、`inplayerjournals`、文件访问模式、鉴权等级等）；
 - **用户显式指令驱动**：所有权限与访问控制边界的变更，必须由用户明确提出，严禁在排错或重构过程中擅自“顺手”放宽或修改；
-- **配置角色卡仅限 GM 访问**：战役公共配置卡 `=== R20_SUITE_DATABASE ===` 的权限严格保持仅 GM 独占（`inplayerjournals: ""`，`controlledby: ""`），严禁对玩家开放可见或控制，杜绝 Journal 界面污染与越权修改风险。
+- **偏好设置与数据权限隔离**：用户偏好设置由 `SuiteConfigStore` 严格托管于本地客户端 `localStorage`，不触碰或创建全局公共卡片，杜绝 Journal 界面污染与越权修改风险。
 
 ## 八、通俗原理解析与工作汇报契约 (Plain-Language Engineering Report)
 在完成任何功能开发、逻辑重构或缺陷修补后，向用户汇报时：

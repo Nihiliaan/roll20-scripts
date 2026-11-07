@@ -75,8 +75,56 @@ export class CharacterSheetBuffEnhancer {
                 };
             }
 
+            // 挂钩 deleteRepeatingRow：将官方人物卡删除 Repeating Row 完整收敛至插件级联销毁体系中！
+            const origDeleteRepeatingRow = proto.deleteRepeatingRow;
+            if (typeof origDeleteRepeatingRow === "function") {
+                proto.deleteRepeatingRow = function(sectionName, rowId) {
+                    if (sectionName === "repeating_buff2" && rowId && this.model) {
+                        try {
+                            const char = this.model;
+                            const prefix = `repeating_buff2_${rowId}_`.toLowerCase();
+                            const snapshot = {};
+                            if (char.attribs && char.attribs.models) {
+                                for (const a of char.attribs.models) {
+                                    const n = (a.get("name") || "").toLowerCase();
+                                    if (n.startsWith(prefix)) {
+                                        snapshot[a.get("name")] = a.get("current");
+                                    }
+                                }
+                            }
+
+                            console.log(`[CharacterSheetBuffEnhancer] 官方人物卡删除 Buff [${rowId}]，由插件全套销毁体系一揽子接管...`);
+
+                            // 一揽子接管：级联小弟自毁 + 向上除名 + 自身所有原生属性物理 destroy + 加值全量重算
+                            Pf1eBuffManager.deleteBuffRowPermanently(char, rowId).then(() => {
+                                if (typeof Pf1eBuffUI !== "undefined") {
+                                    Pf1eBuffUI.requestTokenRefresh(char.id);
+                                }
+                                try {
+                                    if (typeof window !== "undefined" && window.Roll20Suite?.BuffFloatingPanel) {
+                                        window.Roll20Suite.BuffFloatingPanel.renderViewport();
+                                    }
+                                } catch (e) {}
+                            });
+
+                            // 顺带调用官方底层行移除广播，确保官方人物卡 Worker 正常收尾
+                            const P = this;
+                            if (P.d20?.journal?.notifyWorkersOfRowDeleted) {
+                                P.d20.journal.notifyWorkersOfRowDeleted(char.id, sectionName, rowId, "player", snapshot);
+                            } else if (window.d20?.journal?.notifyWorkersOfRowDeleted) {
+                                window.d20.journal.notifyWorkersOfRowDeleted(char.id, sectionName, rowId, "player", snapshot);
+                            }
+                            return;
+                        } catch (e) {
+                            console.warn("[CharacterSheetBuffEnhancer] deleteRepeatingRow 切面异常，回退至原生:", e);
+                        }
+                    }
+                    return origDeleteRepeatingRow.apply(this, arguments);
+                };
+            }
+
             proto._r20SuiteTemplateHooked = true;
-            console.log("[CharacterSheetBuffEnhancer] 已成功挂钩 CharacterView 原型 postRender 与 saveSheetValues 生命周期");
+            console.log("[CharacterSheetBuffEnhancer] 已成功挂钩 CharacterView 原型 postRender、saveSheetValues 与 deleteRepeatingRow 生命周期");
         } catch (err) {
             console.warn("[CharacterSheetBuffEnhancer] 挂钩 CharacterView 原型异常:", err);
         }

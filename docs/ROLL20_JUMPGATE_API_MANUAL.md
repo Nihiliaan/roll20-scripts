@@ -736,3 +736,99 @@ static sanitizeExtraAttrsForClone(extraAttrs) {
 同时在应用到其他目标单位（`applyBuffToTarget`）时，严格分流：
 - **普通副本 (`sourceHostId === null`)**：执行 `sanitizeExtraAttrsForClone`，生成 100% 独立的纯净新条目；
 - **创建影子链接 (`sourceHostId !== null`)**：仅注入当前施法者的 `link_host_id` 与 `link_source_row_id`，同时强制删除 `link_children`，防止下游继承宿主的管辖权。
+
+
+---
+
+## 八、Roll20 官方人物卡 Sheet Worker 重算链路与无头沙箱引擎 (Headless Sheet Worker Sandbox)
+
+### 1. 官方 Sheet Worker 的事件白名单门禁与传统写入失效机理
+Roll20 官方人物卡系统（如 PF1e 社区卡 / 官方卡）底层在浏览器内部通过 Web Worker 或 iframe 运行人物卡专属的 Sheet Worker 脚本（约 516 KB 逻辑闭包）。其主重算逻辑（`ju()` / `PFSheet.recalculate()`）包含如下白名单事件门禁：
+
+```javascript
+// 反编译自官方卡 pathfinder_community.html
+on("change:recalc1 change:migrate1", n().callback((function(e) {
+    n().debug("caught " + e.sourceAttribute + " event: " + e.sourceType),
+    "player" !== e.sourceType && "api" !== e.sourceType || ju()
+})))
+```
+
+#### 传统外部属性写入失效的根因：
+1. **`sourceType` 拦截**：外部用户脚本在 Roll20 顶层编辑页操作 Backbone 模型（`attr.save()` / `attribs.create()`），属性变更经由 Firebase 同步至卡片 iframe 时，Roll20 宿主分发的事件既非卡内 UI 交互的 `"player"`、亦非官方 Pro 订阅服务器沙箱的 `"api"`，导致官方 Worker **直接静默丢弃**；
+2. **`recalc1` 奇偶翻转矛盾**：官方 `ju()` 内部以 `parseInt(r.recalc1, 10)` 判断是否置位全量重算标记 `l = true`，一旦外部将其翻转为 `"0"` 则必然空转；且官方计算完毕后会自动静默重置 `recalc1 = 0`；
+3. **闭卡不执行**：当人物卡未在屏幕上打开时，其对应的 DOM 与 iframe 在页面中物理不存在，无法通过常规 DOM 模拟点击触发。
+
+### 2. 无头重算单例沙箱与串行任务队列 (Headless Singleton Sandbox & Sequential Queue)
+为实现“无论角色卡在屏幕上是否打开，任何 Buff 变动均能毫秒级触发官方原生加值重算”，系统构建了全局常驻单例服务 `RecalcService`（位于 `src/core/RecalcService.js`）：
+
+```
+[初始化阶段]
+  1. 零本地冗余与零外部上传：战役加载后，直接就地在线引用 Roll20 官方下发的原生脚本 (Campaign.characters[0].characterSheet.workerScripts[0])；
+  2. 在后台挂载隐藏的常驻单例沙箱 iframe (id="r20-suite-recalc-sandbox", display:none)；
+  3. 为沙箱注入 Roll20 官方 7 大 SheetWorker 宿主桩与 Underscore 闭包：
+     ├─ on(events, cb)               → 收集官方脚本注册的 2,187 项监听器 (如 change:recalc1)；
+     ├─ getAttrs(names, cb)          → 动态桥接至当前上下文角色 currentContextChar.attribs 内存哈希读取；
+     ├─ setAttrs(values, opts, cb)   → 动态批量写回当前上下文角色，捕获 recalc1: 0 判定计算完成；
+     ├─ getSectionIDs(sec, cb)       → 动态提取当前上下文角色 repeating_xxx 的唯一 rowIds；
+     ├─ getTranslationByKey(k)       → 国际化健壮性桩；
+     ├─ getTranslationLanguage()     → 语言配置桩 ("en")；
+     └─ generateRowID()              → Roll20 原生行 ID 生成算法；
+  4. 采用 Blob URL 外部库引用技术 (<script src="blob:...">) 挂载官方脚本，彻底规避 eval，建立官方事件监听表。
+
+[运行阶段：修改 Buff]
+  Pf1eBuffManager 业务修改 (toggleBuff / toggleCondition / applyOrRefreshBuff / ...)
+      ↓
+  RecalcService.request(character, { reason })
+      ↓ 角色维度 300ms 防抖合并 (Coalescing)
+  RecalcService.enqueue(character, { reason })
+      ↓ 进排队队列，若同角色已有排队项则自动合并
+  RecalcService.processNext()
+      ↓
+  将沙箱 currentContextChar 指向目标角色，直接派发事件：
+  fireEvent("change:recalc1", {
+      sourceAttribute: "recalc1",
+      sourceType: "player",      // 👈 注入合法身份，100% 穿透官方白名单门禁！
+      previousValue: "0",
+      newValue: "1"
+  })
+      ↓
+  官方 ju() / PFSheet.recalculate() 在无头沙箱中完成运算（耗时仅 10~30ms）！
+      ↓
+  最新攻防、AC、豁免、属性修正通过 setAttrs 回写至 character.attribs，并写入 recalc1: 0。
+      ↓
+  捕获 recalc1: 0 信号，当前角色任务结案，currentContextChar 指针清空，自动调度队头下一个角色！
+```
+
+### 3. 角色维度防抖合并 (Coalescing) 机制
+为杜绝用户在浮动面板批量勾选/修改多个 Buff 时引发并发重算雪崩，`RecalcService` 维护了一张角色维度的任务映射表：
+* `pendingRequests = new Map<charId, timerId>`；
+* 每次调用 `request(character)` 时，若该角色已有处于 300ms 窗口内的倒计时，则重置定时器；
+* 连续开启 10 项 Buff 仅在 300ms 静止后执行 **1 次** 全量官方重算。
+
+### 4. 离线幂等真值兜底 (Offline Fallback)
+若无头沙箱处于未就绪状态（如战役刚加载、官方模板正在传输中），`RecalcService.flush` 自动触发幂等真值兜底：
+* 直接向 `character.attribs` 写入 `recalc1 = "1"`（绝对不写入 "0"）；
+* 官方人物卡自带 `on("sheet:opened", ju)` 监听器；
+* 当该角色卡未来首次在屏幕上被打开时，官方卡打开入口自动读出 `recalc1 === "1"`，当场补算全量属性并自动归零复位，形成无缝双保险。
+
+### 5. 无头重算中官方分支决策门禁与属性缺省陷阱 (Deep Worker Internals)
+
+#### 陷阱一：官方 `ju()` 的 `parseInt(r.recalc1, 10)` 早期退出门禁
+在官方 Worker 中，事件派发虽然传入了 `eventObj.newValue = "1"`，但 `ju()` 并不读取事件传参，而是立即调用 `getAttrs(["recalc1", "PFSheet_Version", ...], (r) => { ... })`：
+```javascript
+// 官方 ju() 内部关键分支判定
+e ? l = !0 : (parseInt(r.recalc1, 10) && (l = !0));
+...
+c ? Hu(t) : s ? Bu(...) : l ? Uu(u = -1, t, !0) : t()
+```
+* **失效现象**：若 `character.attribs` 中的 `recalc1` 为 `"0"`，则 `parseInt(r.recalc1, 10)` 判定为 `false`（`l = false`），官方引擎会直接跳过 `Uu()`（全量重算），走最后的 `t()` 退出分支立即返回 `setAttrs({ recalc1: 0 })`，导致重算在 1ms 内虚假完成，任何 Buff 和衍生属性均未更新！
+* **架构解法**：在沙箱 `getAttrs` 桩中，凡查询 `recalc1` 必须无条件返回 `"1"`，强制引导官方状态机进入 `l = true` -> `Uu(u=-1, t, !0)` 全量重算流水线。
+
+#### 陷阱二：DOM 缺省下拉框在无头环境下的未初始化断流 (MANUAL_DROPDOWN_DEFAULTS)
+官方人物卡前端存在诸如下拉框（`<select name="attr_melee_bab">` 默认选中 `bab`、`attr_melee-ability` 默认选中 `STR-mod`）：
+* **失效现象**：若该角色从未在 Roll20 卡片编辑器中手动展开并点击过这些下拉框，Roll20 不会在 `character.attribs` 中创建对应的键值对；
+* 在无头沙箱中，`getAttrs(["melee_bab"])` 返回空字符串 `""`；官方下拉联动函数 `un()` 因而把 `melee_bab-mod`、`melee-ability-mod` 算为 `""`（即 0），最终近战攻击公式 `BAB(0) + STR(0) + Buff(3) = 3`，造成基础攻击加值丢失；
+* **架构解法**：
+  1. 在 `RecalcService` 中固化官方 `MANUAL_DROPDOWN_DEFAULTS` 字典表（包含 `melee_bab: "bab"`, `melee-ability: "STR-mod"`, `HP-ability: "CON-mod"` 等 25 项官方缺省映射）；
+  2. 在沙箱 `getAttrs` 桩中对空缺属性实施缺省值回退；
+  3. 在 `processNext` 调度开始前，以幂等方式预先在 `character.attribs` 中补全缺失键，确保无论是无头重算还是聊天框原生宏求值，均能准确提取完整的 BAB 与属性加值。

@@ -96,6 +96,17 @@ export class SuiteSettingsPanel {
                         </div>
                         <input type="checkbox" id="setting_buff_show_checkbox" ${settings.buff_show_checkbox ? "checked" : ""} style="cursor: pointer; width: 16px; height: 16px; flex-shrink: 0;">
                     </label>
+
+                    <div style="height: 1px; background: #334155;"></div>
+
+                    <!-- 设置项 4: 队友之间的 Buff 互相可见 -->
+                    <label style="display: flex; align-items: center; justify-content: space-between; cursor: pointer; margin: 0; font-weight: normal;">
+                        <div style="padding-right: 8px;">
+                            <span style="font-weight: 600; color: #f8fafc; font-size: 12px;">队友之间的 Buff 互相可见</span>
+                            <div style="font-size: 11px; color: #94a3b8; line-height: 1.3; margin-top: 2px;">允许队伍成员（角色卡已勾选“隊員”）在面板与先攻栏互相查看 Buff 状态（只读）</div>
+                        </div>
+                        <input type="checkbox" id="setting_party_buffs_visible" ${settings.party_buffs_visible ? "checked" : ""} style="cursor: pointer; width: 16px; height: 16px; flex-shrink: 0;">
+                    </label>
                 </div>
             </div>
         `;
@@ -138,6 +149,11 @@ export class SuiteSettingsPanel {
         const chkShowCheckbox = panel.querySelector("#setting_buff_show_checkbox");
         chkShowCheckbox?.addEventListener("change", (e) => {
             SuiteConfigStore.setSetting("buff_show_checkbox", e.target.checked);
+        });
+
+        const chkPartyBuffs = panel.querySelector("#setting_party_buffs_visible");
+        chkPartyBuffs?.addEventListener("change", (e) => {
+            SuiteConfigStore.setSetting("party_buffs_visible", e.target.checked);
         });
 
         container.appendChild(panel);

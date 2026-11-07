@@ -1,4 +1,5 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
+import { RecalcService } from "../../core/RecalcService.js";
 
 /**
  * Pf1eBuffManager.js
@@ -56,22 +57,27 @@ export class Pf1eBuffManager {
     }
 
     static generateStandardRowId() {
-        if (typeof window.generateUUID === "function") {
-            return window.generateUUID();
+        let id = "";
+        if (typeof window !== "undefined" && typeof window.generateUUID === "function") {
+            id = window.generateUUID();
         }
-        // 回退实现：标准 Firebase/Roll20 Push ID 生成器
-        const PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
-        let now = new Date().getTime();
-        const timeStampChars = new Array(8);
-        for (let i = 7; i >= 0; i--) {
-            timeStampChars[i] = PUSH_CHARS.charAt(now % 64);
-            now = Math.floor(now / 64);
+        if (!id) {
+            // 回退实现：标准 Roll20 Push ID 生成器（严格剔除下划线 _，防止破坏 repeating_section_([^_]+) 正则分割）
+            const PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+            let now = new Date().getTime();
+            const timeStampChars = new Array(8);
+            for (let i = 7; i >= 0; i--) {
+                timeStampChars[i] = PUSH_CHARS.charAt(now % 63);
+                now = Math.floor(now / 63);
+            }
+            id = timeStampChars.join("");
+            for (let i = 0; i < 12; i++) {
+                id += PUSH_CHARS.charAt(Math.floor(Math.random() * 63));
+            }
         }
-        let id = timeStampChars.join("");
-        for (let i = 0; i < 12; i++) {
-            id += PUSH_CHARS.charAt(Math.floor(Math.random() * 64));
-        }
-        return id;
+        // 核心工业级约束：无论由何种算法生成，坚决剔除下划线 _（替换为合法字母 a）并强制小写化，
+        // 绝对杜绝截断 Roll20 官方 repeating_buff2_([^_]+) 正则与 CSS/DOM 大小写敏感冲突
+        return id.replace(/_/g, "a").toLowerCase();
     }
 
     /**
@@ -85,6 +91,98 @@ export class Pf1eBuffManager {
     }
 
     /**
+     * 自动检测并修复/自愈历史遗留的带有下划线 _ 的畸形坏死 Buff 属性
+     * 将包含下划线的 rowId 平滑迁移为合法 ID，并清理导致官方人物卡锁死的幽灵残破行
+     * @param {object} character Character Backbone 模型
+     * @returns {Promise<number>} 修复的行数
+     */
+    static async sanitizeMalformedBuffRows(character) {
+        if (!character || !character.attribs || !character.attribs.models) return 0;
+
+        const malformedMap = new Map(); // rawRowId -> { cleanRowId, attrs: [] }
+
+        for (const a of [...character.attribs.models]) {
+            const name = a.get("name") || "";
+            if (!name.startsWith("repeating_buff2_-")) continue;
+            
+            // Firebase Push ID 长度恒为 20 (以 '-' 开头)
+            // 属性全名格式：repeating_buff2_<20位rowId>_<subKey>
+            const rowIdCandidate = name.slice(16, 36);
+            if (name.charAt(36) === "_" && rowIdCandidate.includes("_")) {
+                const rawRowId = rowIdCandidate;
+                const subKey = name.slice(37);
+
+                let entry = malformedMap.get(rawRowId);
+                if (!entry) {
+                    const cleanRowId = rawRowId.replace(/_/g, "a").toLowerCase();
+                    entry = { cleanRowId, attrs: [] };
+                    malformedMap.set(rawRowId, entry);
+                }
+                entry.attrs.push({ attr: a, subKey, val: a.get("current"), max: a.get("max") });
+            }
+        }
+
+        if (malformedMap.size === 0) return 0;
+
+        console.warn(`[Pf1eBuffManager] [自愈系统] 为 [${character.get("name")}] 检测到 ${malformedMap.size} 个含下划线的坏死 Buff 行，启动自动迁移...`);
+        let fixedCount = 0;
+
+        for (const [malformedRowId, { cleanRowId, attrs }] of malformedMap.entries()) {
+            for (const { attr, subKey, val, max } of attrs) {
+                const newName = `repeating_buff2_${cleanRowId}_${subKey}`;
+                let existingNew = character.attribs.models.find(m => m.get("name") === newName);
+                if (!existingNew) {
+                    character.attribs.create({
+                        name: newName,
+                        current: subKey === "row_id" ? cleanRowId.toLowerCase() : val,
+                        max: max || ""
+                    }, { bySuite: true });
+                }
+                try {
+                    attr.destroy();
+                } catch (e) {
+                    console.warn("[Pf1eBuffManager] 销毁坏死属性异常:", e);
+                }
+            }
+            fixedCount++;
+        }
+
+        // 同步更新 _reporder_repeating_buff2
+        const orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+        if (orderAttr && orderAttr.get("current")) {
+            let curOrder = String(orderAttr.get("current"));
+            for (const [malformedRowId, { cleanRowId }] of malformedMap.entries()) {
+                curOrder = curOrder.replace(malformedRowId, cleanRowId);
+                const truncatedId = malformedRowId.split("_")[0];
+                if (truncatedId && curOrder.includes(truncatedId)) {
+                    curOrder = curOrder.replace(truncatedId, cleanRowId);
+                }
+            }
+            orderAttr.save({ current: curOrder }, { bySuite: true });
+        }
+
+        // 清理打开的人物卡中锁死红字的坏死 DOM 元素
+        try {
+            const iframes = document.querySelectorAll(".characterdialog iframe, .ui-dialog iframe");
+            iframes.forEach(iframe => {
+                const doc = iframe.contentDocument || iframe.contentWindow?.document;
+                if (!doc) return;
+                for (const malformedRowId of malformedMap.keys()) {
+                    const truncatedId = malformedRowId.split("_")[0];
+                    const badItems = doc.querySelectorAll(`.repitem[data-reprowid="${truncatedId}"], .repitem[data-reprowid="${malformedRowId}"]`);
+                    badItems.forEach(item => {
+                        item.remove();
+                        console.log(`[Pf1eBuffManager] 已从人物卡 DOM 中清除坏死节点 [${truncatedId}]`);
+                    });
+                }
+            });
+        } catch (e) {}
+
+        console.log(`[Pf1eBuffManager] [自愈系统] [${character.get("name")}] 坏死 Buff 行修复完毕，共迁移 ${fixedCount} 行`);
+        return fixedCount;
+    }
+
+    /**
      * 获取指定角色卡上所有的 Buff（无论是否激活启动）
      * @param {object} character Character Backbone 模型
      * @returns {Promise<Array>} 包含启动和未启动的全部 Buff 列表
@@ -92,55 +190,68 @@ export class Pf1eBuffManager {
     static async getAllBuffs(character) {
         if (!character) return [];
         await Roll20Bridge.ensureCharacterAttributes(character);
+        await this.sanitizeMalformedBuffRows(character);
 
         const buffs = [];
         if (!character.attribs || !character.attribs.models) return [];
 
-        // 查找所有 repeating_buff2_*_name
-        const nameAttrs = character.attribs.models.filter(a => {
-            const name = a.get("name") || "";
-            return name.startsWith("repeating_buff2_") && name.endsWith("_name");
-        });
+        // 单次遍历属性集合，建立按 rowId 分组的哈希索引表 (O(N) 纯单遍扫描替代 O(B*N) 多重线性查找)
+        const buffMap = new Map();
+        for (const a of character.attribs.models) {
+            const attrName = a.get("name") || "";
+            if (!attrName.startsWith("repeating_buff2_")) continue;
+            const match = attrName.match(/^repeating_buff2_([^_]+)_(.+)$/);
+            if (!match) continue;
+            const rowId = match[1];
+            const subKey = match[2];
 
-        for (const nameAttr of nameAttrs) {
-            const fullName = nameAttr.get("name");
-            const prefix = fullName.substring(0, fullName.lastIndexOf("_name"));
-            const rowId = prefix.replace("repeating_buff2_", "");
+            let entry = buffMap.get(rowId);
+            if (!entry) {
+                entry = {
+                    rowId,
+                    prefix: `repeating_buff2_${rowId}`,
+                    nameAttr: null,
+                    toggleAttr: null,
+                    roundsAttr: null,
+                    initRoundsAttr: null,
+                    buffTypeAttr: null,
+                    extraAttrs: {}
+                };
+                buffMap.set(rowId, entry);
+            }
 
-            const toggleAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_enable_toggle`);
-            const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
-            const initRoundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
-            const buffTypeAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_bufftype`);
+            if (subKey === "name") {
+                entry.nameAttr = a;
+            } else if (subKey === "enable_toggle") {
+                entry.toggleAttr = a;
+            } else if (subKey === "rounds") {
+                entry.roundsAttr = a;
+            } else if (subKey === "init_rounds") {
+                entry.initRoundsAttr = a;
+            } else if (subKey === "bufftype") {
+                entry.buffTypeAttr = a;
+            } else if (
+                subKey !== "tabcat" &&
+                subKey !== "tabcat2" &&
+                subKey !== "row_id"
+            ) {
+                const raw = a.get("current");
+                if (raw !== "" && raw !== null && raw !== undefined) {
+                    entry.extraAttrs[subKey] = (!isNaN(Number(raw)) && typeof raw !== "boolean" && String(raw).trim() !== "") ? Number(raw) : raw;
+                }
+            }
+        }
+
+        // 遍历索引表组装 Buff 实体 (纯只读查询，无任何副作用与写回)
+        for (const entry of buffMap.values()) {
+            const { rowId, prefix, nameAttr, toggleAttr, roundsAttr, initRoundsAttr, buffTypeAttr, extraAttrs } = entry;
+            if (!nameAttr) continue;
 
             const name = nameAttr.get("current") || "未命名Buff";
             const enabled = toggleAttr ? Number(toggleAttr.get("current")) === 1 : false;
             const rounds = roundsAttr && roundsAttr.get("current") !== "" ? Number(roundsAttr.get("current")) : null;
             const initRounds = initRoundsAttr && initRoundsAttr.get("current") !== "" ? String(initRoundsAttr.get("current")) : null;
             const buffType = buffTypeAttr ? buffTypeAttr.get("current") : "spell";
-
-            // 提取该原生 Buff 条目下所有存储的扩展加值与修饰细目字典 (extraAttrs)
-            const extraAttrs = {};
-            const prefixWithUnderscore = `${prefix}_`;
-            for (const attr of character.attribs.models) {
-                const attrName = attr.get("name") || "";
-                if (attrName.startsWith(prefixWithUnderscore)) {
-                    const subKey = attrName.substring(prefixWithUnderscore.length);
-                    if (
-                        subKey !== "name" &&
-                        subKey !== "enable_toggle" &&
-                        subKey !== "rounds" &&
-                        subKey !== "init_rounds" &&
-                        subKey !== "tabcat" &&
-                        subKey !== "tabcat2" &&
-                        subKey !== "row_id"
-                    ) {
-                        const raw = attr.get("current");
-                        if (raw !== "" && raw !== null && raw !== undefined) {
-                            extraAttrs[subKey] = (!isNaN(Number(raw)) && typeof raw !== "boolean" && String(raw).trim() !== "") ? Number(raw) : raw;
-                        }
-                    }
-                }
-            }
 
             let linkChildren = [];
             if (extraAttrs.link_children) {
@@ -150,37 +261,6 @@ export class Pf1eBuffManager {
                         : extraAttrs.link_children;
                 } catch (e) {
                     linkChildren = [];
-                }
-            }
-
-            // 拓扑自愈：若宿主未持久化 link_children 且自身为主 Buff，自动做一次同步内存反查
-            if ((!Array.isArray(linkChildren) || linkChildren.length === 0) && !extraAttrs.link_host_id) {
-                const chars = window.Campaign?.characters?.models || [];
-                const discovered = [];
-                for (const c of chars) {
-                    if (!c.attribs || c.id === character.id) continue;
-                    for (const a of c.attribs.models) {
-                        const an = a.get("name") || "";
-                        if (an.endsWith("_link_host_id") && a.get("current") === character.id) {
-                            const pfx = an.replace("_link_host_id", "");
-                            const srcAttr = c.attribs.models.find(m => m.get("name") === `${pfx}_link_source_row_id`);
-                            if (srcAttr && srcAttr.get("current") === rowId) {
-                                discovered.push({ charId: c.id, rowId: pfx.replace("repeating_buff2_", "") });
-                            }
-                        }
-                    }
-                }
-                if (discovered.length > 0) {
-                    linkChildren = discovered;
-                    // 异步写回宿主属性，固化索引
-                    const attrName = `${prefix}_link_children`;
-                    const jsonStr = JSON.stringify(discovered);
-                    let ca = character.attribs.models.find(m => m.get("name") === attrName);
-                    if (!ca) {
-                        character.attribs.create({ name: attrName, current: jsonStr });
-                    } else {
-                        ca.save({ current: jsonStr });
-                    }
                 }
             }
 
@@ -267,22 +347,13 @@ export class Pf1eBuffManager {
 
     /**
      * 触发角色卡的 Sheet Worker 全量重算 (PFSheet.recalculate)
-     * 自动刷新攻击力、防御、豁免等所有骰子宏引用的计算属性
+     * 统一委托至 RecalcService 单源重算服务 (300ms 角色维度防抖合并)
      * @param {object} character 
      */
     static async triggerRecalculate(character) {
         if (!character) return;
-        await Roll20Bridge.ensureCharacterAttributes(character);
-        if (!character.attribs) return;
-
-        // 恪守宿主原生能力规范：纯属性原子切换触发官方 Sheet Worker，绝不搞 DOM 穿透点击
-        let recalcAttr = character.attribs.models.find(a => a.get("name") === "recalc1");
-        if (!recalcAttr) {
-            character.attribs.create({ name: "recalc1", current: "1" });
-        } else {
-            const cur = recalcAttr.get("current");
-            const nextVal = (cur === "1" || cur === 1) ? "0" : "1";
-            recalcAttr.save({ current: nextVal }, { silent: false });
+        if (typeof RecalcService !== "undefined") {
+            RecalcService.request(character, { reason: "trigger_recalculate" });
         }
     }
 
@@ -299,9 +370,12 @@ export class Pf1eBuffManager {
     static async applyOrRefreshBuff(character, buffName, rounds = null, extraAttrs = null, initRounds = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
+        await this.sanitizeMalformedBuffRows(character);
 
         const cleanName = (buffName || "").trim();
         if (!cleanName) return null;
+
+        console.log(`[Pf1eBuffManager] [DEBUG_APPLY_OR_REFRESH] 角色: [${character.get("name")}], 拟施加 Buff: [${cleanName}], 现有条目数: ${character.attribs?.models?.filter(a => a.get("name")?.startsWith("repeating_buff2_")).length || 0}`);
 
         // 遍历所有 repeating_buff2_*_name 寻找同名行
         const nameAttrs = character.attribs.models.filter(a => {
@@ -388,12 +462,12 @@ export class Pf1eBuffManager {
             }
 
             console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 激活并刷新已有同名 Buff [${cleanName}], 轮数: ${effectiveRounds}`);
-            await this.triggerRecalculate(character);
+            RecalcService.request(character, { reason: "refresh_buff" });
             return { rowId, prefix, name: cleanName, rounds: effectiveRounds, isRefreshed: true };
         } else {
             // 不存在同名 Buff，新增一行
             const newBuff = await this.addBuff(character, cleanName, rounds, extraAttrs, initRounds);
-            await this.triggerRecalculate(character);
+            RecalcService.request(character, { reason: "add_buff" });
             return { ...newBuff, isRefreshed: false };
         }
     }
@@ -404,25 +478,28 @@ export class Pf1eBuffManager {
     static async addBuff(character, buffName, rounds = null, extraAttrs = null, initRounds = null) {
         if (!character) return null;
         await Roll20Bridge.ensureCharacterAttributes(character);
+        await this.sanitizeMalformedBuffRows(character);
 
         const cleanName = (buffName || "新Buff").trim();
         const rowId = this.generateStandardRowId();
         const prefix = `repeating_buff2_${rowId}`;
 
-        // 写入原生必需的核心字段
-        const nameAttr = character.attribs.create({ name: `${prefix}_name`, current: cleanName });
-        const toggleAttr = character.attribs.create({ name: `${prefix}_enable_toggle`, current: 1 });
-        const typeAttr = character.attribs.create({ name: `${prefix}_bufftype`, current: "spell" });
+        console.log(`[Pf1eBuffManager] [DEBUG_ADD_BUFF] 正在为 [${character.get("name")}] 新增规范 Buff: [${cleanName}], rowId: [${rowId}], 字符安全性校验: ${!rowId.includes("_") ? "PASS" : "FAIL"}`);
+
+        // 写入原生必需的核心字段（标记 bySuite 防止中间切面误触）
+        const nameAttr = character.attribs.create({ name: `${prefix}_name`, current: cleanName }, { bySuite: true });
+        const toggleAttr = character.attribs.create({ name: `${prefix}_enable_toggle`, current: 1 }, { bySuite: true });
+        const typeAttr = character.attribs.create({ name: `${prefix}_bufftype`, current: "spell" }, { bySuite: true });
 
         // 必需的原生分类与渲染控制标记（杜绝 "You must delete this row" 错误）
-        character.attribs.create({ name: `${prefix}_tabcat`, current: "spell" });
-        character.attribs.create({ name: `${prefix}_tabcat2`, current: "1" });
-        character.attribs.create({ name: `${prefix}_description-show`, current: 1 });
-        character.attribs.create({ name: `${prefix}_row_id`, current: rowId.toLowerCase() });
+        character.attribs.create({ name: `${prefix}_tabcat`, current: "spell" }, { bySuite: true });
+        character.attribs.create({ name: `${prefix}_tabcat2`, current: "1" }, { bySuite: true });
+        character.attribs.create({ name: `${prefix}_description-show`, current: 1 }, { bySuite: true });
+        character.attribs.create({ name: `${prefix}_row_id`, current: rowId.toLowerCase() }, { bySuite: true });
 
         // 保存初始预置轮数/公式
         if (initRounds !== null && initRounds !== undefined && initRounds !== "") {
-            character.attribs.create({ name: `${prefix}_init_rounds`, current: initRounds });
+            character.attribs.create({ name: `${prefix}_init_rounds`, current: initRounds }, { bySuite: true });
         }
 
         let effectiveRounds = rounds;
@@ -437,18 +514,34 @@ export class Pf1eBuffManager {
                 name: `${prefix}_rounds`,
                 current: Number(effectiveRounds),
                 max: Number(effectiveRounds)
-            });
+            }, { bySuite: true });
         }
 
         // 写入细目属性
         if (extraAttrs && typeof extraAttrs === "object") {
             for (const [k, v] of Object.entries(extraAttrs)) {
                 if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "init_rounds" || k === "bufftype" || k === "tabcat" || k === "tabcat2" || k === "row_id") continue;
-                character.attribs.create({ name: `${prefix}_${k}`, current: v });
+                character.attribs.create({ name: `${prefix}_${k}`, current: v }, { bySuite: true });
             }
         }
 
-        console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增原生规范 Buff [${cleanName}], 轮数: ${effectiveRounds}`);
+        // 同步规范维护 _reporder_repeating_buff2 顺序
+        let orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+        if (!orderAttr) {
+            character.attribs.create({
+                name: "_reporder_repeating_buff2",
+                current: rowId
+            }, { bySuite: true });
+        } else {
+            const curVal = String(orderAttr.get("current") || "").trim();
+            const ids = curVal ? curVal.split(",").map(s => s.trim().toLowerCase()).filter(Boolean) : [];
+            if (!ids.includes(rowId.toLowerCase())) {
+                ids.push(rowId.toLowerCase());
+                orderAttr.save({ current: ids.join(",") }, { bySuite: true });
+            }
+        }
+
+        console.log(`[Pf1eBuffManager] 为 ${character.get("name")} 新增原生规范 Buff [${cleanName}] 完毕, rowId: ${rowId}, 轮数: ${effectiveRounds}`);
         return { rowId, prefix, name: cleanName, rounds: effectiveRounds, toggleAttr, roundsAttr };
     }
 
@@ -576,7 +669,7 @@ export class Pf1eBuffManager {
 
         // 合并行动三：驱动官方加值重算管线 (让官方脚本去给整张人物卡设置加值/减值)
         console.log(`[Pf1eBuffManager] 已${enable ? "启用" : "关停"} ${character.get("name")} 的 Buff (${rowId})，正在联动重算加值...`);
-        await this.triggerRecalculate(character);
+        RecalcService.request(character, { reason: enable ? "enable_buff" : "disable_buff" });
 
         // 合并行动四：自动广播同步下游受术者副本
         await this.broadcastDownstreamSync(character, rowId);
@@ -714,7 +807,7 @@ export class Pf1eBuffManager {
             character.attribs.create({ name: roundsKey, current: "" });
         }
 
-        await this.triggerRecalculate(character);
+        RecalcService.request(character, { reason: enable ? "enable_condition" : "disable_condition" });
         return true;
     }
 
@@ -742,6 +835,7 @@ export class Pf1eBuffManager {
         } else {
             await this.toggleBuff(hostChar, hostRowId, false);
         }
+        if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(hostChar.id);
 
         // 2. 获取并自动拓扑自愈下游受术者列表
         const attrName = isDebuff ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
@@ -1037,7 +1131,7 @@ export class Pf1eBuffManager {
             if (toDestroy.length > 0) {
                 toDestroy.forEach(attr => attr.destroy());
                 console.log(`[Pf1eBuffManager] 已物理彻底销毁 ${character.get("name")} 的 Buff [${rowId}] 共 ${toDestroy.length} 项原生属性`);
-                await this.triggerRecalculate(character);
+                RecalcService.request(character, { reason: "delete_buff_permanently" });
             }
             return true;
         } finally {
@@ -1368,7 +1462,7 @@ export class Pf1eBuffManager {
         }
 
         console.log(`[Pf1eBuffManager] 已更新 ${character.get("name")} 的 Buff [${name}] (${rowId})`);
-        await this.triggerRecalculate(character);
+        RecalcService.request(character, { reason: "update_buff_row" });
         return true;
     }
 

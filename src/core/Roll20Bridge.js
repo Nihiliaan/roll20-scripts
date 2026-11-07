@@ -2,7 +2,29 @@
  * Roll20Bridge.js
  * 封装与 Roll20 Jumpgate 现代架构的核心交互通道
  */
+import { SuiteConfigStore } from "./SuiteConfigStore.js";
+/**
+ * 转义 HTML 特殊字符，防范 XSS 漏洞
+ * @param {*} str 待转义的原始字符串
+ * @returns {string} 转义后的安全字符串
+ */
+export function escapeHtml(str) {
+    if (str == null) return "";
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
 export class Roll20Bridge {
+    /**
+     * 转义 HTML 特殊字符 (委托给 escapeHtml)
+     */
+    static escapeHtml(str) {
+        return escapeHtml(str);
+    }
     /**
      * 等待 Roll20 核心战役对象初始化就绪
      * @param {number} timeoutMs 超时时间(毫秒)
@@ -69,10 +91,17 @@ export class Roll20Bridge {
             return page && page.thegraphics ? page.thegraphics.get(tokenId) : null;
         }
 
-        // 遍历所有页面寻找该 Token
+        // 1. 优先命中当前玩家页面 (99% 场景，O(1) 瞬时哈希定位)
+        const curPage = this.getCurrentPage();
+        if (curPage && curPage.thegraphics) {
+            const token = curPage.thegraphics.get(tokenId);
+            if (token) return token;
+        }
+
+        // 2. 跨图兜底：遍历其他页面寻找该 Token
         for (let i = 0; i < campaign.pages.length; i++) {
             const page = campaign.pages.at(i);
-            if (page && page.thegraphics) {
+            if (page && page !== curPage && page.thegraphics) {
                 const token = page.thegraphics.get(tokenId);
                 if (token) return token;
             }
@@ -187,7 +216,20 @@ export class Roll20Bridge {
      * @returns {string|null}
      */
     static getCurrentPlayerId() {
-        return window.currentPlayer ? window.currentPlayer.id : (window.d20_player_id || null);
+        if (window.currentPlayer && window.currentPlayer.id) {
+            return window.currentPlayer.id;
+        }
+        if (window.currentPlayer && typeof window.currentPlayer.get === "function") {
+            const id = window.currentPlayer.get("id") || window.currentPlayer.id;
+            if (id) return id;
+        }
+        if (window.d20_player_id) {
+            return window.d20_player_id;
+        }
+        if (window.Campaign && window.Campaign.currentPlayer && window.Campaign.currentPlayer.id) {
+            return window.Campaign.currentPlayer.id;
+        }
+        return null;
     }
 
     /**
@@ -206,12 +248,15 @@ export class Roll20Bridge {
             char = charOrId;
         }
         if (!char) return false;
-        if (typeof char.currentPlayerControls === "function") {
-            return char.currentPlayerControls();
-        }
+
+        const rawControlledBy = char.get ? char.get("controlledby") : char.controlledby;
+        if (!rawControlledBy || typeof rawControlledBy !== "string") return false;
+
+        const controlledBy = rawControlledBy.split(",").map(id => id.trim()).filter(Boolean);
+        if (controlledBy.includes("all")) return true;
+
         const myPlayerId = this.getCurrentPlayerId();
-        const controlledBy = (char.get("controlledby") || "").split(",");
-        return controlledBy.includes(myPlayerId) || controlledBy.includes("all");
+        return !!(myPlayerId && controlledBy.includes(myPlayerId));
     }
 
     /**
@@ -239,9 +284,103 @@ export class Roll20Bridge {
         }
 
         // 2. 若为纯野怪 Token，依据 Token 自身控制权判定
+        const rawControlledBy = token.get ? token.get("controlledby") : token.controlledby;
+        if (!rawControlledBy || typeof rawControlledBy !== "string") return false;
+
+        const tokenControlledBy = rawControlledBy.split(",").map(id => id.trim()).filter(Boolean);
+        if (tokenControlledBy.includes("all")) return true;
+
         const myPlayerId = this.getCurrentPlayerId();
-        const tokenControlledBy = (token.get("controlledby") || "").split(",");
-        return tokenControlledBy.includes(myPlayerId) || tokenControlledBy.includes("all");
+        return !!(myPlayerId && tokenControlledBy.includes(myPlayerId));
+    }
+
+    /**
+     * 判断特定对象（角色卡/Token）是否被标记为队伍成员（隊員，即 inParty === true）
+     * 对应角色卡设置中的 .character-party-toggle 复选框
+     * @param {string|object} target
+     * @returns {boolean}
+     */
+    static isPartyMember(target) {
+        if (!target) return false;
+        let char = null;
+        if (typeof target === "string") {
+            const campaign = this.getCampaign();
+            char = campaign?.characters?.get(target);
+            if (!char) {
+                const token = this.getTokenGraphic(target);
+                if (token) char = this.getCharacterByToken(token);
+            }
+        } else if (target.get && typeof target.get === "function") {
+            if (target.get("represents") !== undefined) {
+                // Token graphic 模型
+                char = this.getCharacterByToken(target);
+            } else {
+                // Character 模型
+                char = target;
+            }
+        }
+        if (!char) return false;
+        const inParty = char.get ? char.get("inParty") : char.inParty;
+        return inParty === true || inParty === "true" || inParty === 1 || inParty === "1";
+    }
+
+    /**
+     * 判断当前登录玩家是否为队伍成员（名下控制至少一个 inParty === true 的角色）
+     * @returns {boolean}
+     */
+    static isCurrentPlayerInParty() {
+        if (this.isGM()) return true;
+        const campaign = this.getCampaign();
+        const characters = campaign?.characters?.models || [];
+        for (const c of characters) {
+            if (this.canControlCharacter(c) && this.isPartyMember(c)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断当前用户对特定角色卡是否具备 Buff 查看权限（读权限）
+     * GM、拥有控制权者、以及开启队友互见设置后的合法队伍成员均具备查看权限
+     * @param {string|object} charOrId
+     * @returns {boolean}
+     */
+    static canViewCharacterBuffs(charOrId) {
+        if (this.isGM()) return true;
+        if (this.canControlCharacter(charOrId)) return true;
+
+        const partyBuffsVisible = typeof SuiteConfigStore !== "undefined"
+            ? SuiteConfigStore.getSetting("party_buffs_visible", false)
+            : false;
+
+        if (partyBuffsVisible) {
+            if (this.isCurrentPlayerInParty() && this.isPartyMember(charOrId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断当前用户对特定 Token 是否具备 Buff 查看权限（读权限）
+     * @param {string|object} tokenOrId
+     * @returns {boolean}
+     */
+    static canViewTokenBuffs(tokenOrId) {
+        if (this.isGM()) return true;
+        if (this.canControlToken(tokenOrId)) return true;
+
+        const partyBuffsVisible = typeof SuiteConfigStore !== "undefined"
+            ? SuiteConfigStore.getSetting("party_buffs_visible", false)
+            : false;
+
+        if (partyBuffsVisible) {
+            if (this.isCurrentPlayerInParty() && this.isPartyMember(tokenOrId)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -388,5 +527,94 @@ export class Roll20Bridge {
         }, 10);
 
         return cleanup;
+    }
+
+    /**
+     * 为指定展示元素挂载就地编辑输入框 (Inline Editor)
+     * 自动处理事件隔离 (stopPropagation)、Enter 确认、Escape 取消与失焦持久化
+     * @param {HTMLElement} triggerEl 触发编辑的展示元素 (通常为轮数 span)
+     * @param {object} options
+     * @param {string|number|null} options.initialValue 初始值
+     * @param {string} [options.placeholder="轮数"] 输入框 placeholder
+     * @param {string} [options.className="r20-input-round-inline"] 自定义 class
+     * @param {HTMLElement} [options.container] 挂载容器，默认 triggerEl.parentElement
+     * @param {Function} options.onCommit 提交回调: async (rawText) => void
+     */
+    static attachInlineRoundEditor(triggerEl, options = {}) {
+        if (!triggerEl) return;
+        const container = options.container || triggerEl.parentElement;
+        if (!container) return;
+
+        // 防重入：若当前容器内已存在处于编辑态的输入框，直接聚焦返回
+        const existingInput = container.querySelector(".r20-input-round-inline, .r20-input-round-inline-pill");
+        if (existingInput) {
+            existingInput.focus();
+            existingInput.select?.();
+            return;
+        }
+
+        const {
+            initialValue = "",
+            placeholder = "轮数",
+            className = "r20-input-round-inline",
+            onCommit
+        } = options;
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = className;
+        input.value = (initialValue !== null && initialValue !== undefined) ? String(initialValue) : "";
+        input.placeholder = placeholder;
+
+        ["click", "dblclick", "mousedown", "contextmenu"].forEach(evtName => {
+            input.addEventListener(evtName, ev => ev.stopPropagation());
+        });
+
+        let isCommitted = false;
+        let isCancelled = false;
+
+        const restoreDOM = () => {
+            if (input.parentNode === container) {
+                input.replaceWith(triggerEl);
+            } else {
+                input.remove();
+            }
+        };
+
+        const commit = async () => {
+            if (isCommitted || isCancelled) return;
+            isCommitted = true;
+            const raw = input.value.trim();
+            restoreDOM();
+            if (typeof onCommit === "function") {
+                await onCommit(raw);
+            }
+        };
+
+        const cancel = () => {
+            if (isCommitted || isCancelled) return;
+            isCancelled = true;
+            restoreDOM();
+        };
+
+        input.addEventListener("keydown", (e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+                e.preventDefault();
+                input.blur(); // 触发 blur 提交
+            } else if (e.key === "Escape") {
+                e.preventDefault();
+                cancel();
+            }
+        });
+
+        input.addEventListener("blur", () => {
+            commit();
+        });
+
+        // 替换展示元素为输入框，并聚焦全选
+        triggerEl.replaceWith(input);
+        input.focus();
+        input.select();
     }
 }
