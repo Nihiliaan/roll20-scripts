@@ -271,29 +271,62 @@ export class TokenBuffManager {
         if (!token) return [];
 
         const buffs = this.getTokenBuffs(token);
-        if (buffs.length === 0) return [];
+        const debuffs = this.getTokenDebuffs(token);
+        if (buffs.length === 0 && debuffs.length === 0) return [];
 
         const tokenName = token.get("name") || "未命名棋子";
-        const remainingBuffs = [];
         const processed = [];
 
-        for (const buff of buffs) {
-            if (buff.rounds === null || isNaN(buff.rounds)) {
-                remainingBuffs.push(buff);
-                continue;
-            }
+        // 1. 处理正面 Buff
+        if (buffs.length > 0) {
+            const remainingBuffs = [];
+            for (const buff of buffs) {
+                if (buff.rounds === null || isNaN(buff.rounds)) {
+                    remainingBuffs.push(buff);
+                    continue;
+                }
 
-            const nextRounds = buff.rounds - 1;
-            if (nextRounds <= 0) {
-                processed.push({ name: buff.name, status: "expired" });
-            } else {
-                buff.rounds = nextRounds;
-                remainingBuffs.push(buff);
-                processed.push({ name: buff.name, status: "decremented", remaining: nextRounds });
+                const nextRounds = buff.rounds - 1;
+                if (nextRounds <= 0) {
+                    processed.push({ name: buff.name, status: "expired" });
+                } else {
+                    buff.rounds = nextRounds;
+                    remainingBuffs.push(buff);
+                    processed.push({ name: buff.name, status: "decremented", remaining: nextRounds });
+                }
+            }
+            this.saveTokenBuffs(token, remainingBuffs);
+        }
+
+        // 2. 处理 Debuff 轮数倒计与到期关停
+        if (debuffs.length > 0) {
+            let debuffsModified = false;
+            for (const debuff of debuffs) {
+                if (!debuff.enabled) continue;
+                if (debuff.rounds === null || isNaN(debuff.rounds)) continue;
+
+                if (debuff.rounds > 0) {
+                    const nextRounds = debuff.rounds - 1;
+                    if (nextRounds <= 0) {
+                        debuff.enabled = false;
+                        debuff.rounds = 0;
+                        processed.push({ name: `[Debuff] ${debuff.name}`, status: "expired", remaining: 0 });
+                    } else {
+                        debuff.rounds = nextRounds;
+                        processed.push({ name: `[Debuff] ${debuff.name}`, status: "decremented", remaining: nextRounds });
+                    }
+                    debuffsModified = true;
+                } else {
+                    debuff.rounds = debuff.rounds - 1;
+                    processed.push({ name: `[Debuff] ${debuff.name}`, status: "counted", remaining: debuff.rounds });
+                    debuffsModified = true;
+                }
+            }
+            if (debuffsModified) {
+                this.saveTokenDebuffs(token, debuffs);
             }
         }
 
-        this.saveTokenBuffs(token, remainingBuffs);
         return processed;
     }
 
@@ -305,14 +338,15 @@ export class TokenBuffManager {
     }
 
     /**
-     * 倒先攻时，将被拉回排头的 Token 身上的 Buff 加回 1 轮
+     * 倒先攻时，将被拉回排头的 Token 身上的 Buff/Debuff 加回 1 轮
      */
     static incrementBuffsOnTurnRevert(tokenOrId) {
         const token = typeof tokenOrId === "string" ? Roll20Bridge.getTokenGraphic(tokenOrId) : tokenOrId;
         if (!token) return [];
 
         const buffs = this.getTokenBuffs(token);
-        if (buffs.length === 0) return [];
+        const debuffs = this.getTokenDebuffs(token);
+        if (buffs.length === 0 && debuffs.length === 0) return [];
 
         const processed = [];
         for (const buff of buffs) {
@@ -320,9 +354,23 @@ export class TokenBuffManager {
             buff.rounds = buff.rounds + 1;
             processed.push({ name: buff.name, status: "incremented", remaining: buff.rounds });
         }
+        if (buffs.length > 0) {
+            this.saveTokenBuffs(token, buffs);
+        }
 
-        this.saveTokenBuffs(token, buffs);
-        console.log(`[TokenBuffManager] 先攻回退: 为 Token [${token.get("name")}] 加回 Buff 轮数共 ${processed.length} 项`);
+        let debuffsModified = false;
+        for (const debuff of debuffs) {
+            if (!debuff.enabled) continue;
+            if (debuff.rounds === null || isNaN(debuff.rounds)) continue;
+            debuff.rounds = debuff.rounds + 1;
+            processed.push({ name: `[Debuff] ${debuff.name}`, status: "incremented", remaining: debuff.rounds });
+            debuffsModified = true;
+        }
+        if (debuffsModified) {
+            this.saveTokenDebuffs(token, debuffs);
+        }
+
+        console.log(`[TokenBuffManager] 先攻回退: 为 Token [${token.get("name")}] 加回 Buff/Debuff 轮数共 ${processed.length} 项`);
         return processed;
     }
 }

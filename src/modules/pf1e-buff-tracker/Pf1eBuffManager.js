@@ -75,9 +75,16 @@ export class Pf1eBuffManager {
                 id += PUSH_CHARS.charAt(Math.floor(Math.random() * 63));
             }
         }
-        // 核心工业级约束：无论由何种算法生成，坚决剔除下划线 _（替换为合法字母 a）并强制小写化，
-        // 绝对杜绝截断 Roll20 官方 repeating_buff2_([^_]+) 正则与 CSS/DOM 大小写敏感冲突
-        return id.replace(/_/g, "a").toLowerCase();
+        // 核心工业级约束：坚决剔除下划线 _（替换为合法字母 a），防止截断 Roll20 官方 repeating_buff2_([^_]+) 正则
+        id = id.replace(/_/g, "a");
+        // 规避 Roll20 Jumpgate 坏行检测判定：
+        // Jumpgate 规则：若 ID 以 '-' 开头且全为纯小写 (le.substring(0,1)==='-' && le.toLowerCase()===le)，
+        // 则会将其判定为坏死行并注入 'repitembroken' 样式类导致弹出红字报错。
+        // 因此必须保留天然大小写，且若首字符为 '-' 时确保包含大写字母。
+        if (id.startsWith("-") && id.toLowerCase() === id) {
+            id = id.substring(0, 1) + id.charAt(1).toUpperCase() + id.substring(2);
+        }
+        return id;
     }
 
     /**
@@ -313,21 +320,21 @@ export class Pf1eBuffManager {
         if (!character.attribs || !character.attribs.models) return;
 
         const allBuffs = await this.getAllBuffs(character);
-        let orderList = allBuffs.map(b => b.rowId.toLowerCase());
+        let orderList = allBuffs.map(b => b.rowId);
 
         const sId = sourceRowId.toLowerCase();
         const tId = targetRowId.toLowerCase();
 
         // 移除被拖拽项
-        orderList = orderList.filter(id => id !== sId);
+        orderList = orderList.filter(id => id.toLowerCase() !== sId);
 
         // 定位目标项并插入
-        const targetIdx = orderList.indexOf(tId);
+        const targetIdx = orderList.findIndex(id => id.toLowerCase() === tId);
         if (targetIdx === -1) {
-            orderList.push(sId);
+            orderList.push(sourceRowId);
         } else {
             const insertIdx = placeBefore ? targetIdx : targetIdx + 1;
-            orderList.splice(insertIdx, 0, sId);
+            orderList.splice(insertIdx, 0, sourceRowId);
         }
 
         const newOrderStr = orderList.join(",");
@@ -495,7 +502,7 @@ export class Pf1eBuffManager {
         character.attribs.create({ name: `${prefix}_tabcat`, current: "spell" }, { bySuite: true });
         character.attribs.create({ name: `${prefix}_tabcat2`, current: "1" }, { bySuite: true });
         character.attribs.create({ name: `${prefix}_description-show`, current: 1 }, { bySuite: true });
-        character.attribs.create({ name: `${prefix}_row_id`, current: rowId.toLowerCase() }, { bySuite: true });
+        character.attribs.create({ name: `${prefix}_row_id`, current: rowId }, { bySuite: true });
 
         // 保存初始预置轮数/公式
         if (initRounds !== null && initRounds !== undefined && initRounds !== "") {
@@ -534,9 +541,9 @@ export class Pf1eBuffManager {
             }, { bySuite: true });
         } else {
             const curVal = String(orderAttr.get("current") || "").trim();
-            const ids = curVal ? curVal.split(",").map(s => s.trim().toLowerCase()).filter(Boolean) : [];
-            if (!ids.includes(rowId.toLowerCase())) {
-                ids.push(rowId.toLowerCase());
+            const ids = curVal ? curVal.split(",").map(s => s.trim()).filter(Boolean) : [];
+            if (!ids.some(id => id.toLowerCase() === rowId.toLowerCase())) {
+                ids.push(rowId);
                 orderAttr.save({ current: ids.join(",") }, { bySuite: true });
             }
         }
@@ -560,7 +567,7 @@ export class Pf1eBuffManager {
         checkAndCreate("tabcat", "spell");
         checkAndCreate("tabcat2", "1");
         checkAndCreate("description-show", 1);
-        checkAndCreate("row_id", rowId.toLowerCase());
+        checkAndCreate("row_id", rowId);
     }
 
     /**
@@ -1131,6 +1138,17 @@ export class Pf1eBuffManager {
             if (toDestroy.length > 0) {
                 toDestroy.forEach(attr => attr.destroy());
                 console.log(`[Pf1eBuffManager] 已物理彻底销毁 ${character.get("name")} 的 Buff [${rowId}] 共 ${toDestroy.length} 项原生属性`);
+
+                // 同步从 _reporder_repeating_buff2 顺序列表中移除
+                const orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+                if (orderAttr && orderAttr.get("current")) {
+                    const curVal = String(orderAttr.get("current"));
+                    const filtered = curVal.split(",").filter(id => id.trim().toLowerCase() !== rowId.toLowerCase()).join(",");
+                    if (filtered !== curVal) {
+                        orderAttr.save({ current: filtered }, { bySuite: true });
+                    }
+                }
+
                 RecalcService.request(character, { reason: "delete_buff_permanently" });
             }
             return true;

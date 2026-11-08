@@ -2,6 +2,7 @@ import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
 import { RecalcService } from "../../core/RecalcService.js";
 import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
+import { Pf1eBuffUI } from "../pf1e-buff-tracker/Pf1eBuffUI.js";
 import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
 import { BuffPanelStyles } from "./BuffPanelStyles.js";
 import { BuffPanelTemplates } from "./BuffPanelTemplates.js";
@@ -419,10 +420,38 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 获取单位的人物头像 URL（优先使用棋子 Token 图标）
+     * 获取单位的有效头像 URL（直击 Jumpgate WebGL 渲染器加载源）
      */
     static getAvatarUrl(char, token) {
-        return token?.get("imgsrc") || char?.get("avatar") || "";
+        const tabletop = window.Campaign?.engine?.tabletop;
+        const ttObjs = tabletop?.tabletopObjects;
+
+        // 1. 第一优先级：直接从当前棋子的 Jumpgate WebGL 原生渲染器中提取已加载的真实 URL
+        if (token && ttObjs) {
+            const tokenId = token.id || token;
+            const ttObj = ttObjs.get(tokenId);
+            const rendererUrl = ttObj?.imageRenderer?.loadedUrl || ttObj?.imageRenderer?.url;
+            if (rendererUrl) return rendererUrl;
+        }
+
+        // 2. 第二优先级：若为常驻角色（无直接传入 token），检索当前地图代表该角色的棋子渲染器
+        if (char && ttObjs) {
+            const charId = char.id || char;
+            for (const [, obj] of ttObjs) {
+                if (obj.model?.get && obj.model.get("represents") === charId) {
+                    const rendererUrl = obj.imageRenderer?.loadedUrl || obj.imageRenderer?.url;
+                    if (rendererUrl) return rendererUrl;
+                }
+            }
+        }
+
+        // 3. 兜底回退：若当前地图完全无实体棋子，回退至数据模型原始字段
+        let raw = token?.get?.("imgsrc") || char?.get?.("avatar") || "";
+        if (raw) {
+            raw = raw.replace(/^https?:\/\/s3\.amazonaws\.com\/files\.d20\.io\//, "https://files.d20.io/");
+            if (raw.startsWith("//")) raw = "https:" + raw;
+        }
+        return raw;
     }
 
     /**
@@ -853,51 +882,23 @@ export class BuffFloatingPanel {
         // 视口顶部工具条（目标名、快速施加状态、一键全关、新建 Buff）
         const toolbar = document.createElement("div");
         toolbar.className = "r20-viewport-toolbar";
-        const conditionOptionsHtml = Pf1eBuffUI.PF1E_DEBUFF_DEFINITIONS.map(def => `<option value="${def.key}">${def.name}</option>`).join("");
 
         toolbar.innerHTML = `
             <div class="r20-toolbar-target-name">
                 <span>${Roll20Bridge.escapeHtml(name)}</span>
             </div>
-            <div style="display:flex; align-items:center; gap:4px;">
-                <select class="r20-select-quick-debuff" style="background:#1e293b; color:#fda4af; border:1px solid #475569; border-radius:3px; font-size:10px; padding:2px 2px; outline:none; cursor:pointer; width:auto; max-width:62px;" title="快速为该单位施加负面状态">
-                    <option value="">Debuff</option>
-                    ${conditionOptionsHtml}
-                </select>
-                <button class="r20-btn-icon btn-deactivate-all" title="一键取消激活该单位身上的所有 Buff 与状态" style="color:#ffb74d;">🚫 全关</button>
+            <div style="display:flex; align-items:center; gap:3px;">
+                <button class="r20-btn-debuff-trigger" title="选择并施加负面状态 (Debuff)">Debuff ▾</button>
+                <button class="r20-btn-icon btn-deactivate-all" title="一键取消激活该单位身上的所有 Buff 与状态" style="color:#f59e0b;">🚫 全关</button>
                 <button class="r20-btn-icon btn-add-buff-to-active" title="为此角色添加新 Buff">➕ Buff</button>
             </div>
         `;
 
-        // 快速施加状态下拉选单
-        toolbar.querySelector(".r20-select-quick-debuff")?.addEventListener("change", async (e) => {
-            const condKey = e.target.value;
-            if (!condKey) return;
-            const def = Pf1eBuffUI.PF1E_DEBUFF_DEFINITIONS.find(d => d.key === condKey);
-            const dName = def ? def.name : (e.target.options[e.target.selectedIndex]?.text || condKey);
-
-            if (char) {
-                // 1. 明确记录到人物卡的 tracked_debuffs 属性中
-                await Pf1eBuffManager.addTrackedDebuff(char, condKey);
-                // 2. 默认不开启 (enable = false), 预设 10 轮持续时间
-                await Pf1eBuffManager.toggleCondition(char, condKey, false, 0);
-                this.showNotice(`已为 [${name}] 添加状态 [${dName}] (0轮, 未激活)`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
-            } else if (token) {
-                // 明确记录到 Token 的 tracked_debuffs (<!--r20_debuffs:...-->) 属性中
-                TokenBuffManager.addTrackedDebuff(token, {
-                    key: condKey,
-                    name: dName,
-                    rounds: 0,
-                    initialRounds: 0,
-                    enabled: false
-                });
-                this.showNotice(`已为 [${name}] 添加状态 [${dName}] (0轮, 未激活)`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
-            }
-            e.target.value = "";
+        // 快速施加状态：多列网格浮层选择器
+        const debuffTriggerBtn = toolbar.querySelector(".r20-btn-debuff-trigger");
+        debuffTriggerBtn?.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this.showDebuffPopover(debuffTriggerBtn, this.activeTarget, () => this.renderViewport());
         });
 
         // 一键全关当前主体身上的所有 Buff 与 Debuff
@@ -931,18 +932,10 @@ export class BuffFloatingPanel {
         // 提前单次读取启停复选框设置，规避条目遍历内高频重复访问 localStorage 与 JSON.parse
         const showCheckbox = SuiteConfigStore.getSetting("buff_show_checkbox", false);
 
-        // 渲染专属负面状态 (Debuff / Condition) 区块 - 全面作为一等公民卡片
+        // 渲染专属负面状态 (Debuff / Condition) 区块
         if (debuffs.length > 0) {
-            const debuffSec = document.createElement("div");
-            debuffSec.className = "r20-debuff-section";
-            debuffSec.innerHTML = `
-                <div class="r20-debuff-header" style="display:flex; align-items:center; justify-content:space-between; margin:6px 0 4px 0; padding:2px 4px; border-bottom:1px solid rgba(244,63,94,0.25);">
-                    <span style="font-size:11px; font-weight:bold; color:#fda4af;">负面状态 Debuffs (${debuffs.length})</span>
-                    <span style="font-size:10px; color:#94a3b8;">支持右键、拖拽与影子链接</span>
-                </div>
-                <div class="r20-debuff-list" style="display:flex; flex-direction:column; gap:4px; margin-bottom:8px;"></div>
-            `;
-            const listEl = debuffSec.querySelector(".r20-debuff-list");
+            const listEl = document.createElement("div");
+            listEl.className = "r20-debuff-list";
             debuffs.forEach(d => {
                 const item = document.createElement("div");
                 const isEnabled = !!d.enabled;
@@ -1139,22 +1132,31 @@ export class BuffFloatingPanel {
                             else el.classList.remove("is-selected");
                         });
                     }
-                    this.showBuffContextMenu(e.clientX, e.clientY, d, char, Array.from(this.selectedBuffRowIds));
+                    this.showBuffContextMenu(e.clientX, e.clientY, d, char, Array.from(this.selectedBuffRowIds), token);
                 });
 
                 listEl.appendChild(item);
             });
-            fragment.appendChild(debuffSec);
+            fragment.appendChild(listEl);
+
+            // 若同时存在正面 Buff，简单以极细分割线隔开
+            if (buffs.length > 0) {
+                const divider = document.createElement("div");
+                divider.className = "r20-buff-divider";
+                fragment.appendChild(divider);
+            }
         }
 
         if (buffs.length === 0) {
-            const emptyEl = document.createElement("div");
-            emptyEl.className = "r20-empty-view";
-            emptyEl.innerHTML = debuffs.length > 0
-                ? `该单位当前无正面 Buff`
-                : `该单位当前无任何 Buff<br>从其他标签拖拽 Buff 放置即可施加`;
-            fragment.appendChild(emptyEl);
+            if (debuffs.length === 0) {
+                const emptyEl = document.createElement("div");
+                emptyEl.className = "r20-empty-view";
+                emptyEl.innerHTML = `该单位当前无任何 Buff<br>从其他标签拖拽 Buff 放置即可施加`;
+                fragment.appendChild(emptyEl);
+            }
         } else {
+            const buffListEl = document.createElement("div");
+            buffListEl.className = "r20-buff-list";
             buffs.forEach(b => {
                 const item = document.createElement("div");
                 const isEnabled = !!b.enabled;
@@ -1365,7 +1367,7 @@ export class BuffFloatingPanel {
                             else el.classList.remove("is-selected");
                         });
                     }
-                    this.showBuffContextMenu(e.clientX, e.clientY, b, char, Array.from(this.selectedBuffRowIds));
+                    this.showBuffContextMenu(e.clientX, e.clientY, b, char, Array.from(this.selectedBuffRowIds), token);
                 });
 
                 // 同一角色内部拖拽排序落点监听
@@ -1432,8 +1434,9 @@ export class BuffFloatingPanel {
                     });
                 });
 
-                fragment.appendChild(item);
+                buffListEl.appendChild(item);
             });
+            fragment.appendChild(buffListEl);
         }
 
         // 最终原子级一次性替换视口内容，彻底杜绝先清空后追加的竞态与视觉闪烁
@@ -1445,7 +1448,7 @@ export class BuffFloatingPanel {
     /**
      * 弹出 Buff 右键快捷菜单 (多选激活/多选关停/全选中同名关停/编辑/施加/同步)
      */
-    static showBuffContextMenu(x, y, buff, char, selectedRowIds = []) {
+    static showBuffContextMenu(x, y, buff, char, selectedRowIds = [], token = null) {
         document.querySelector(".r20-buff-context-menu")?.remove();
 
         const menu = document.createElement("div");
@@ -1515,6 +1518,13 @@ export class BuffFloatingPanel {
                 this.showNotice(`已激活 ${selIds.length} 个选中项`);
                 await Pf1eBuffUI.refreshAllBadges();
                 await this.renderViewport();
+            } else if (token) {
+                for (const rId of selIds) {
+                    TokenBuffManager.toggleDebuff(token, rId, true);
+                }
+                this.showNotice(`已激活 ${selIds.length} 个选中项`);
+                await Pf1eBuffUI.refreshAllBadges();
+                await this.renderViewport();
             }
         });
 
@@ -1528,6 +1538,13 @@ export class BuffFloatingPanel {
                     } else {
                         await Pf1eBuffManager.toggleBuff(char, rId, false);
                     }
+                }
+                this.showNotice(`已关停 ${selIds.length} 个选中项`);
+                await Pf1eBuffUI.refreshAllBadges();
+                await this.renderViewport();
+            } else if (token) {
+                for (const rId of selIds) {
+                    TokenBuffManager.toggleDebuff(token, rId, false);
                 }
                 this.showNotice(`已关停 ${selIds.length} 个选中项`);
                 await Pf1eBuffUI.refreshAllBadges();
@@ -1735,6 +1752,15 @@ export class BuffFloatingPanel {
                 this.showNotice(`已彻底解除/删除 ${delIds.length} 项`);
                 await Pf1eBuffUI.refreshAllBadges();
                 await this.renderViewport();
+            } else if (token) {
+                for (const rId of delIds) {
+                    TokenBuffManager.removeTrackedDebuff(token, rId);
+                    TokenBuffManager.removeBuff(token, rId);
+                    this.selectedBuffRowIds.delete(rId);
+                }
+                this.showNotice(`已彻底解除/删除 ${delIds.length} 项`);
+                await Pf1eBuffUI.refreshAllBadges();
+                await this.renderViewport();
             }
         });
 
@@ -1761,9 +1787,13 @@ export class BuffFloatingPanel {
                 if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
                 await this.renderViewport();
             } else if (targetToken) {
-                const list = TokenBuffManager.getTokenBuffs(targetToken);
-                list.push({ name: buff.name, rounds: buff.rounds, initialRounds: null, isDebuff: true });
-                TokenBuffManager.saveTokenBuffs(targetToken, list);
+                TokenBuffManager.addTrackedDebuff(targetToken, {
+                    key: condKey,
+                    name: buff.name,
+                    rounds: buff.rounds,
+                    initialRounds: null,
+                    enabled: true
+                });
                 this.showNotice(`已为 [${target.name}] 施加负面状态 [${buff.name}]`);
                 if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
                 await this.renderViewport();
@@ -2226,6 +2256,122 @@ export class BuffFloatingPanel {
                 height: this.panelEl.offsetHeight
             }));
         } catch (e) {}
+    }
+
+    /**
+     * 弹出 Roll20 原生风格多列负面状态 (Debuff) 网格选择面板 (Popover Grid)
+     */
+    static showDebuffPopover(triggerBtn, target, onApplied) {
+        const existing = document.querySelector(".r20-popover-grid-container");
+        if (existing) {
+            const wasSameTrigger = existing._triggerBtn === triggerBtn;
+            existing._cleanup?.();
+            existing.remove();
+            if (wasSameTrigger) return;
+        }
+
+        const char = target?.type === "char" ? (target.char || window.Campaign?.characters?.get(target.id)) : null;
+        const token = target?.type === "token"
+            ? (target.token || Roll20Bridge.getTokenGraphic(target.id))
+            : (target && typeof target.get === "function" ? target : null);
+        const name = target?.name || (char ? char.get("name") : (token ? token.get("name") : "当前单位"));
+
+        const popover = document.createElement("div");
+        popover.className = "r20-popover-grid-container";
+        popover._triggerBtn = triggerBtn;
+
+        const defs = Pf1eBuffUI.PF1E_DEBUFF_DEFINITIONS;
+        const itemsHtml = defs.map(d => `
+            <div class="r20-popover-grid-item" data-key="${d.key}" title="${Roll20Bridge.escapeHtml(d.name)}">
+                ${Roll20Bridge.escapeHtml(d.name)}
+            </div>
+        `).join("");
+
+        popover.innerHTML = `
+            <div class="r20-popover-grid-header">
+                <span>添加负面状态 (${defs.length})</span>
+                <button class="btn-close-popover" title="关闭">✕</button>
+            </div>
+            <div class="r20-popover-grid-body">
+                ${itemsHtml}
+            </div>
+        `;
+
+        document.body.appendChild(popover);
+
+        // 计算定位坐标，就近挂载在触发按钮下方
+        const rect = triggerBtn.getBoundingClientRect();
+        const popWidth = 310;
+        let left = rect.left;
+        if (left + popWidth > window.innerWidth - 10) {
+            left = Math.max(10, window.innerWidth - popWidth - 10);
+        }
+        let top = rect.bottom + 4;
+        const popHeight = Math.min(290, popover.offsetHeight || 260);
+        if (top + popHeight > window.innerHeight - 10) {
+            top = Math.max(10, rect.top - popHeight - 4);
+        }
+        popover.style.left = `${Math.round(left)}px`;
+        popover.style.top = `${Math.round(top)}px`;
+
+        triggerBtn.classList.add("active");
+
+        const closePopover = () => {
+            triggerBtn.classList.remove("active");
+            popover.remove();
+            document.removeEventListener("mousedown", onOutsideClick, true);
+            document.removeEventListener("keydown", onKeyDown, true);
+        };
+        popover._cleanup = closePopover;
+
+        const onOutsideClick = (e) => {
+            if (!popover.contains(e.target) && !triggerBtn.contains(e.target)) {
+                closePopover();
+            }
+        };
+
+        const onKeyDown = (e) => {
+            if (e.key === "Escape") {
+                closePopover();
+            }
+        };
+
+        document.addEventListener("mousedown", onOutsideClick, true);
+        document.addEventListener("keydown", onKeyDown, true);
+
+        popover.querySelector(".btn-close-popover")?.addEventListener("click", () => {
+            closePopover();
+        });
+
+        popover.querySelectorAll(".r20-popover-grid-item").forEach(itemEl => {
+            itemEl.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                const condKey = itemEl.dataset.key;
+                const def = defs.find(d => d.key === condKey);
+                const dName = def ? def.name : condKey;
+
+                closePopover();
+
+                if (char) {
+                    await Pf1eBuffManager.addTrackedDebuff(char, condKey);
+                    await Pf1eBuffManager.toggleCondition(char, condKey, false, 0);
+                    BuffFloatingPanel.showNotice(`已为 [${name}] 添加状态 [${dName}] (0轮, 未激活)`);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    if (onApplied) await onApplied();
+                } else if (token) {
+                    TokenBuffManager.addTrackedDebuff(token, {
+                        key: condKey,
+                        name: dName,
+                        rounds: 0,
+                        initialRounds: 0,
+                        enabled: false
+                    });
+                    BuffFloatingPanel.showNotice(`已为 [${name}] 添加状态 [${dName}] (0轮, 未激活)`);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    if (onApplied) await onApplied();
+                }
+            });
+        });
     }
 
     /**

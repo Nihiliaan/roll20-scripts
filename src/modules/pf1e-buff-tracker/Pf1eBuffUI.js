@@ -797,6 +797,15 @@ export class Pf1eBuffUI {
                 rowId: b.rowId || null,
                 isTokenOnly: true
             }));
+            activeDebuffs = TokenBuffManager.getTokenDebuffs(token)
+                .filter(d => !!d.enabled)
+                .map(d => ({
+                    name: d.name,
+                    key: d.key,
+                    rounds: d.rounds,
+                    rowId: d.rowId || d.key,
+                    isTokenOnly: true
+                }));
         }
 
         const isAbbr = !!SuiteConfigStore.getSetting("turnorder_buff_abbr", false);
@@ -859,16 +868,25 @@ export class Pf1eBuffUI {
                             }
 
                             try {
-                                const condKey = `${debuff.key}_rounds`;
-                                let attr = character.attribs.models.find(a => a.get("name") === condKey);
-                                if (newRounds !== null) {
-                                    if (attr) {
-                                        attr.save({ current: newRounds });
+                                if (character) {
+                                    const condKey = `${debuff.key}_rounds`;
+                                    let attr = character.attribs.models.find(a => a.get("name") === condKey);
+                                    if (newRounds !== null) {
+                                        if (attr) {
+                                            attr.save({ current: newRounds });
+                                        } else {
+                                            character.attribs.create({ name: condKey, current: newRounds, max: "" });
+                                        }
                                     } else {
-                                        character.attribs.create({ name: condKey, current: newRounds, max: "" });
+                                        if (attr) attr.destroy();
                                     }
-                                } else {
-                                    if (attr) attr.destroy();
+                                } else if (token) {
+                                    const list = TokenBuffManager.getTokenDebuffs(token);
+                                    const target = list.find(b => (b.key || b.name) === debuff.key);
+                                    if (target) {
+                                        target.rounds = newRounds;
+                                        TokenBuffManager.saveTokenDebuffs(token, list);
+                                    }
                                 }
                             } catch (err) {
                                 console.error("[Pf1eBuffUI] 保存 Debuff 轮数异常:", err);
@@ -887,7 +905,11 @@ export class Pf1eBuffUI {
                     e.preventDefault();
                     e.stopPropagation();
                     try {
-                        await Pf1eBuffManager.toggleCondition(character, debuff.key, false);
+                        if (character) {
+                            await Pf1eBuffManager.toggleCondition(character, debuff.key, false);
+                        } else if (token) {
+                            TokenBuffManager.toggleDebuff(token, debuff.key, false);
+                        }
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Debuff 异常:", err);
                     }

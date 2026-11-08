@@ -1,7 +1,7 @@
 /**
  * BuffPanelStyles.js
- * 现代化单栏多标签 Buff 调度器专用样式表
- * 包含：原生尺寸拖拽缩放 (resize: both)、左右标签栏、视口工具条、影子链接标识、头像徽章与右键菜单
+ * 贴近 Roll20 原生浅色白底灰框质感的专属样式表
+ * 包含：原生尺寸拖拽缩放、左右双栏标签、视口工具条、Debuff Popover 自适应流式标签云、Buff 自适应 Grid 多列排版、影子链接徽章与右键菜单
  */
 export class BuffPanelStyles {
     static STYLESHEET_ID = "r20-floating-panel-styles";
@@ -17,7 +17,9 @@ export class BuffPanelStyles {
 
     static getCss() {
         return `
-            /* 主悬浮窗与派生独立工作台容器（支持右下角自由缩放） */
+            /* ==========================================================================
+               主悬浮窗与派生独立工作台容器（Roll20 原生浅色卡片外观，支持右下角自由缩放）
+               ========================================================================== */
             #r20-buff-panel, .r20-detached-window {
                 position: fixed !important;
                 width: 360px;
@@ -29,29 +31,30 @@ export class BuffPanelStyles {
                 resize: both;
                 overflow: hidden;
                 z-index: 10000;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                color: #eceff1;
+                font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+                color: #333333;
                 user-select: none;
                 box-sizing: border-box;
                 display: flex !important;
                 flex-direction: column !important;
-                background: #1e262f !important;
-                border-radius: 8px;
-                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1);
+                background: #ffffff !important;
+                border: 1px solid #c7c7c7 !important;
+                border-radius: 4px;
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
             }
 
-            /* 标题栏（拖拽句柄） */
+            /* 标题栏（拖拽句柄，Roll20 浅灰底） */
             .r20-panel-header {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 6px 10px;
-                background: #141b22;
-                border-bottom: 1px solid #2d3846;
+                padding: 5px 8px;
+                background: #f2f2f2;
+                border-bottom: 1px solid #dcdcdc;
                 cursor: grab;
                 box-sizing: border-box;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
                 flex-shrink: 0;
             }
             .r20-panel-header:active {
@@ -64,7 +67,7 @@ export class BuffPanelStyles {
                 gap: 6px;
                 font-size: 12px;
                 font-weight: 600;
-                color: #64b5f6;
+                color: #333333;
             }
 
             .r20-panel-controls {
@@ -73,29 +76,34 @@ export class BuffPanelStyles {
                 gap: 3px;
             }
 
-            .r20-btn-icon {
-                background: transparent;
-                border: none;
-                color: #90a4ae;
+            /* Roll20 原生小按钮基底 */
+            .r20-btn-icon, .r20-btn {
+                background: #ffffff !important;
+                border: 1px solid #d0d0d0 !important;
+                color: #444444 !important;
                 cursor: pointer;
-                padding: 2px 5px;
-                border-radius: 4px;
-                font-size: 12px;
-                line-height: 1;
-                transition: all 0.15s ease;
+                padding: 2px 6px !important;
+                border-radius: 3px !important;
+                font-size: 11px !important;
+                line-height: 1.2 !important;
+                font-family: inherit !important;
+                transition: background 0.1s, border-color 0.1s, color 0.1s;
+                box-sizing: border-box !important;
             }
-            .r20-btn-icon:hover {
-                background: rgba(255, 255, 255, 0.08);
-                color: #fff;
+            .r20-btn-icon:hover, .r20-btn:hover {
+                background: #f5f5f5 !important;
+                border-color: #b5b5b5 !important;
+                color: #111111 !important;
             }
             .r20-btn-icon.pinned {
-                color: #ffd54f !important;
-                background: rgba(255, 213, 79, 0.18) !important;
+                color: #b45309 !important;
+                background: #fef3c7 !important;
+                border-color: #fcd34d !important;
             }
 
             /* 抽屉式内容折叠容器 */
             .r20-panel-content-drawer {
-                background: #1e262f;
+                background: #ffffff;
                 box-sizing: border-box;
                 display: flex;
                 flex-direction: column;
@@ -104,15 +112,17 @@ export class BuffPanelStyles {
                 overflow: hidden;
             }
 
-            /* 浏览器式顶部标签栏 */
+            /* ==========================================================================
+               顶部选项卡栏（Roll20 风格浅灰标签槽）
+               ========================================================================== */
             .r20-tab-strip {
                 display: flex !important;
                 flex-direction: row !important;
                 align-items: center !important;
                 justify-content: space-between !important;
-                background: #0d1217 !important;
+                background: #ebebeb !important;
                 padding: 4px 6px 0 6px !important;
-                border-bottom: 1px solid #2d3846 !important;
+                border-bottom: 1px solid #dcdcdc !important;
                 overflow-x: auto !important;
                 scrollbar-width: none !important;
                 gap: 6px !important;
@@ -124,7 +134,7 @@ export class BuffPanelStyles {
                 display: none !important;
             }
 
-            /* 靠左动态选区标签容器（支持横向滚动，极细滚动条） */
+            /* 靠左动态选区标签容器 */
             .r20-tabs-dynamic {
                 display: flex !important;
                 flex-direction: row !important;
@@ -135,7 +145,7 @@ export class BuffPanelStyles {
                 overflow-x: auto !important;
                 overflow-y: hidden !important;
                 scrollbar-width: thin !important;
-                scrollbar-color: #37474f transparent !important;
+                scrollbar-color: #cccccc transparent !important;
                 padding-bottom: 2px !important;
             }
             .r20-tabs-dynamic::-webkit-scrollbar {
@@ -146,14 +156,14 @@ export class BuffPanelStyles {
                 background: transparent !important;
             }
             .r20-tabs-dynamic::-webkit-scrollbar-thumb {
-                background: #37474f !important;
-                border-radius: 3px !important;
+                background: #cccccc !important;
+                border-radius: 2px !important;
             }
             .r20-tabs-dynamic::-webkit-scrollbar-thumb:hover {
-                background: #607d8b !important;
+                background: #aaaaaa !important;
             }
 
-            /* 靠右固定角色标签容器（自适应最小宽度，支持溢出滚动） */
+            /* 靠右固定常驻角色标签容器 */
             .r20-tabs-pinned {
                 display: flex !important;
                 flex-direction: row !important;
@@ -166,10 +176,10 @@ export class BuffPanelStyles {
                 overflow-x: auto !important;
                 overflow-y: hidden !important;
                 scrollbar-width: thin !important;
-                scrollbar-color: #37474f transparent !important;
+                scrollbar-color: #cccccc transparent !important;
                 padding: 0 0 2px 4px !important;
                 margin: 0 !important;
-                border-left: 1px solid #263238 !important;
+                border-left: 1px solid #d5d5d5 !important;
                 box-sizing: border-box !important;
             }
             .r20-tabs-pinned::-webkit-scrollbar {
@@ -180,78 +190,73 @@ export class BuffPanelStyles {
                 background: transparent !important;
             }
             .r20-tabs-pinned::-webkit-scrollbar-thumb {
-                background: #37474f !important;
-                border-radius: 3px !important;
+                background: #cccccc !important;
+                border-radius: 2px !important;
             }
             .r20-tabs-pinned::-webkit-scrollbar-thumb:hover {
-                background: #607d8b !important;
+                background: #aaaaaa !important;
             }
-            /* 钉选区域空态占位 */
             .r20-tabs-pinned:empty {
                 min-width: 24px !important;
-                height: 38px !important;
-                border: 1px dashed rgba(55, 71, 79, 0.6) !important;
-                border-radius: 4px !important;
+                height: 36px !important;
+                border: 1px dashed rgba(0, 0, 0, 0.2) !important;
+                border-radius: 3px !important;
                 margin-left: 3px !important;
                 display: inline-flex !important;
                 align-items: center !important;
                 justify-content: center !important;
-                opacity: 0.5 !important;
-                transition: all 0.2s ease !important;
+                opacity: 0.6 !important;
+                transition: all 0.15s ease !important;
             }
             .r20-tabs-pinned:empty::after {
                 content: "📌" !important;
                 font-size: 11px !important;
-                opacity: 0.4 !important;
+                opacity: 0.5 !important;
                 pointer-events: none !important;
             }
             .r20-tabs-pinned:empty:hover,
             .r20-tabs-pinned.r20-pin-zone-hover {
                 opacity: 1 !important;
-                background: rgba(33, 150, 243, 0.15) !important;
-                border-color: #2196f3 !important;
+                background: #e0f2fe !important;
+                border-color: #0284c7 !important;
             }
 
-            /* 单个选项卡（方形人物图标设计，尺寸大，手感舒适） */
+            /* 单个选项卡（方形棋子头像设计，微圆角 3px） */
             .r20-tab {
                 display: inline-flex !important;
                 align-items: center !important;
                 justify-content: center !important;
-                width: 38px !important;
-                height: 38px !important;
-                min-width: 38px !important;
-                min-height: 38px !important;
+                width: 36px !important;
+                height: 36px !important;
+                min-width: 36px !important;
+                min-height: 36px !important;
                 padding: 2px !important;
-                background: #171f28 !important;
-                border-radius: 6px !important;
+                background: #f9f9f9 !important;
+                border-radius: 3px !important;
                 cursor: pointer !important;
-                border: 1px solid #2d3846 !important;
-                transition: all 0.15s ease !important;
+                border: 1px solid #d0d0d0 !important;
+                transition: background 0.1s, border-color 0.1s !important;
                 position: relative !important;
                 box-sizing: border-box !important;
                 flex-shrink: 0 !important;
             }
             .r20-tab:hover {
-                background: #202b37 !important;
-                border-color: #455a64 !important;
-                transform: translateY(-1px);
+                background: #ffffff !important;
+                border-color: #b0b0b0 !important;
             }
             .r20-tab.active {
-                background: #1e3a5f !important;
-                border-color: #38bdf8 !important;
-                box-shadow: 0 0 8px rgba(56, 189, 248, 0.45) !important;
+                background: #ffffff !important;
+                border-color: #2563eb !important;
+                border-width: 2px !important;
+                padding: 1px !important;
                 z-index: 2 !important;
             }
-            /* 画布选中单位在常驻固定标签上的选中高亮态 */
             .r20-tab.selected-highlight {
-                box-shadow: 0 0 0 2px #38bdf8, 0 0 10px rgba(56, 189, 248, 0.4) !important;
-                border-color: #38bdf8 !important;
+                border-color: #2563eb !important;
             }
             .r20-tab.active.selected-highlight {
-                box-shadow: 0 0 0 2px #0284c7, 0 0 12px rgba(2, 132, 199, 0.6) !important;
-                background: #1c3653 !important;
+                border-color: #1d4ed8 !important;
             }
-            /* 头像容器与图片 */
             .r20-tab-avatar-box {
                 width: 100% !important;
                 height: 100% !important;
@@ -259,7 +264,7 @@ export class BuffPanelStyles {
                 align-items: center !important;
                 justify-content: center !important;
                 overflow: hidden !important;
-                border-radius: 4px !important;
+                border-radius: 2px !important;
                 pointer-events: none !important;
             }
             .r20-tab-avatar {
@@ -267,7 +272,7 @@ export class BuffPanelStyles {
                 height: 100% !important;
                 object-fit: cover !important;
                 display: block !important;
-                border-radius: 4px !important;
+                border-radius: 2px !important;
             }
             .r20-tab-avatar-fallback {
                 width: 100% !important;
@@ -275,30 +280,29 @@ export class BuffPanelStyles {
                 display: flex !important;
                 align-items: center !important;
                 justify-content: center !important;
-                background: linear-gradient(135deg, #263238 0%, #37474f 100%) !important;
-                color: #eceff1 !important;
-                font-size: 15px !important;
+                background: #e2e8f0 !important;
+                color: #475569 !important;
+                font-size: 14px !important;
                 font-weight: 700 !important;
-                border-radius: 4px !important;
+                border-radius: 2px !important;
             }
-            /* 悬停或常驻小叉号 / 钉选小图钉 */
             .r20-tab-close,
             .r20-tab-pin {
                 position: absolute !important;
-                top: -5px !important;
-                right: -5px !important;
-                width: 15px !important;
-                height: 15px !important;
+                top: -4px !important;
+                right: -4px !important;
+                width: 14px !important;
+                height: 14px !important;
                 border-radius: 50% !important;
-                background: #37474f !important;
-                color: #eceff1 !important;
+                background: #94a3b8 !important;
+                color: #ffffff !important;
                 font-size: 9px !important;
-                line-height: 15px !important;
+                line-height: 14px !important;
                 text-align: center !important;
                 display: none !important;
                 align-items: center !important;
                 justify-content: center !important;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.6) !important;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.3) !important;
                 z-index: 5 !important;
                 cursor: pointer !important;
                 user-select: none !important;
@@ -308,440 +312,545 @@ export class BuffPanelStyles {
                 display: flex !important;
             }
             .r20-tab-close:hover {
-                background: #ef5350 !important;
-                color: #fff !important;
+                background: #ef4444 !important;
             }
             .r20-tab-pin:hover {
-                background: #1976d2 !important;
-                color: #fff !important;
+                background: #2563eb !important;
             }
-
-            /* 拖拽悬停高亮 */
             .r20-tab.r20-tab-drag-hover {
-                background: #1565c0 !important;
-                color: #fff !important;
-                outline: 2px dashed #42a5f5;
-            }
-            .r20-tabs-pinned.r20-pin-zone-hover {
-                background: rgba(33, 150, 243, 0.15);
-                outline: 1px dashed #2196f3;
-                border-radius: 4px;
+                background: #eff6ff !important;
+                outline: 2px dashed #3b82f6;
             }
 
-            /* 单栏内容视口区 */
+            /* ==========================================================================
+               视口区与顶部操作条
+               ========================================================================== */
             .r20-tab-viewport {
                 flex: 1 1 auto;
                 min-height: 0;
-                padding: 8px 10px;
+                padding: 6px 8px;
                 overflow-y: auto;
                 box-sizing: border-box;
+                background: #ffffff;
             }
 
-            /* 视口顶部操作条（当前角色概要 + 快捷操作，紧凑自适应最小高度） */
             .r20-viewport-toolbar {
                 display: flex !important;
                 align-items: center !important;
                 justify-content: space-between !important;
-                padding: 2px 0 !important;
-                margin-bottom: 4px !important;
-                border-bottom: 1px solid #2d3846 !important;
+                padding: 3px 0 5px 0 !important;
+                margin-bottom: 5px !important;
+                border-bottom: 1px solid #e5e5e5 !important;
                 font-size: 11px !important;
-                color: #90a4ae !important;
+                color: #666666 !important;
                 flex-shrink: 0 !important;
-                min-height: 0 !important;
-                height: auto !important;
                 box-sizing: border-box !important;
             }
             .r20-toolbar-target-name {
                 display: flex !important;
                 align-items: center !important;
                 font-weight: 600 !important;
-                color: #eceff1 !important;
-                max-width: 170px !important;
+                color: #333333 !important;
+                max-width: 160px !important;
                 white-space: nowrap !important;
                 overflow: hidden !important;
                 text-overflow: ellipsis !important;
-                line-height: 1 !important;
-                font-size: 11px !important;
-                margin: 0 !important;
-                padding: 0 !important;
+                line-height: 1.2 !important;
+                font-size: 12px !important;
             }
-            .r20-select-quick-debuff {
-                background: #1e293b !important;
-                color: #fda4af !important;
-                border: 1px solid #475569 !important;
+
+            /* Debuff 下拉触发按钮（Roll20 浅色粉红风格） */
+            .r20-btn-debuff-trigger {
+                background: #fff1f2 !important;
+                border: 1px solid #fecdd3 !important;
+                color: #e11d48 !important;
+                font-size: 11px !important;
+                height: 22px !important;
+                line-height: 20px !important;
+                padding: 0 6px !important;
                 border-radius: 3px !important;
-                font-size: 10px !important;
-                padding: 0 4px !important;
-                margin: 0 !important;
-                height: 20px !important;
-                min-height: 20px !important;
-                max-height: 20px !important;
-                line-height: 18px !important;
-                outline: none !important;
                 cursor: pointer !important;
-                width: auto !important;
-                max-width: 62px !important;
-                vertical-align: middle !important;
-                display: inline-block !important;
+                box-sizing: border-box !important;
+                transition: background 0.1s, border-color 0.1s !important;
+            }
+            .r20-btn-debuff-trigger:hover,
+            .r20-btn-debuff-trigger.active {
+                background: #ffe4e6 !important;
+                border-color: #fb7185 !important;
+                color: #be123c !important;
+            }
+
+            /* ==========================================================================
+               Debuff Popover Grid（流式标签云网格，Roll20 浅色白底风格）
+               ========================================================================== */
+            .r20-popover-grid-container {
+                position: fixed !important;
+                z-index: 10060 !important;
+                width: 310px !important;
+                max-width: 90vw !important;
+                max-height: 280px !important;
+                background: #ffffff !important;
+                border: 1px solid #cccccc !important;
+                border-radius: 4px !important;
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18) !important;
+                display: flex !important;
+                flex-direction: column !important;
+                overflow: hidden !important;
+                font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif !important;
                 box-sizing: border-box !important;
             }
-            .r20-viewport-toolbar .r20-btn-icon {
-                margin: 0 !important;
-                height: 20px !important;
-                min-height: 20px !important;
-                line-height: 18px !important;
-                padding: 0 5px !important;
-                font-size: 10px !important;
+            .r20-popover-grid-header {
+                display: flex !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                padding: 5px 8px !important;
+                background: #f8fafc !important;
+                border-bottom: 1px solid #e2e8f0 !important;
+                font-size: 11px !important;
+                font-weight: 600 !important;
+                color: #be123c !important;
+                flex-shrink: 0 !important;
+            }
+            .r20-popover-grid-header .btn-close-popover {
+                background: transparent !important;
+                border: none !important;
+                color: #888888 !important;
+                cursor: pointer !important;
+                font-size: 12px !important;
+                padding: 0 4px !important;
+            }
+            .r20-popover-grid-header .btn-close-popover:hover {
+                color: #111111 !important;
+            }
+            .r20-popover-grid-body {
+                display: flex !important;
+                flex-wrap: wrap !important;
+                gap: 3px 4px !important;
+                padding: 6px !important;
+                overflow-y: auto !important;
+                max-height: 220px !important;
+                box-sizing: border-box !important;
+                scrollbar-width: thin !important;
+                scrollbar-color: #cccccc transparent !important;
+            }
+            .r20-popover-grid-body::-webkit-scrollbar {
+                width: 4px !important;
+            }
+            .r20-popover-grid-body::-webkit-scrollbar-thumb {
+                background: #cccccc !important;
+                border-radius: 2px !important;
+            }
+            .r20-popover-grid-item {
                 display: inline-flex !important;
                 align-items: center !important;
                 justify-content: center !important;
+                width: auto !important;
+                flex: 0 0 auto !important;
+                background: #fff1f2 !important;
+                border: 1px solid #fecdd3 !important;
+                color: #be123c !important;
+                font-size: 11px !important;
+                line-height: 16px !important;
+                padding: 2px 6px !important;
+                border-radius: 2px !important;
+                cursor: pointer !important;
+                user-select: none !important;
+                white-space: nowrap !important;
+                transition: background 0.1s, border-color 0.1s, color 0.1s !important;
+                box-sizing: border-box !important;
+            }
+            .r20-popover-grid-item:hover {
+                background: #f43f5e !important;
+                border-color: #e11d48 !important;
+                color: #ffffff !important;
+            }
+
+            /* ==========================================================================
+               Buff / Debuff 自适应响应式网格 (Auto-Fit CSS Grid)
+               狭窄单列，拉宽自适应双列或三列
+               ========================================================================== */
+            .r20-buff-list,
+            .r20-debuff-list {
+                display: grid !important;
+                grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)) !important;
+                gap: 3px !important;
+                width: 100% !important;
                 box-sizing: border-box !important;
             }
 
-            /* Buff 列表项 */
+            /* Buff 与负面状态之间的极简分割线（无大标题） */
+            .r20-buff-divider {
+                height: 1px !important;
+                background: #e5e5e5 !important;
+                margin: 5px 0 !important;
+                flex-shrink: 0 !important;
+                width: 100% !important;
+            }
+
+            /* 单个 Buff/Debuff 条目卡片（紧凑高 26px，微圆角 3px，Roll20 原生浅色风格） */
             .r20-buff-item {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 6px 10px;
-                margin-bottom: 4px;
-                border-radius: 4px;
-                transition: background 0.12s ease, outline 0.12s ease, box-shadow 0.12s ease;
-                cursor: pointer;
-                user-select: none;
-                position: relative;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                padding: 3px 6px !important;
+                border-radius: 3px !important;
+                min-height: 26px !important;
+                box-sizing: border-box !important;
+                cursor: pointer !important;
+                user-select: none !important;
+                position: relative !important;
+                transition: background 0.1s, border-color 0.1s !important;
+                border: 1px solid transparent !important;
             }
 
-            /* 内部高亮：激活状态 */
-            .r20-buff-item.is-active {
-                background: #1e3a8a !important;
-                border-left: 3px solid #60a5fa !important;
-                box-shadow: inset 0 0 12px rgba(59, 130, 246, 0.25) !important;
-            }
-            .r20-buff-item.is-active:hover {
-                background: #2563eb !important;
-            }
-            .r20-buff-item.is-active .r20-buff-name {
-                color: #ffffff !important;
-                font-weight: 600;
-            }
-            .r20-buff-item.is-active .r20-buff-rounds {
-                color: #93c5fd !important;
-            }
-
-            /* Debuff 专属警示红底高亮：激活状态 */
-            .r20-buff-item.is-debuff.is-active {
-                background: #881337 !important;
-                border-left: 3px solid #f43f5e !important;
-                box-shadow: inset 0 0 12px rgba(244, 63, 94, 0.25) !important;
-            }
-            .r20-buff-item.is-debuff.is-active:hover {
-                background: #9f1239 !important;
-            }
-            .r20-buff-item.is-debuff.is-active .r20-buff-name {
-                color: #ffe4e6 !important;
-                font-weight: 600;
-            }
-            .r20-buff-item.is-debuff.is-active .r20-buff-rounds {
-                color: #fca5a5 !important;
-            }
-
-            /* 未激活状态：暗底静默 */
+            /* 未激活状态：柔和浅灰底 */
             .r20-buff-item.is-inactive {
-                background: #1e293b !important;
-                border-left: 3px solid #475569 !important;
-                opacity: 0.75;
+                background: #f8fafc !important;
+                border: 1px solid #e2e8f0 !important;
+                border-left: 3px solid #94a3b8 !important;
+                opacity: 0.85 !important;
             }
             .r20-buff-item.is-inactive:hover {
-                background: #334155 !important;
-                opacity: 1;
+                background: #f1f5f9 !important;
+                opacity: 1 !important;
             }
             .r20-buff-item.is-inactive .r20-buff-name {
-                color: #cbd5e1 !important;
+                color: #475569 !important;
             }
             .r20-buff-item.is-inactive .r20-buff-rounds {
                 color: #64748b !important;
             }
 
-            /* 外框高亮：选中状态 (可与激活/未激活叠加) */
-            .r20-buff-item.is-selected {
-                outline: 2px solid #38bdf8 !important;
-                outline-offset: -1px !important;
-                box-shadow: 0 0 8px rgba(56, 189, 248, 0.6) !important;
-                z-index: 2;
+            /* 激活状态：正面 Buff（清爽淡蓝底 + 鲜明蓝字） */
+            .r20-buff-item.is-active {
+                background: #eff6ff !important;
+                border: 1px solid #bfdbfe !important;
+                border-left: 3px solid #2563eb !important;
+            }
+            .r20-buff-item.is-active:hover {
+                background: #dbeafe !important;
+            }
+            .r20-buff-item.is-active .r20-buff-name {
+                color: #1e3a8a !important;
+                font-weight: 500 !important;
+            }
+            .r20-buff-item.is-active .r20-buff-rounds {
+                color: #1d4ed8 !important;
             }
 
-            /* 拖拽排序落点指示线 */
+            /* 激活状态：负面 Debuff（柔和淡粉底 + 警示红字） */
+            .r20-buff-item.is-debuff.is-active {
+                background: #fef2f2 !important;
+                border: 1px solid #fecaca !important;
+                border-left: 3px solid #ef4444 !important;
+            }
+            .r20-buff-item.is-debuff.is-active:hover {
+                background: #fee2e2 !important;
+            }
+            .r20-buff-item.is-debuff.is-active .r20-buff-name {
+                color: #991b1b !important;
+                font-weight: 500 !important;
+            }
+            .r20-buff-item.is-debuff.is-active .r20-buff-rounds {
+                color: #b91c1c !important;
+            }
+
+            /* 选中状态：干净利落的聚焦蓝框 */
+            .r20-buff-item.is-selected {
+                outline: 1px solid #2563eb !important;
+                outline-offset: -1px !important;
+                z-index: 2 !important;
+            }
+
+            /* 拖拽排序指示线 */
             .r20-buff-item.r20-drag-insert-before {
-                border-top: 2px solid #38bdf8 !important;
+                border-top: 2px solid #2563eb !important;
             }
             .r20-buff-item.r20-drag-insert-after {
-                border-bottom: 2px solid #38bdf8 !important;
+                border-bottom: 2px solid #2563eb !important;
             }
 
             .r20-buff-left {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                flex: 1 1 auto;
-                min-width: 0;
+                display: flex !important;
+                align-items: center !important;
+                gap: 4px !important;
+                flex: 1 1 auto !important;
+                min-width: 0 !important;
             }
             .r20-buff-name {
-                font-size: 12px;
-                font-weight: 500;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
+                font-size: 11px !important;
+                font-weight: 500 !important;
+                white-space: nowrap !important;
+                overflow: hidden !important;
+                text-overflow: ellipsis !important;
+                flex: 1 1 auto !important;
+                min-width: 0 !important;
             }
+
+            /* 轮数徽章 */
             .r20-buff-rounds {
-                display: inline-flex;
-                align-items: center;
-                gap: 1px;
-                font-size: 10px;
-                color: #90caf9;
-                white-space: nowrap;
-                padding: 1px 4px;
-                background: rgba(144, 202, 249, 0.12);
-                border-radius: 3px;
-                flex-shrink: 0;
-                user-select: none;
-            }
-            .r20-buff-round-num {
-                cursor: pointer;
-                padding: 0 2px;
-                border-radius: 2px;
-                transition: background 0.12s ease, color 0.12s ease;
-            }
-            .r20-buff-round-num:hover {
-                background: rgba(56, 189, 248, 0.25);
-                color: #38bdf8 !important;
-                text-decoration: underline;
-            }
-            .r20-buff-round-sep {
-                opacity: 0.6;
-                padding: 0 1px;
-            }
-            .r20-input-round-inline {
-                width: 38px;
-                min-width: 28px;
-                max-width: 65px;
-                height: 16px;
-                line-height: 16px;
-                padding: 0 2px;
-                font-size: 10px;
-                font-family: inherit;
-                text-align: center;
-                border: 1px solid #38bdf8;
-                background: #0f172a;
-                color: #f8fafc;
-                border-radius: 2px;
-                outline: none;
-                box-shadow: 0 0 5px rgba(56, 189, 248, 0.5);
-                box-sizing: border-box;
-            }
-            .r20-buff-toggle {
-                margin: 0 4px 0 0;
-                cursor: pointer;
-                width: 14px;
-                height: 14px;
-                flex-shrink: 0;
-                accent-color: #38bdf8;
-            }
-            .r20-selection-marquee {
-                position: fixed;
-                border: 1px solid #38bdf8;
-                background: rgba(56, 189, 248, 0.18);
-                pointer-events: none;
-                z-index: 999999;
-                border-radius: 2px;
-                box-shadow: 0 0 6px rgba(56, 189, 248, 0.4);
-            }
-
-            /* 链接标识 (🔗 + Token 头像) */
-            .r20-buff-link-badge {
-                display: inline-flex;
-                align-items: center;
-                gap: 3px;
-                font-size: 10px;
-                color: #81d4fa;
-                cursor: pointer;
-                background: rgba(2, 136, 209, 0.15);
-                padding: 1px 4px;
-                border-radius: 3px;
-                margin-left: 4px;
-                flex-shrink: 0;
-            }
-            .r20-buff-link-badge:hover {
-                background: rgba(2, 136, 209, 0.35);
-                color: #e1f5fe;
-            }
-            .r20-buff-host-avatar {
-                width: 14px;
-                height: 14px;
-                border-radius: 50%;
-                object-fit: cover;
-                vertical-align: middle;
-            }
-
-            /* 负面状态 (Debuff / Condition) 胶囊徽章 */
-            .r20-buff-pill-debuff {
                 display: inline-flex !important;
                 align-items: center !important;
-                background: #881337 !important;
-                border: 1px solid #f43f5e !important;
-                color: #ffe4e6 !important;
-                font-size: 11px !important;
-                font-weight: 600 !important;
-                padding: 2px 7px !important;
-                border-radius: 4px !important;
-                cursor: pointer !important;
-                user-select: none !important;
+                gap: 1px !important;
+                font-size: 10px !important;
+                color: #2563eb !important;
                 white-space: nowrap !important;
-                transition: background 0.15s, border-color 0.15s !important;
+                padding: 1px 4px !important;
+                background: rgba(37, 99, 235, 0.08) !important;
+                border-radius: 2px !important;
+                flex-shrink: 0 !important;
+                user-select: none !important;
             }
-            .r20-buff-pill-debuff:hover {
-                background: #be123c !important;
-                border-color: #fda4af !important;
-                color: #ffffff !important;
+            .r20-buff-round-num {
+                cursor: pointer !important;
+                padding: 0 1px !important;
+                border-radius: 2px !important;
+            }
+            .r20-buff-round-num:hover {
+                background: rgba(37, 99, 235, 0.15) !important;
+                color: #1d4ed8 !important;
+                text-decoration: underline !important;
+            }
+            .r20-buff-round-sep {
+                opacity: 0.5 !important;
+                padding: 0 1px !important;
             }
 
-            /* 右键上下文菜单 */
+            /* 就地轮数输入框 */
+            .r20-input-round-inline {
+                width: 36px !important;
+                min-width: 28px !important;
+                max-width: 60px !important;
+                height: 16px !important;
+                line-height: 16px !important;
+                padding: 0 2px !important;
+                font-size: 10px !important;
+                font-family: inherit !important;
+                text-align: center !important;
+                border: 1px solid #2563eb !important;
+                background: #ffffff !important;
+                color: #1e3a8a !important;
+                border-radius: 2px !important;
+                outline: none !important;
+                box-sizing: border-box !important;
+            }
+            .r20-buff-toggle {
+                margin: 0 3px 0 0 !important;
+                cursor: pointer !important;
+                width: 13px !important;
+                height: 13px !important;
+                flex-shrink: 0 !important;
+                accent-color: #2563eb !important;
+            }
+
+            /* 框选矩形 (Marquee Selection) */
+            .r20-selection-marquee {
+                position: fixed !important;
+                border: 1px solid #2563eb !important;
+                background: rgba(37, 99, 235, 0.12) !important;
+                pointer-events: none !important;
+                z-index: 999999 !important;
+                border-radius: 2px !important;
+            }
+
+            /* 影子链接徽章 (🔗 + 头像) */
+            .r20-buff-link-badge {
+                display: inline-flex !important;
+                align-items: center !important;
+                gap: 2px !important;
+                font-size: 10px !important;
+                color: #2563eb !important;
+                cursor: pointer !important;
+                background: rgba(37, 99, 235, 0.08) !important;
+                padding: 1px 3px !important;
+                border-radius: 2px !important;
+                flex-shrink: 0 !important;
+            }
+            .r20-buff-link-badge:hover {
+                background: rgba(37, 99, 235, 0.2) !important;
+                color: #1d4ed8 !important;
+            }
+            .r20-buff-host-avatar {
+                width: 13px !important;
+                height: 13px !important;
+                border-radius: 50% !important;
+                object-fit: cover !important;
+                vertical-align: middle !important;
+            }
+
+            /* ==========================================================================
+               右键菜单与对话框模态层（Roll20 浅色原生弹窗风格）
+               ========================================================================== */
             .r20-context-menu {
-                position: fixed;
-                z-index: 10050;
-                background: #1a232c;
-                border: 1px solid #37474f;
-                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
-                border-radius: 6px;
-                padding: 4px 0;
-                min-width: 150px;
-                font-size: 12px;
-                color: #cfd8dc;
+                position: fixed !important;
+                z-index: 10050 !important;
+                background: #ffffff !important;
+                border: 1px solid #cccccc !important;
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
+                border-radius: 4px !important;
+                padding: 4px 0 !important;
+                min-width: 140px !important;
+                font-size: 11px !important;
+                color: #333333 !important;
+                font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif !important;
             }
             .r20-context-menu-item {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 6px 14px;
-                cursor: pointer;
-                transition: background 0.1s;
+                display: flex !important;
+                align-items: center !important;
+                gap: 6px !important;
+                padding: 5px 12px !important;
+                cursor: pointer !important;
+                transition: background 0.1s !important;
             }
             .r20-context-menu-item:hover {
-                background: #263238;
-                color: #90caf9;
+                background: #f1f5f9 !important;
+                color: #2563eb !important;
             }
             .r20-context-menu-divider {
-                height: 1px;
-                background: #2d3846;
-                margin: 4px 0;
+                height: 1px !important;
+                background: #e5e5e5 !important;
+                margin: 3px 0 !important;
             }
 
-            /* 空状态占位 */
+            /* 空状态提示 */
             .r20-empty-view {
-                text-align: center;
-                padding: 30px 15px;
-                color: #78909c;
-                font-size: 11px;
-                line-height: 1.6;
+                text-align: center !important;
+                padding: 24px 12px !important;
+                color: #888888 !important;
+                font-size: 11px !important;
+                line-height: 1.5 !important;
             }
 
-            /* 提示 Toast */
+            /* Toast 提示 */
             .r20-suite-toast {
-                position: fixed;
-                bottom: 24px;
-                left: 50%;
-                transform: translateX(-50%);
-                background: rgba(20, 27, 34, 0.95);
-                color: #fff;
-                padding: 6px 14px;
-                border-radius: 6px;
-                font-size: 12px;
-                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-                z-index: 10200;
-                border-left: 3px solid #29b6f6;
-                pointer-events: none;
-                transition: opacity 0.2s ease;
+                position: fixed !important;
+                bottom: 24px !important;
+                left: 50% !important;
+                transform: translateX(-50%) !important;
+                background: #333333 !important;
+                color: #ffffff !important;
+                padding: 5px 12px !important;
+                border-radius: 4px !important;
+                font-size: 11px !important;
+                box-shadow: 0 4px 14px rgba(0,0,0,0.2) !important;
+                z-index: 10200 !important;
+                border: 1px solid #444444 !important;
+                border-left: 3px solid #2563eb !important;
+                pointer-events: none !important;
+                transition: opacity 0.2s ease !important;
+                font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif !important;
             }
 
-            /* 对话框模态层（原汁原味继承 e3a4247，z-index 10100 克制安全） */
+            /* 对话框模态层（Roll20 原生弹窗规范） */
             .r20-dialog-mask {
-                position: fixed;
+                position: fixed !important;
                 top: 0; left: 0; right: 0; bottom: 0;
-                background: rgba(0, 0, 0, 0.65);
-                z-index: 10100;
-                display: flex;
-                align-items: center;
-                justify-content: center;
+                background: rgba(0, 0, 0, 0.4) !important;
+                z-index: 10100 !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
             }
             .r20-dialog-box {
-                background: #1e242c;
-                border: 1px solid #37474f;
-                border-radius: 8px;
-                width: 440px;
-                max-width: 90vw;
-                max-height: 85vh;
-                display: flex;
-                flex-direction: column;
-                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
-                color: #eceff1;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                background: #ffffff !important;
+                border: 1px solid #cccccc !important;
+                border-radius: 4px !important;
+                width: 440px !important;
+                max-width: 90vw !important;
+                max-height: 85vh !important;
+                display: flex !important;
+                flex-direction: column !important;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2) !important;
+                color: #333333 !important;
+                font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif !important;
             }
             .r20-dialog-header {
-                padding: 10px 14px;
-                font-size: 13px;
-                font-weight: 600;
-                border-bottom: 1px solid #323d47;
-                background: #242c37;
-                color: #64b5f6;
+                padding: 8px 12px !important;
+                font-size: 12px !important;
+                font-weight: 600 !important;
+                border-bottom: 1px solid #e5e5e5 !important;
+                background: #f8fafc !important;
+                color: #333333 !important;
             }
             .r20-dialog-body {
-                padding: 12px 14px;
-                overflow-y: auto;
-                display: flex;
-                flex-direction: column;
-                gap: 10px;
+                padding: 10px 12px !important;
+                overflow-y: auto !important;
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 8px !important;
             }
             .r20-dialog-footer {
-                padding: 10px 14px;
-                border-top: 1px solid #323d47;
-                display: flex;
-                justify-content: flex-end;
-                gap: 8px;
-                background: #191f26;
+                padding: 8px 12px !important;
+                border-top: 1px solid #e5e5e5 !important;
+                display: flex !important;
+                justify-content: flex-end !important;
+                gap: 6px !important;
+                background: #f8fafc !important;
             }
             .r20-input-text {
-                background: #121519;
-                border: 1px solid #37474f;
-                border-radius: 4px;
-                color: #ffffff;
-                padding: 6px 8px;
-                font-size: 12px;
-                outline: none;
+                background: #ffffff !important;
+                border: 1px solid #cccccc !important;
+                border-radius: 3px !important;
+                color: #333333 !important;
+                padding: 4px 6px !important;
+                font-size: 11px !important;
+                outline: none !important;
+            }
+            .r20-input-text:focus {
+                border-color: #2563eb !important;
             }
             .r20-textarea-json {
-                background: #121519;
-                border: 1px solid #37474f;
-                border-radius: 4px;
-                color: #81c784;
-                font-family: monospace;
-                padding: 6px 8px;
-                font-size: 11px;
-                height: 120px;
-                outline: none;
-                resize: vertical;
+                background: #f8fafc !important;
+                border: 1px solid #cccccc !important;
+                border-radius: 3px !important;
+                color: #166534 !important;
+                font-family: monospace !important;
+                padding: 4px 6px !important;
+                font-size: 11px !important;
+                height: 120px !important;
+                outline: none !important;
+                resize: vertical !important;
+            }
+            .r20-textarea-json:focus {
+                border-color: #2563eb !important;
             }
             .r20-btn-apply {
-                background: linear-gradient(135deg, #1976d2 0%, #0d47a1 100%);
-                color: #ffffff;
-                font-size: 11px;
-                font-weight: 600;
-                padding: 5px 12px;
-                border-radius: 4px;
-                border: none;
-                cursor: pointer;
+                background: #2563eb !important;
+                color: #ffffff !important;
+                font-size: 11px !important;
+                font-weight: 600 !important;
+                padding: 4px 10px !important;
+                border-radius: 3px !important;
+                border: 1px solid #1d4ed8 !important;
+                cursor: pointer !important;
             }
-            .r20-btn-apply:hover { filter: brightness(1.15); }
+            .r20-btn-apply:hover {
+                background: #1d4ed8 !important;
+            }
+
+            /* ==========================================================================
+               Roll20 侧边栏设置抽屉原生折叠箭头规范 (Font Awesome 5 Free)
+               ========================================================================== */
+            .r20-suite-settings-panel .accordion-toggle {
+                display: block !important;
+                text-decoration: none !important;
+                color: #333333 !important;
+            }
+            .r20-suite-settings-panel .panel-heading:hover .accordion-toggle {
+                text-decoration: underline !important;
+            }
+            .r20-suite-settings-panel .accordion-toggle::after {
+                font-family: "Font Awesome 5 Free" !important;
+                font-weight: 700 !important;
+                content: "\\f077" !important;
+                float: right !important;
+                color: gray !important;
+                font-size: 16px !important;
+                line-height: inherit !important;
+            }
+            .r20-suite-settings-panel .accordion-toggle.collapsed::after {
+                content: "\\f078" !important;
+            }
         `;
     }
 }

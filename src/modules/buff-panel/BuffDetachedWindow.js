@@ -392,11 +392,18 @@ export class BuffDetachedWindow {
             <div class="r20-toolbar-target-name">
                 <span>${Roll20Bridge.escapeHtml(name)}</span>
             </div>
-            <div style="display:flex; align-items:center; gap:4px;">
-                <button class="r20-btn-icon btn-deactivate-all" title="一键取消激活该单位身上的所有 Buff" style="color:#ffb74d;">🚫 全关</button>
+            <div style="display:flex; align-items:center; gap:3px;">
+                <button class="r20-btn-debuff-trigger" title="选择并施加负面状态 (Debuff)">Debuff ▾</button>
+                <button class="r20-btn-icon btn-deactivate-all" title="一键取消激活该单位身上的所有 Buff" style="color:#f59e0b;">🚫 全关</button>
                 <button class="r20-btn-icon btn-add-buff-to-active" title="为此角色添加新 Buff">➕ Buff</button>
             </div>
         `;
+
+        const debuffTriggerBtn = toolbar.querySelector(".r20-btn-debuff-trigger");
+        debuffTriggerBtn?.addEventListener("click", (e) => {
+            e.stopPropagation();
+            BuffFloatingPanel.showDebuffPopover(debuffTriggerBtn, { type: "char", id: char.id, char }, () => this.renderViewport());
+        });
 
         toolbar.querySelector(".btn-deactivate-all")?.addEventListener("click", async () => {
             const activeBuffs = await Pf1eBuffManager.getActiveBuffs(char);
@@ -418,15 +425,8 @@ export class BuffDetachedWindow {
 
         // 渲染专属负面状态 (Debuff / Condition) 区块
         if (debuffs.length > 0) {
-            const debuffSec = document.createElement("div");
-            debuffSec.className = "r20-debuff-section";
-            debuffSec.innerHTML = `
-                <div class="r20-debuff-header" style="display:flex; align-items:center; justify-content:space-between; margin:4px 0; padding:2px 0;">
-                    <span style="font-size:11px; font-weight:bold; color:#fda4af;">负面状态 (${debuffs.length})</span>
-                </div>
-                <div class="r20-debuff-list" style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px;"></div>
-            `;
-            const listEl = debuffSec.querySelector(".r20-debuff-list");
+            const listEl = document.createElement("div");
+            listEl.className = "r20-debuff-list";
             debuffs.forEach(d => {
                 const pill = document.createElement("span");
                 pill.className = "r20-buff-pill-debuff";
@@ -439,18 +439,27 @@ export class BuffDetachedWindow {
                 });
                 listEl.appendChild(pill);
             });
-            fragment.appendChild(debuffSec);
+            fragment.appendChild(listEl);
+
+            // 若同时存在正面 Buff，简单以极细分割线隔开
+            if (buffs.length > 0) {
+                const divider = document.createElement("div");
+                divider.className = "r20-buff-divider";
+                fragment.appendChild(divider);
+            }
         }
 
         if (buffs.length === 0) {
-            const emptyEl = document.createElement("div");
-            emptyEl.className = "r20-empty-view";
-            emptyEl.innerHTML = debuffs.length > 0
-                ? `该单位当前无正面 Buff`
-                : `该单位当前无任何 Buff<br>从其他标签拖拽 Buff 放置即可施加`;
-            fragment.appendChild(emptyEl);
+            if (debuffs.length === 0) {
+                const emptyEl = document.createElement("div");
+                emptyEl.className = "r20-empty-view";
+                emptyEl.innerHTML = `该单位当前无任何 Buff<br>从其他标签拖拽 Buff 放置即可施加`;
+                fragment.appendChild(emptyEl);
+            }
         } else {
             const showCheckbox = SuiteConfigStore.getSetting("buff_show_checkbox", false);
+            const buffListEl = document.createElement("div");
+            buffListEl.className = "r20-buff-list";
             buffs.forEach(b => {
                 const item = document.createElement("div");
                 const isEnabled = !!b.enabled;
@@ -709,8 +718,9 @@ export class BuffDetachedWindow {
                     });
                 });
 
-                fragment.appendChild(item);
+                buffListEl.appendChild(item);
             });
+            fragment.appendChild(buffListEl);
         }
 
         if (currentEpoch === this._renderEpoch) {

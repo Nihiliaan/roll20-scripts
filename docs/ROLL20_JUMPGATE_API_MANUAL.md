@@ -832,3 +832,62 @@ c ? Hu(t) : s ? Bu(...) : l ? Uu(u = -1, t, !0) : t()
   1. 在 `RecalcService` 中固化官方 `MANUAL_DROPDOWN_DEFAULTS` 字典表（包含 `melee_bab: "bab"`, `melee-ability: "STR-mod"`, `HP-ability: "CON-mod"` 等 25 项官方缺省映射）；
   2. 在沙箱 `getAttrs` 桩中对空缺属性实施缺省值回退；
   3. 在 `processNext` 调度开始前，以幂等方式预先在 `character.attribs` 中补全缺失键，确保无论是无头重算还是聊天框原生宏求值，均能准确提取完整的 BAB 与属性加值。
+
+---
+
+## 七、Jumpgate 重复列表 (Repeating Sections) 渲染管线与 Row ID 命名校验规范
+
+### 1. Jumpgate 重复项渲染流水线与 `_reporder`
+在 Roll20 Jumpgate 生产环境运行时（`vtt.bundle.js`），角色卡中的 repeating section（如 `repeating_buff2`）通过以下流程解析与注入 DOM：
+1. 遍历 `character.attribs`，按前缀 `repeating_<section>_` 收集所有属性，以属性名中的第三段（下划线分割后的 `[2]`）作为 `rowId` 汇总至对象 `ee`：
+   ```javascript
+   const he = `${le.get("name")}`.split("_")[2];
+   ```
+2. 调用 `repeatingKeyOrder(ee, section)` 结合 `_reporder_<section>` 确定行的渲染次序数组 `Y`；
+3. 遍历 `Y`，对每个渲染出的 DOM 元素 `.repitem` 执行数据属性注入与坏行判定。
+
+### 2. Jumpgate 坏行检测判定陷阱 (`repitembroken`)
+Roll20 Jumpgate 在遍历行次序数组 `Y` 时，内置了如下判定规则：
+```javascript
+let J = 0;
+_.each(Y, le => {
+    const ge = V.find(".repitem").eq(J);
+    ge.attr("data-reprowid", le),
+    le.substring(0, 1) === "-" && le.toLowerCase() === le && ge.addClass("repitembroken"),
+    J++
+});
+```
+* **核心规则**：若行 ID 以短横线 `-` 开头（标准 Firebase Push ID 格式），且**完全等于其自身的小写形式（即全为纯小写，不包含任何大写字母）**，Roll20 判定该条目为被非法脚本破坏或降级的损坏数据，并立即为其 DOM 容器注入样式类 `.repitembroken`；
+* **宿主 CSS 报错机制**：
+  人物卡原生 CSS 规则规定：
+  ```css
+  .charsheet .repitem:not(.repitembroken) .error { display: none; }
+  ```
+  一旦节点被注入 `.repitembroken`，`:not(.repitembroken)` 伪类立即失效，其内部固化的红字错误即刻显形：
+  `Error! You must delete this row before editing any items in this section.`。
+
+### 3. Row ID 生成与维护的不变量准则
+为杜绝触发 Roll20 坏行判定及解析割裂，所有在脚本层生成或维护的 Repeating Row ID 必须遵循以下工业级不变量：
+1. **严禁包含下划线 `_`**：
+   Roll20 底层依赖 `name.split("_")[2]` 提取 `rowId`。若 ID 自身包含下划线，将导致分割索引错位，破坏属性解析与回填。所有生成的 UUID 必须执行 `id.replace(/_/g, "a")` 清洗；
+2. **严禁全小写化（保留天然大小写）**：
+   原生 `window.generateUUID()` 生成的字符串首位为 `-`，其后由 Base64 字符编码，天然包含大写字母。严禁对 ID 执行 `.toLowerCase()`；
+3. **首字符为 `-` 时必须具备大写字母防护**：
+   若因回退算法或其他因素生成的 ID 首字符为 `-` 且恰好全为小写，必须强制将其首个字母字符转为大写（如 `id.substring(0, 1) + id.charAt(1).toUpperCase() + id.substring(2)`），确保 `le.toLowerCase() === le` 恒为 `false`；
+4. **`_reporder` 与 `_row_id` 大小写一致性**：
+   向 `_reporder_<section>` 写入及在 `${prefix}_row_id` 登记时，必须统一保持原始大小写字串；比较与去重操作则通过 `id.toLowerCase() === target.toLowerCase()` 保持大小写不敏感。
+
+---
+
+## 八、纯 Token 状态持久化与原生侧边栏抽屉规范
+
+### 1. 纯 Token (野怪/图元) 专属 Debuff 持久化管道
+对于无人物卡绑定的纯 Token 或多棋子怪物集群（Mook）：
+- 数据持久化统一托管于 Token 自身的 `gmnotes` 字段，以 `<!--r20_debuffs:[{ key, rowId, name, rounds, enabled, isDebuff }]-->` 注释块编码存储；
+- 在获取目标 Graphic 模型时，必须统一通过 `Roll20Bridge.getTokenGraphic(tokenId)`（或在 Jumpgate 画布中通过 `thegraphics.get(tokenId)`）检索，严禁虚构不存在的查找函数；
+- 扣轮与倒先攻处理：在 `TokenBuffManager.decrementBuffs` 与 `incrementBuffsOnTurnRevert` 中，同时对正面 Buff 与已启用的 Debuff 数组进行轮数递减与到期关停（`rounds <= 0 -> enabled: false`）。
+
+### 2. Roll20 侧边栏设置抽屉原生视觉对标
+在 `#settings-accordion` 注入自定义面板时：
+- 原生折叠箭头统一使用 `Font Awesome 5 Free` 伪元素：展开时 `content: "\f077"`（chevron-up），折叠时 `content: "\f078"`（chevron-down），字号 `16px`，粗细 `700`，颜色 `gray`，靠右浮动；
+- 默认初始状态必须与官方全部 8 个原生栏目严格保持一致（默认折叠，带 `.collapsed` 类名与 `aria-expanded="false"`，高度 `0px`），交由 Bootstrap Collapse 插件驱动平滑过渡动画。
