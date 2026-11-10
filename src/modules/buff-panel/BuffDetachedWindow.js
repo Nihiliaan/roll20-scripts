@@ -487,12 +487,12 @@ export class BuffDetachedWindow {
                 let linkBadgeHtml = "";
                 if (b.linkHostId) {
                     const hostChar = window.Campaign?.characters?.get(b.linkHostId);
-                    const hostAvatar = hostChar?.get("avatar") || "";
+                    const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
                     const hostName = hostChar?.get("name") || "未知施法者";
                     linkBadgeHtml = `
                         <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
                             🔗
-                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
+                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}" onerror="this.style.display='none';">` : ""}
                         </span>
                     `;
                 }

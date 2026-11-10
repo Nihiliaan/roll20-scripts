@@ -891,3 +891,74 @@ _.each(Y, le => {
 在 `#settings-accordion` 注入自定义面板时：
 - 原生折叠箭头统一使用 `Font Awesome 5 Free` 伪元素：展开时 `content: "\f077"`（chevron-up），折叠时 `content: "\f078"`（chevron-down），字号 `16px`，粗细 `700`，颜色 `gray`，靠右浮动；
 - 默认初始状态必须与官方全部 8 个原生栏目严格保持一致（默认折叠，带 `.collapsed` 类名与 `aria-expanded="false"`，高度 `0px`），交由 Bootstrap Collapse 插件驱动平滑过渡动画。
+
+---
+
+## 九、Jumpgate 图像资产渲染管道与 Character 原生资产方法 (WebGL Tabletop & Character Asset Pipeline)
+
+### 1. 资产双轨架构与原始字段脆弱性
+Roll20 将实体分为**棋子（Token Graphic）**与**角色卡（Character）**两套模型体系：
+* **棋子图像**：在数据层表现为 `token.get("imgsrc")`，在画布上由 Jumpgate WebGL 渲染管线装载；
+* **角色卡图像**：在数据层表现为 `char.get("avatar")`（立绘/头像）与 `char.get("defaulttoken")`（默认棋子 JSON Blob）。
+
+#### 原始数据字段的裂图根因：
+1. **历史 S3 直连存储桶拦截**：大量旧卡片字段中存储的是形如 `https://s3.amazonaws.com/files.d20.io/images/...` 的早期直连地址，直接赋给 DOM `<img>` 标签会触发 AWS S3 防盗链与跨域资源共享（CORS）拦截，导致图片加载失败；
+2. **地图残留死棋子 404**：若在常驻角色显示时盲目在 `tabletop.tabletopObjects` 中检索棋子，由于地图上可能残留已被删除资产的历史废弃棋子，容易命中 404 死链接，导致头像彻底裂开。
+
+### 2. 宿主第一性原理：双轨原生资产管道
+
+#### 2.1 棋子端：直连 Jumpgate WebGL 原生渲染器
+当实体为当前画布棋子时，直接从底层 WebGL 原生实体 Map 读取真实已解码就绪的纹理源：
+```javascript
+const tabletop = window.Campaign?.engine?.tabletop;
+const ttObj = tabletop?.tabletopObjects?.get(token.id || token);
+const rendererUrl = ttObj?.imageRenderer?.loadedUrl || ttObj?.imageRenderer?.url;
+```
+* **特性**：经官方 `AssetManager` 自动清洗与尺寸变体计算，直接复用已加载完毕的内存缓存，实现 0 网络开销。
+
+#### 2.2 角色端：接入 Character 模型原生资产方法
+Roll20 官方在 Backbone Character 原型链上原生封装了资产清洗管道（内部调用 `(0, _endpoint.pF)(...)` 过滤器），严禁直接读取未清洗的原始 `avatar` 字符串：
+1. **`char.getAvatar()`**：官方原生立绘方法，自动将任何旧桶路径转换为官方 CDN（`https://files.d20.io/images/...`）下的有效立绘地址（实测有效率 100%）；
+2. **`char.getTokenURL()`**：官方原生默认棋子图标方法，自动解析内部 `defaulttoken` Blob 并返回已清洗的 Token 图标地址。
+
+### 3. 标准自适应提取流水线 (`getAvatarUrl`)
+针对 UI 容器（如 Tab 标签、浮动卡片、影子链接徽章），统一遵循以下确定性流转逻辑：
+```javascript
+static getAvatarUrl(char, token) {
+    // 1. 若显式传入棋子（如左侧动态选区），优先直取 WebGL 渲染器实际成功加载的真实地址
+    if (token) {
+        const tabletop = window.Campaign?.engine?.tabletop;
+        const ttObj = tabletop?.tabletopObjects?.get(token.id || token);
+        const rendererUrl = ttObj?.imageRenderer?.loadedUrl || ttObj?.imageRenderer?.url;
+        if (rendererUrl) return rendererUrl;
+    }
+
+    // 2. 若为常驻固定角色（char 实体），优先调用官方原生立绘管道 char.getAvatar()
+    if (char) {
+        const avatar = typeof char.getAvatar === "function" ? char.getAvatar() : "";
+        if (avatar) return avatar;
+
+        // 若无立绘，回退至官方原生默认棋子图标 char.getTokenURL()
+        const defaultTokenUrl = typeof char.getTokenURL === "function" ? char.getTokenURL() : "";
+        if (defaultTokenUrl) return defaultTokenUrl;
+    }
+
+    // 3. 兜底回退：若当前地图完全无实体或方法不可用，回退至数据模型原始字段并清洗
+    let raw = token?.get?.("imgsrc") || char?.get?.("avatar") || "";
+    if (raw) {
+        raw = raw.replace(/^https?:\/\/s3\.amazonaws\.com\/files\.d20\.io\//, "https://files.d20.io/");
+        if (raw.startsWith("//")) raw = "https:" + raw;
+    }
+    return raw;
+}
+```
+
+### 4. DOM 加载失败防御与首字徽章兜底
+在 `getAvatarHtml` 及所有图像渲染节点中，增加 `onerror` 容错监听，与 `.r20-tab-avatar-fallback` 徽章平滑联动：
+```javascript
+<div class="r20-tab-avatar-box">
+    ${avatarUrl ? `<img class="r20-tab-avatar" src="${escapeHtml(avatarUrl)}" alt="" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" />` : ""}
+    <div class="r20-tab-avatar-fallback" style="${avatarUrl ? 'display:none;' : 'display:flex;'}">${escapeHtml(initial)}</div>
+</div>
+```
+即使遇到极端网络抖动或冷门无效资产，也能自动降级显示高辨识度的人物首字优雅徽章，彻底绝缘浏览器原生破损裂开图标。

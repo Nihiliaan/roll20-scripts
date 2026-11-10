@@ -6834,12 +6834,12 @@ class BuffDetachedWindow {
                 let linkBadgeHtml = "";
                 if (b.linkHostId) {
                     const hostChar = window.Campaign?.characters?.get(b.linkHostId);
-                    const hostAvatar = hostChar?.get("avatar") || "";
+                    const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
                     const hostName = hostChar?.get("name") || "未知施法者";
                     linkBadgeHtml = `
                         <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
                             🔗
-                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
+                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}" onerror="this.style.display='none';">` : ""}
                         </span>
                     `;
                 }
@@ -7732,32 +7732,28 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 获取单位的有效头像 URL（直击 Jumpgate WebGL 渲染器加载源）
+     * 获取单位的有效头像 URL（直击 Jumpgate WebGL 渲染器与 Character 原生资产管道）
      */
     static getAvatarUrl(char, token) {
-        const tabletop = window.Campaign?.engine?.tabletop;
-        const ttObjs = tabletop?.tabletopObjects;
-
-        // 1. 第一优先级：直接从当前棋子的 Jumpgate WebGL 原生渲染器中提取已加载的真实 URL
-        if (token && ttObjs) {
-            const tokenId = token.id || token;
-            const ttObj = ttObjs.get(tokenId);
+        // 1. 若显式传入棋子（如左侧动态选区棋子），优先取 Jumpgate WebGL 渲染器实际成功加载的真实地址
+        if (token) {
+            const tabletop = window.Campaign?.engine?.tabletop;
+            const ttObj = tabletop?.tabletopObjects?.get(token.id || token);
             const rendererUrl = ttObj?.imageRenderer?.loadedUrl || ttObj?.imageRenderer?.url;
             if (rendererUrl) return rendererUrl;
         }
 
-        // 2. 第二优先级：若为常驻角色（无直接传入 token），检索当前地图代表该角色的棋子渲染器
-        if (char && ttObjs) {
-            const charId = char.id || char;
-            for (const [, obj] of ttObjs) {
-                if (obj.model?.get && obj.model.get("represents") === charId) {
-                    const rendererUrl = obj.imageRenderer?.loadedUrl || obj.imageRenderer?.url;
-                    if (rendererUrl) return rendererUrl;
-                }
-            }
+        // 2. 若为常驻固定角色（char 实体），优先调用 Roll20 官方原生立绘管道 char.getAvatar()
+        if (char) {
+            const avatar = typeof char.getAvatar === "function" ? char.getAvatar() : "";
+            if (avatar) return avatar;
+
+            // 若无专属立绘，回退至官方原生默认棋子图标 char.getTokenURL()
+            const defaultTokenUrl = typeof char.getTokenURL === "function" ? char.getTokenURL() : "";
+            if (defaultTokenUrl) return defaultTokenUrl;
         }
 
-        // 3. 兜底回退：若当前地图完全无实体棋子，回退至数据模型原始字段
+        // 3. 兜底回退：若当前地图完全无实体或方法不可用，回退至数据模型原始字段并清洗
         let raw = token?.get?.("imgsrc") || char?.get?.("avatar") || "";
         if (raw) {
             raw = raw.replace(/^https?:\/\/s3\.amazonaws\.com\/files\.d20\.io\//, "https://files.d20.io/");
@@ -7767,12 +7763,14 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 生成 Tab 纯净 Token 图标结构（仅使用原生棋子图像，无任何文字与 fallback）
+     * 生成 Tab 纯净 Token 图标结构（带失败优雅降级首字 fallback）
      */
     static getAvatarHtml(name, avatarUrl) {
+        const initial = (name || "?").trim().charAt(0).toUpperCase();
         return `
             <div class="r20-tab-avatar-box">
-                <img class="r20-tab-avatar" src="${escapeHtml(avatarUrl || '')}" alt="" />
+                ${avatarUrl ? `<img class="r20-tab-avatar" src="${escapeHtml(avatarUrl)}" alt="" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" />` : ""}
+                <div class="r20-tab-avatar-fallback" style="${avatarUrl ? 'display:none;' : 'display:flex;'}">${escapeHtml(initial)}</div>
             </div>
         `.trim();
     }
@@ -8273,12 +8271,12 @@ class BuffFloatingPanel {
                 let linkBadgeHtml = "";
                 if (d.linkHostId) {
                     const hostChar = window.Campaign?.characters?.get(d.linkHostId);
-                    const hostAvatar = hostChar?.get("avatar") || "";
+                    const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
                     const hostName = hostChar?.get("name") || "未知施法者";
                     linkBadgeHtml = `
                         <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
                             🔗
-                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
+                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}" onerror="this.style.display='none';">` : ""}
                         </span>
                     `;
                 } else if (Array.isArray(d.linkChildren) && d.linkChildren.length > 0) {
@@ -8497,12 +8495,12 @@ class BuffFloatingPanel {
                 let linkBadgeHtml = "";
                 if (b.linkHostId) {
                     const hostChar = window.Campaign?.characters?.get(b.linkHostId);
-                    const hostAvatar = hostChar?.get("avatar") || "";
+                    const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
                     const hostName = hostChar?.get("name") || "未知施法者";
                     linkBadgeHtml = `
                         <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
                             🔗
-                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
+                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}" onerror="this.style.display='none';">` : ""}
                         </span>
                     `;
                 } else if (Array.isArray(b.linkChildren) && b.linkChildren.length > 0) {
