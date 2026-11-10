@@ -277,7 +277,9 @@ export class BuffPanelStyles {
             .r20-tab-avatar-fallback {
                 width: 100% !important;
                 height: 100% !important;
-                display: flex !important;
+                /* 显隐由内联 display 样式全权控制（getAvatarHtml 初始渲染与 img onerror 回调）：
+                   此处绝不能声明 display，否则 !important 会压过内联 display:none，
+                   导致有头像图时首字回退块与图片同时显示 */
                 align-items: center !important;
                 justify-content: center !important;
                 background: #e2e8f0 !important;

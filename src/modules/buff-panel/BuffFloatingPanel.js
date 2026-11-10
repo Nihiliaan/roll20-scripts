@@ -38,6 +38,7 @@ export class BuffFloatingPanel {
     static _lastSelectedIdsStr = "";
     static _savedExpandedHeight = 380;
     static _renderEpoch = 0;
+    static _debounceRecalcTimer = null; // 「延迟重新计算」防抖定时器 (SuiteSettingsPanel 的 debounce_recalc 设置)
 
     /**
      * 初始化调度器工作台
@@ -1835,6 +1836,27 @@ export class BuffFloatingPanel {
             if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
             await this.renderViewport();
         }
+    }
+
+    /**
+     * 响应 Buff 变更，根据设置面板「延迟重新计算」偏好 (debounce_recalc_enabled / debounce_recalc_ms)
+     * 决定是否在无操作静止一段时间后自动重算所有选中单位的加值。
+     * 本方法是与 SuiteSettingsPanel 的设置项之间唯一的消费契约，
+     * BuffDetachedWindow 的 buff 变更处理器也依赖此方法，绝不可删除！
+     */
+    static notifyBuffMutation() {
+        const enabled = SuiteConfigStore.getSetting("debounce_recalc_enabled", false);
+        if (!enabled) return;
+
+        const delayMs = SuiteConfigStore.getSetting("debounce_recalc_ms", 2000);
+        if (this._debounceRecalcTimer) {
+            clearTimeout(this._debounceRecalcTimer);
+        }
+
+        this._debounceRecalcTimer = setTimeout(async () => {
+            console.log(`[BuffFloatingPanel] 静止 ${delayMs}ms，触发防抖自动重新计算加值`);
+            await this.recalculateAllSelected();
+        }, delayMs);
     }
 
     /**

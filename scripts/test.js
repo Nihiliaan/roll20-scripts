@@ -40,7 +40,9 @@ function loadModuleInContext(filePath, sandbox = {}) {
             try { if (typeof escapeHtml !== 'undefined') ctx.escapeHtml = escapeHtml; } catch(e){}
             try { if (typeof Roll20Bridge !== 'undefined') ctx.Roll20Bridge = Roll20Bridge; } catch(e){}
             try { if (typeof RecalcService !== 'undefined') ctx.RecalcService = RecalcService; } catch(e){}
+            try { if (typeof BuffLifecycle !== 'undefined') ctx.BuffLifecycle = BuffLifecycle; } catch(e){}
             try { if (typeof Pf1eBuffManager !== 'undefined') ctx.Pf1eBuffManager = Pf1eBuffManager; } catch(e){}
+            try { if (typeof TokenBuffManager !== 'undefined') ctx.TokenBuffManager = TokenBuffManager; } catch(e){}
             try { if (typeof TurnOrderObserver !== 'undefined') ctx.TurnOrderObserver = TurnOrderObserver; } catch(e){}
             try { if (typeof Pf1eBuffUI !== 'undefined') ctx.Pf1eBuffUI = Pf1eBuffUI; } catch(e){}
             try { if (typeof CharacterSheetTitleCopier !== 'undefined') ctx.CharacterSheetTitleCopier = CharacterSheetTitleCopier; } catch(e){}
@@ -112,7 +114,74 @@ async function runAllTests() {
         }
     });
 
-    // 3. 测试 TurnOrderObserver 回合推进与回退侦测
+    // 3. 测试 BuffLifecycle 轮数生命周期纯算法核心
+    const lifecycleContext = loadModuleInContext('src/core/BuffLifecycle.js', {
+        console: console
+    });
+    const { BuffLifecycle } = lifecycleContext;
+
+    await test('BuffLifecycle.decrementEntry Buff 语义: 常驻跳过 / 逐轮递减 / 归零过期', () => {
+        // 常驻 (rounds=null) 跳过且不改动
+        const permanent = { name: '常驻祝福', rounds: null };
+        assert.strictEqual(BuffLifecycle.decrementEntry(permanent), null);
+        assert.strictEqual(permanent.rounds, null);
+
+        // NaN 轮数跳过
+        assert.strictEqual(BuffLifecycle.decrementEntry({ name: 'x', rounds: NaN }), null);
+
+        // 正常递减
+        const normal = { name: '加速术', rounds: 3 };
+        const dec = BuffLifecycle.decrementEntry(normal);
+        assert.strictEqual(dec.status, 'decremented');
+        assert.strictEqual(dec.remaining, 2);
+        assert.strictEqual(normal.rounds, 2);
+
+        // 归零过期
+        const last = { name: '加速术', rounds: 1 };
+        const exp = BuffLifecycle.decrementEntry(last);
+        assert.strictEqual(exp.status, 'expired');
+        assert.strictEqual(exp.remaining, 0);
+    });
+
+    await test('BuffLifecycle.decrementEntry Debuff 语义: 未激活跳过 / 归零关停 / 负数正计轮', () => {
+        // 未激活跳过
+        assert.strictEqual(BuffLifecycle.decrementEntry({ name: 'd', rounds: 5, enabled: false }, { isDebuff: true }), null);
+
+        // 正数递减
+        const active = { name: '流血', rounds: 2, enabled: true };
+        const dec = BuffLifecycle.decrementEntry(active, { isDebuff: true });
+        assert.strictEqual(dec.status, 'decremented');
+        assert.strictEqual(dec.remaining, 1);
+
+        // 归零关停: enabled 置 false, rounds 归 0
+        const last = { name: '流血', rounds: 1, enabled: true };
+        const exp = BuffLifecycle.decrementEntry(last, { isDebuff: true });
+        assert.strictEqual(exp.status, 'expired');
+        assert.strictEqual(exp.remaining, 0);
+        assert.strictEqual(last.enabled, false);
+        assert.strictEqual(last.rounds, 0);
+
+        // 0/负数持续正计轮 (counted)
+        const counting = { name: '流血', rounds: 0, enabled: true };
+        const cnt = BuffLifecycle.decrementEntry(counting, { isDebuff: true });
+        assert.strictEqual(cnt.status, 'counted');
+        assert.strictEqual(cnt.remaining, -1);
+        assert.strictEqual(counting.rounds, -1);
+        assert.strictEqual(counting.enabled, true, '正计轮不得关停');
+    });
+
+    await test('BuffLifecycle.incrementEntry 统一加回 1 轮', () => {
+        assert.strictEqual(BuffLifecycle.incrementEntry({ name: 'x', rounds: null }), null);
+        assert.strictEqual(BuffLifecycle.incrementEntry({ name: 'd', rounds: 5, enabled: false }, { isDebuff: true }), null);
+
+        const buff = { name: '加速术', rounds: 2 };
+        const res = BuffLifecycle.incrementEntry(buff);
+        assert.strictEqual(res.status, 'incremented');
+        assert.strictEqual(res.remaining, 3);
+        assert.strictEqual(buff.rounds, 3);
+    });
+
+    // 4. 测试 TurnOrderObserver 回合推进与回退侦测
     const turnObserverContext = loadModuleInContext('src/core/TurnOrderObserver.js', {
         window: {},
         console: console
@@ -436,7 +505,99 @@ async function runAllTests() {
         RecalcService.destroy();
     });
 
-    // 8. 测试 CharacterSheetTitleCopier 属性查找、语法替换与事件触发
+    // 8. 测试 TokenBuffManager gmnotes 编解码与回合生命周期
+    function createMockToken(initialNotes) {
+        const state = { gmnotes: initialNotes || '', saves: [] };
+        return {
+            state,
+            get: (prop) => (prop === 'gmnotes' ? state.gmnotes : '哥布林侦察兵'),
+            save: (obj) => { state.saves.push(obj); if ('gmnotes' in obj) state.gmnotes = obj.gmnotes; }
+        };
+    }
+
+    const tokenContext = loadModuleInContext('src/modules/token-buff/TokenBuffManager.js', {
+        console: console,
+        BuffLifecycle: lifecycleContext.BuffLifecycle,
+        Roll20Bridge: { getTokenGraphic: () => null }
+    });
+    const { TokenBuffManager } = tokenContext;
+
+    await test('TokenBuffManager gmnotes 数据块读写往返且不破坏原有备注', () => {
+        const token = createMockToken('GM 的普通备注文本');
+
+        // 注意: vm 沙箱跨 realm 数组原型不同，只能用长度/元素断言
+        assert.strictEqual(TokenBuffManager.getTokenBuffs(token).length, 0);
+
+        TokenBuffManager.applyOrRefreshBuff(token, '加速术 (Haste)', 3);
+        TokenBuffManager.applyOrRefreshBuff(token, '常驻祝福', null);
+
+        // 注释块存在且原备注保留
+        const decoded = decodeURIComponent(token.state.gmnotes);
+        assert.ok(decoded.includes('GM 的普通备注文本'), '原备注不得被覆盖');
+        assert.ok(decoded.includes('<!--r20_buffs:'));
+
+        const buffs = TokenBuffManager.getTokenBuffs(token);
+        assert.strictEqual(buffs.length, 2);
+        const haste = buffs.find(b => b.name === '加速术 (Haste)');
+        assert.strictEqual(haste.rounds, 3);
+
+        // 同名刷新只更新轮数
+        TokenBuffManager.applyOrRefreshBuff(token, '加速术 (Haste)', 9);
+        const refreshed = TokenBuffManager.getTokenBuffs(token);
+        assert.strictEqual(refreshed.length, 2);
+        assert.strictEqual(refreshed.find(b => b.name === '加速术 (Haste)').rounds, 9);
+    });
+
+    await test('TokenBuffManager.decrementBuffs 回合扣减: 递减 / 过期除名 / Debuff 关停与正计轮', () => {
+        const token = createMockToken(encodeURIComponent(
+            'notes\n<!--r20_buffs:[{"name":"加速术","rounds":2},{"name":"常驻","rounds":null}]-->\n' +
+            '<!--r20_debuffs:[{"name":"流血","rounds":1,"enabled":true},{"name":"眩晕","rounds":0,"enabled":true}]-->'
+        ));
+
+        const processed = TokenBuffManager.decrementBuffs(token);
+        // 常驻 Buff (rounds=null) 与列表本身不产生扣减记录
+        assert.strictEqual(processed.length, 3);
+        assert.ok(!processed.some(p => p.name === '常驻'), '常驻条目不得产生扣减记录');
+
+        const byName = (n) => processed.find(p => p.name === n);
+        assert.strictEqual(byName('加速术').status, 'decremented');
+        assert.strictEqual(byName('加速术').remaining, 1);
+        assert.strictEqual(byName('[Debuff] 流血').status, 'expired');
+        assert.strictEqual(byName('[Debuff] 眩晕').status, 'counted');
+
+        // 持久化校验: 加速术 2->1, 过期条目除名; 流血关停; 眩晕 0->-1
+        const buffs = TokenBuffManager.getTokenBuffs(token);
+        assert.strictEqual(buffs.length, 2);
+        assert.strictEqual(buffs.find(b => b.name === '加速术').rounds, 1);
+        assert.ok(buffs.find(b => b.name === '常驻'), '常驻 Buff 不得被除名');
+
+        const debuffs = TokenBuffManager.getTokenDebuffs(token);
+        assert.strictEqual(debuffs.find(d => d.name === '流血').enabled, false);
+        assert.strictEqual(debuffs.find(d => d.name === '流血').rounds, 0);
+        assert.strictEqual(debuffs.find(d => d.name === '眩晕').rounds, -1);
+        assert.strictEqual(debuffs.find(d => d.name === '眩晕').enabled, true);
+    });
+
+    await test('TokenBuffManager.incrementBuffsOnTurnRevert 先攻回退加回轮数', () => {
+        const token = createMockToken(encodeURIComponent(
+            '<!--r20_buffs:[{"name":"加速术","rounds":2},{"name":"常驻","rounds":null}]-->\n' +
+            '<!--r20_debuffs:[{"name":"流血","rounds":1,"enabled":true},{"name":"未激活","rounds":5,"enabled":false}]-->'
+        ));
+
+        const processed = TokenBuffManager.incrementBuffsOnTurnRevert(token);
+        // 常驻与未激活 Debuff 不参与
+        assert.strictEqual(processed.length, 2);
+
+        const buffs = TokenBuffManager.getTokenBuffs(token);
+        assert.strictEqual(buffs.find(b => b.name === '加速术').rounds, 3);
+        assert.strictEqual(buffs.find(b => b.name === '常驻').rounds, null);
+
+        const debuffs = TokenBuffManager.getTokenDebuffs(token);
+        assert.strictEqual(debuffs.find(d => d.name === '流血').rounds, 2);
+        assert.strictEqual(debuffs.find(d => d.name === '未激活').rounds, 5, '未激活 Debuff 不得被加回');
+    });
+
+    // 9. 测试 CharacterSheetTitleCopier 属性查找、语法替换与事件触发
     const copierContext = loadModuleInContext('src/modules/pf1e-buff-tracker/CharacterSheetTitleCopier.js', {
         window: {
             navigator: { clipboard: { writeText: async () => true } }

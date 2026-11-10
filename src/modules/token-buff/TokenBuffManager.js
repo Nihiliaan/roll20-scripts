@@ -1,9 +1,13 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
+import { BuffLifecycle } from "../../core/BuffLifecycle.js";
 
 /**
  * TokenBuffManager.js
  * 专门处理无人物卡绑定的纯野怪/通用 Token 的 Buff 生命周期与持久化
  * 利用 Token 自身的 gmnotes 存储结构化 Buff 数据，并实时同步到 Firebase
+ *
+ * 轮数扣减/回退算法统一委托至 BuffLifecycle（纯算法核心），
+ * 本类只负责 gmnotes 编解码与持久化。
  */
 export class TokenBuffManager {
     static COMMENT_PREFIX = "<!--r20_buffs:";
@@ -12,15 +16,40 @@ export class TokenBuffManager {
     static DEBUFF_SUFFIX = "-->";
 
     /**
+     * 解码 Token 的 gmnotes（兼容未 encodeURIComponent 的历史数据）
+     */
+    static _decodeGmnotes(token) {
+        const raw = token.get("gmnotes") || "";
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+    }
+
+    /**
+     * 将 JSON 数据块以注释形式拼接进 gmnotes 文本：
+     * 已有同名数据块则原位替换，否则追加在末尾
+     */
+    static _spliceGmnotesBlock(decoded, prefix, suffix, json) {
+        const jsonBlock = `${prefix}${json}${suffix}`;
+        const startIdx = decoded.indexOf(prefix);
+        if (startIdx !== -1) {
+            const endIdx = decoded.indexOf(suffix, startIdx);
+            if (endIdx !== -1) {
+                // 替换旧数据块
+                return decoded.substring(0, startIdx) + jsonBlock + decoded.substring(endIdx + suffix.length);
+            }
+            return decoded.substring(0, startIdx) + jsonBlock;
+        }
+        // 追加在最后
+        return decoded ? `${decoded}\n${jsonBlock}` : jsonBlock;
+    }
+
+    /**
      * 从 Token 的 gmnotes 中提取当前已登记的 Debuff 列表
      * @param {object} token Graphic Backbone 模型
      * @returns {Array} [{ key, name, rounds, enabled, ... }]
      */
     static getTokenDebuffs(token) {
         if (!token) return [];
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
+        const decoded = this._decodeGmnotes(token);
 
         const startIdx = decoded.indexOf(this.DEBUFF_PREFIX);
         if (startIdx === -1) {
@@ -46,25 +75,12 @@ export class TokenBuffManager {
      */
     static saveTokenDebuffs(token, debuffs) {
         if (!token) return;
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
-
-        const jsonBlock = `${this.DEBUFF_PREFIX}${JSON.stringify(debuffs)}${this.DEBUFF_SUFFIX}`;
-
-        let newNotes = "";
-        const startIdx = decoded.indexOf(this.DEBUFF_PREFIX);
-        if (startIdx !== -1) {
-            const endIdx = decoded.indexOf(this.DEBUFF_SUFFIX, startIdx);
-            if (endIdx !== -1) {
-                newNotes = decoded.substring(0, startIdx) + jsonBlock + decoded.substring(endIdx + this.DEBUFF_SUFFIX.length);
-            } else {
-                newNotes = decoded.substring(0, startIdx) + jsonBlock;
-            }
-        } else {
-            newNotes = decoded ? `${decoded}\n${jsonBlock}` : jsonBlock;
-        }
-
+        const newNotes = this._spliceGmnotesBlock(
+            this._decodeGmnotes(token),
+            this.DEBUFF_PREFIX,
+            this.DEBUFF_SUFFIX,
+            JSON.stringify(debuffs)
+        );
         token.save({ gmnotes: encodeURIComponent(newNotes) });
     }
 
@@ -145,13 +161,7 @@ export class TokenBuffManager {
      */
     static getTokenBuffs(token) {
         if (!token) return [];
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try {
-            decoded = decodeURIComponent(raw);
-        } catch (e) {
-            decoded = raw;
-        }
+        const decoded = this._decodeGmnotes(token);
 
         // 提取被注释包裹的 JSON 数据，避免干扰 GM 的正常备注
         const startIdx = decoded.indexOf(this.COMMENT_PREFIX);
@@ -182,27 +192,12 @@ export class TokenBuffManager {
      */
     static saveTokenBuffs(token, buffs) {
         if (!token) return;
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
-
-        const jsonBlock = `${this.COMMENT_PREFIX}${JSON.stringify(buffs)}${this.COMMENT_SUFFIX}`;
-
-        let newNotes = "";
-        const startIdx = decoded.indexOf(this.COMMENT_PREFIX);
-        if (startIdx !== -1) {
-            const endIdx = decoded.indexOf(this.COMMENT_SUFFIX, startIdx);
-            if (endIdx !== -1) {
-                // 替换旧数据块
-                newNotes = decoded.substring(0, startIdx) + jsonBlock + decoded.substring(endIdx + this.COMMENT_SUFFIX.length);
-            } else {
-                newNotes = decoded.substring(0, startIdx) + jsonBlock;
-            }
-        } else {
-            // 追加在最后
-            newNotes = decoded ? `${decoded}\n${jsonBlock}` : jsonBlock;
-        }
-
+        const newNotes = this._spliceGmnotesBlock(
+            this._decodeGmnotes(token),
+            this.COMMENT_PREFIX,
+            this.COMMENT_SUFFIX,
+            JSON.stringify(buffs)
+        );
         // 保存并自动推送到 Firebase
         token.save({ gmnotes: encodeURIComponent(newNotes) });
     }
@@ -274,25 +269,22 @@ export class TokenBuffManager {
         const debuffs = this.getTokenDebuffs(token);
         if (buffs.length === 0 && debuffs.length === 0) return [];
 
-        const tokenName = token.get("name") || "未命名棋子";
         const processed = [];
 
-        // 1. 处理正面 Buff
+        // 1. 处理正面 Buff（过期条目直接从列表除名）
         if (buffs.length > 0) {
             const remainingBuffs = [];
             for (const buff of buffs) {
-                if (buff.rounds === null || isNaN(buff.rounds)) {
+                const result = BuffLifecycle.decrementEntry(buff);
+                if (!result) {
                     remainingBuffs.push(buff);
                     continue;
                 }
-
-                const nextRounds = buff.rounds - 1;
-                if (nextRounds <= 0) {
+                if (result.status === "expired") {
                     processed.push({ name: buff.name, status: "expired" });
                 } else {
-                    buff.rounds = nextRounds;
                     remainingBuffs.push(buff);
-                    processed.push({ name: buff.name, status: "decremented", remaining: nextRounds });
+                    processed.push(result);
                 }
             }
             this.saveTokenBuffs(token, remainingBuffs);
@@ -302,25 +294,13 @@ export class TokenBuffManager {
         if (debuffs.length > 0) {
             let debuffsModified = false;
             for (const debuff of debuffs) {
-                if (!debuff.enabled) continue;
-                if (debuff.rounds === null || isNaN(debuff.rounds)) continue;
-
-                if (debuff.rounds > 0) {
-                    const nextRounds = debuff.rounds - 1;
-                    if (nextRounds <= 0) {
-                        debuff.enabled = false;
-                        debuff.rounds = 0;
-                        processed.push({ name: `[Debuff] ${debuff.name}`, status: "expired", remaining: 0 });
-                    } else {
-                        debuff.rounds = nextRounds;
-                        processed.push({ name: `[Debuff] ${debuff.name}`, status: "decremented", remaining: nextRounds });
-                    }
-                    debuffsModified = true;
-                } else {
-                    debuff.rounds = debuff.rounds - 1;
-                    processed.push({ name: `[Debuff] ${debuff.name}`, status: "counted", remaining: debuff.rounds });
-                    debuffsModified = true;
-                }
+                const result = BuffLifecycle.decrementEntry(debuff, {
+                    isDebuff: true,
+                    formatName: (e) => `[Debuff] ${e.name}`
+                });
+                if (!result) continue;
+                debuffsModified = true;
+                processed.push(result);
             }
             if (debuffsModified) {
                 this.saveTokenDebuffs(token, debuffs);
@@ -350,8 +330,7 @@ export class TokenBuffManager {
 
         const processed = [];
         for (const buff of buffs) {
-            if (buff.rounds === null || isNaN(buff.rounds)) continue;
-            buff.rounds = buff.rounds + 1;
+            if (!BuffLifecycle.incrementEntry(buff)) continue;
             processed.push({ name: buff.name, status: "incremented", remaining: buff.rounds });
         }
         if (buffs.length > 0) {
@@ -360,9 +339,7 @@ export class TokenBuffManager {
 
         let debuffsModified = false;
         for (const debuff of debuffs) {
-            if (!debuff.enabled) continue;
-            if (debuff.rounds === null || isNaN(debuff.rounds)) continue;
-            debuff.rounds = debuff.rounds + 1;
+            if (!BuffLifecycle.incrementEntry(debuff, { isDebuff: true })) continue;
             processed.push({ name: `[Debuff] ${debuff.name}`, status: "incremented", remaining: debuff.rounds });
             debuffsModified = true;
         }

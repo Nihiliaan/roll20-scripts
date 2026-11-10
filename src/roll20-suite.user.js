@@ -1207,7 +1207,77 @@ class RecalcService {
 }
 
     // ==========================================
-    // 3. Pf1eBuffManager (PF1e 角色卡数据管理层)
+    // 3. BuffLifecycle Buff/Debuff 轮数生命周期纯算法核心
+    // ==========================================
+/**
+ * BuffLifecycle.js
+ * Buff / Debuff 轮数生命周期的纯算法核心（无任何宿主依赖，可直接单元测试）。
+ *
+ * 领域规则（单一事实来源，Pf1eBuffManager 与 TokenBuffManager 共用）：
+ * - 扣减 (tick)：rounds 为 null/NaN 的常驻条目跳过；
+ *   正数轮数逐轮 -1，归零即过期 (expire)；
+ *   Debuff 允许 0/负数轮数持续正计轮 (0 -> -1 -> -2...)，记为 counted。
+ * - 回退 (revert)：有效轮数统一 +1 (increment)。
+ *
+ * 本模块只负责"判定下一状态"，不做任何持久化；
+ * 各 Manager 将返回的 status 映射到自己的持久化后端
+ * （角色卡属性 / token gmnotes）。
+ */
+class BuffLifecycle {
+    /**
+     * 判定一个条目扣减 1 轮后的下一状态（原地更新 entry.rounds，必要时 entry.enabled）
+     * @param {object} entry { name, rounds, enabled? }
+     * @param {object} [opts]
+     * @param {boolean} [opts.isDebuff=false] Debuff 语义：跳过未激活条目、支持正计轮、过期时关停 enabled
+     * @param {(entry: object) => string} [opts.formatName] 结果条目名称格式化（如 Debuff 前缀）
+     * @returns {{name: string, status: "expired"|"decremented"|"counted", remaining: number}|null}
+     *          null 表示该条目本回合不参与扣减（常驻/未激活/无轮数）
+     */
+    static decrementEntry(entry, { isDebuff = false, formatName = (e) => e.name } = {}) {
+        if (!entry) return null;
+        if (isDebuff && entry.enabled === false) return null;
+        if (entry.rounds === null || entry.rounds === undefined || isNaN(entry.rounds)) return null;
+
+        // Debuff 的 0/负数轮数：持续正计轮
+        if (isDebuff && entry.rounds <= 0) {
+            entry.rounds = entry.rounds - 1;
+            return { name: formatName(entry), status: "counted", remaining: entry.rounds };
+        }
+
+        const nextRounds = entry.rounds - 1;
+        if (nextRounds <= 0) {
+            if (isDebuff) {
+                entry.enabled = false;
+                entry.rounds = 0;
+                return { name: formatName(entry), status: "expired", remaining: 0 };
+            }
+            entry.rounds = nextRounds;
+            return { name: formatName(entry), status: "expired", remaining: 0 };
+        }
+
+        entry.rounds = nextRounds;
+        return { name: formatName(entry), status: "decremented", remaining: nextRounds };
+    }
+
+    /**
+     * 判定一个条目回退（先攻倒转）加回 1 轮后的状态（原地更新 entry.rounds）
+     * @param {object} entry { name, rounds, enabled? }
+     * @param {object} [opts]
+     * @param {boolean} [opts.isDebuff=false] Debuff 语义：跳过未激活条目
+     * @returns {{status: "incremented", remaining: number}|null} null 表示不参与回退
+     */
+    static incrementEntry(entry, { isDebuff = false } = {}) {
+        if (!entry) return null;
+        if (isDebuff && entry.enabled === false) return null;
+        if (entry.rounds === null || entry.rounds === undefined || isNaN(entry.rounds)) return null;
+
+        entry.rounds = entry.rounds + 1;
+        return { status: "incremented", remaining: entry.rounds };
+    }
+}
+
+    // ==========================================
+    // 4. Pf1eBuffManager (PF1e 角色卡数据管理层)
     // ==========================================
 /**
  * Pf1eBuffManager.js
@@ -2698,7 +2768,8 @@ class Pf1eBuffManager {
      * 1. 链接 Buff (isLinkedChild) 绝不在受术者自己的先攻位扣轮，而在施法者回合开始时扣减；
      * 2. 施法者名下所有主 Buff 的下游受术者副本统一扣减 1 轮（即便主 Buff 未开启或轮数不足），受术者归零时自动解除；
      * 3. 激活的 Debuff：正数逐轮倒扣至 0 解除；0 或负数则持续正计轮 (0 -> -1 -> -2...)。
-     * @param {object|string} tokenOrChar 
+     * 轮数判定规则统一委托至 BuffLifecycle，本方法只负责属性持久化与下游联动。
+     * @param {object|string} tokenOrChar
      */
     static async decrementBuffs(tokenOrChar) {
         let character = null;
@@ -2727,19 +2798,20 @@ class Pf1eBuffManager {
             for (const buff of allBuffs) {
                 if (!buff.enabled) continue;
                 if (buff.linkHostId && buff.linkSourceRowId) continue;
-                if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
-                const newRounds = buff.rounds - 1;
-                if (newRounds <= 0) {
+                const result = BuffLifecycle.decrementEntry(buff);
+                if (!result) continue;
+
+                if (result.status === "expired") {
                     await this.removeBuff(character, buff.rowId);
                     processed.push({ name: buff.name, status: "expired", remaining: 0 });
                 } else {
                     if (buff.roundsAttr) {
-                        buff.roundsAttr.save({ current: newRounds }, { byScript: true });
+                        buff.roundsAttr.save({ current: result.remaining }, { byScript: true });
                     } else {
-                        await this.setBuffRounds(character, buff.rowId, newRounds);
+                        await this.setBuffRounds(character, buff.rowId, result.remaining);
                     }
-                    processed.push({ name: buff.name, status: "decremented", remaining: newRounds });
+                    processed.push(result);
                 }
             }
 
@@ -2763,26 +2835,21 @@ class Pf1eBuffManager {
                     if (!isChildEnabled) continue;
 
                     const currentVal = childRoundsAttr ? childRoundsAttr.get("current") : "";
-                    if (currentVal !== "" && currentVal !== null && !isNaN(Number(currentVal))) {
-                        const childRounds = Number(currentVal);
-                        const nextRounds = childRounds - 1;
-                        if (nextRounds <= 0) {
-                            await this.removeBuff(targetChar, childRef.rowId);
-                            processed.push({
-                                name: `${buff.name} (受术者: ${targetChar.get("name")})`,
-                                status: "expired",
-                                remaining: 0
-                            });
-                        } else {
-                            childRoundsAttr.save({ current: nextRounds }, { byScript: true });
-                            processed.push({
-                                name: `${buff.name} (受术者: ${targetChar.get("name")})`,
-                                status: "decremented",
-                                remaining: nextRounds
-                            });
-                        }
-                        if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
+                    const childName = `${buff.name} (受术者: ${targetChar.get("name")})`;
+                    const result = BuffLifecycle.decrementEntry({
+                        name: childName,
+                        rounds: (currentVal !== "" && currentVal !== null && !isNaN(Number(currentVal))) ? Number(currentVal) : null
+                    });
+                    if (!result) continue;
+
+                    if (result.status === "expired") {
+                        await this.removeBuff(targetChar, childRef.rowId);
+                        processed.push({ name: childName, status: "expired", remaining: 0 });
+                    } else {
+                        childRoundsAttr.save({ current: result.remaining }, { byScript: true });
+                        processed.push(result);
                     }
+                    if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
                 }
             }
 
@@ -2808,40 +2875,25 @@ class Pf1eBuffManager {
                     let targetRoundsAttr = targetChar.attribs.models.find(a => a.get("name") === `${def.key}_rounds`);
                     const rawRounds = targetRoundsAttr ? targetRoundsAttr.get("current") : "";
                     const hasRounds = rawRounds !== "" && rawRounds !== null && !isNaN(Number(rawRounds));
-                    const currentRounds = hasRounds ? Number(rawRounds) : 0;
+                    const debuffName = `[Debuff链接] ${def.name} (受术者: ${targetChar.get("name")})`;
+                    // 缺失轮数属性按 0 轮处理（进入正计轮分支）
+                    const result = BuffLifecycle.decrementEntry(
+                        { name: debuffName, rounds: hasRounds ? Number(rawRounds) : 0 },
+                        { isDebuff: true }
+                    );
+                    if (!result) continue;
 
-                    if (currentRounds > 0) {
-                        const nextRounds = currentRounds - 1;
-                        if (nextRounds <= 0) {
-                            await this.toggleCondition(targetChar, def.key, false);
-                            const hostAttr = targetChar.attribs.models.find(a => a.get("name") === `${def.key}_link_host_id`);
-                            if (hostAttr) hostAttr.destroy();
-                            processed.push({
-                                name: `[Debuff链接] ${def.name} (受术者: ${targetChar.get("name")})`,
-                                status: "expired",
-                                remaining: 0
-                            });
-                        } else {
-                            targetRoundsAttr.save({ current: nextRounds }, { byScript: true });
-                            processed.push({
-                                name: `[Debuff链接] ${def.name} (受术者: ${targetChar.get("name")})`,
-                                status: "decremented",
-                                remaining: nextRounds
-                            });
-                        }
+                    if (result.status === "expired") {
+                        await this.toggleCondition(targetChar, def.key, false);
+                        const hostAttr = targetChar.attribs.models.find(a => a.get("name") === `${def.key}_link_host_id`);
+                        if (hostAttr) hostAttr.destroy();
+                        processed.push({ name: debuffName, status: "expired", remaining: 0 });
+                    } else if (result.status === "counted" && !targetRoundsAttr) {
+                        targetChar.attribs.create({ name: `${def.key}_rounds`, current: result.remaining });
+                        processed.push(result);
                     } else {
-                        // 0 或负数持续负计轮
-                        const nextRounds = currentRounds - 1;
-                        if (!targetRoundsAttr) {
-                            targetChar.attribs.create({ name: `${def.key}_rounds`, current: nextRounds });
-                        } else {
-                            targetRoundsAttr.save({ current: nextRounds }, { byScript: true });
-                        }
-                        processed.push({
-                            name: `[Debuff链接] ${def.name} (受术者: ${targetChar.get("name")})`,
-                            status: "counted",
-                            remaining: nextRounds
-                        });
+                        targetRoundsAttr.save({ current: result.remaining }, { byScript: true });
+                        processed.push(result);
                     }
                     if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
                 }
@@ -2865,30 +2917,25 @@ class Pf1eBuffManager {
                 let roundsAttr = character.attribs.models.find(a => a.get("name") === `${def.key}_rounds`);
                 const rawRounds = roundsAttr ? roundsAttr.get("current") : "";
                 const hasRounds = rawRounds !== "" && rawRounds !== null && !isNaN(Number(rawRounds));
-                const currentRounds = hasRounds ? Number(rawRounds) : 0;
+                // 缺失轮数属性按 0 轮处理（进入正计轮分支）
+                const result = BuffLifecycle.decrementEntry(
+                    { name: `[Debuff] ${def.name}`, rounds: hasRounds ? Number(rawRounds) : 0 },
+                    { isDebuff: true }
+                );
+                if (!result) continue;
 
-                if (currentRounds > 0) {
-                    // 正数倒计轮
-                    const nextRounds = currentRounds - 1;
-                    if (nextRounds <= 0) {
-                        await this.toggleCondition(character, def.key, false);
-                        processed.push({ name: `[Debuff] ${def.name}`, status: "expired", remaining: 0 });
-                    } else {
-                        roundsAttr.save({ current: nextRounds }, { byScript: true });
-                        processed.push({ name: `[Debuff] ${def.name}`, status: "decremented", remaining: nextRounds });
-                    }
+                if (result.status === "expired") {
+                    await this.toggleCondition(character, def.key, false);
+                    processed.push({ name: `[Debuff] ${def.name}`, status: "expired", remaining: 0 });
+                } else if (result.status === "counted" && !roundsAttr) {
+                    character.attribs.create({
+                        name: `${def.key}_rounds`,
+                        current: result.remaining
+                    });
+                    processed.push(result);
                 } else {
-                    // 0 或负数正计轮 (0 -> -1 -> -2...)
-                    const nextRounds = currentRounds - 1;
-                    if (!roundsAttr) {
-                        character.attribs.create({
-                            name: `${def.key}_rounds`,
-                            current: nextRounds
-                        });
-                    } else {
-                        roundsAttr.save({ current: nextRounds }, { byScript: true });
-                    }
-                    processed.push({ name: `[Debuff] ${def.name}`, status: "counted", remaining: nextRounds });
+                    roundsAttr.save({ current: result.remaining }, { byScript: true });
+                    processed.push(result);
                 }
             }
 
@@ -2938,13 +2985,15 @@ class Pf1eBuffManager {
                 if (buff.linkHostId && buff.linkSourceRowId) continue;
                 if (buff.rounds === null || isNaN(buff.rounds)) continue;
 
-                const newRounds = buff.rounds + 1;
+                const result = BuffLifecycle.incrementEntry(buff);
+                if (!result) continue;
+
                 if (buff.roundsAttr) {
-                    buff.roundsAttr.save({ current: newRounds }, { byScript: true });
+                    buff.roundsAttr.save({ current: result.remaining }, { byScript: true });
                 } else {
-                    await this.setBuffRounds(character, buff.rowId, newRounds);
+                    await this.setBuffRounds(character, buff.rowId, result.remaining);
                 }
-                processed.push({ name: buff.name, status: "incremented", remaining: newRounds });
+                processed.push({ name: buff.name, status: "incremented", remaining: result.remaining });
             }
 
             // 2. 施法者主 Buff 驱动下游受术者加回 1 轮
@@ -2965,17 +3014,15 @@ class Pf1eBuffManager {
                     if (!isChildEnabled) continue;
 
                     const currentVal = childRoundsAttr ? childRoundsAttr.get("current") : "";
-                    if (currentVal !== "" && currentVal !== null && !isNaN(Number(currentVal))) {
-                        const childRounds = Number(currentVal);
-                        const nextRounds = childRounds + 1;
-                        childRoundsAttr.save({ current: nextRounds }, { byScript: true });
-                        if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
-                        processed.push({
-                            name: `${buff.name} (受术者: ${targetChar.get("name")})`,
-                            status: "incremented",
-                            remaining: nextRounds
-                        });
-                    }
+                    if (currentVal === "" || currentVal === null || isNaN(Number(currentVal))) continue;
+
+                    const childName = `${buff.name} (受术者: ${targetChar.get("name")})`;
+                    const result = BuffLifecycle.incrementEntry({ name: childName, rounds: Number(currentVal) });
+                    if (!result) continue;
+
+                    childRoundsAttr.save({ current: result.remaining }, { byScript: true });
+                    if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
+                    processed.push({ name: childName, status: "incremented", remaining: result.remaining });
                 }
             }
 
@@ -2991,12 +3038,13 @@ class Pf1eBuffManager {
                 let roundsAttr = character.attribs.models.find(a => a.get("name") === `${def.key}_rounds`);
                 const rawRounds = roundsAttr ? roundsAttr.get("current") : "";
                 const hasRounds = rawRounds !== "" && rawRounds !== null && !isNaN(Number(rawRounds));
-                if (hasRounds) {
-                    const currentRounds = Number(rawRounds);
-                    const nextRounds = currentRounds + 1;
-                    roundsAttr.save({ current: nextRounds }, { byScript: true });
-                    processed.push({ name: `[Debuff] ${def.name}`, status: "incremented", remaining: nextRounds });
-                }
+                if (!hasRounds) continue;
+
+                const result = BuffLifecycle.incrementEntry({ name: `[Debuff] ${def.name}`, rounds: Number(rawRounds) });
+                if (!result) continue;
+
+                roundsAttr.save({ current: result.remaining }, { byScript: true });
+                processed.push({ name: `[Debuff] ${def.name}`, status: "incremented", remaining: result.remaining });
             }
 
             console.log(`[Pf1eBuffManager] 先攻回退: 为 ${character.get("name")} 加回 Buff/Debuff 轮数共 ${processed.length} 项`);
@@ -3010,7 +3058,7 @@ class Pf1eBuffManager {
 }
 
     // ==========================================
-    // 4. SuiteConfigStore 战役云端配置卡存储层
+    // 5. SuiteConfigStore 战役云端配置卡存储层
     // ==========================================
 /**
  * SuiteConfigStore.js
@@ -3061,7 +3109,7 @@ class SuiteConfigStore {
 }
 
     // ==========================================
-    // 5. TurnOrderObserver 先攻监听器
+    // 6. TurnOrderObserver 先攻监听器
     // ==========================================
 /**
  * TurnOrderObserver.js
@@ -3257,12 +3305,15 @@ class TurnOrderObserver {
 }
 
     // ==========================================
-    // 6. TokenBuffManager (纯野怪 Token 状态引擎)
+    // 7. TokenBuffManager (纯野怪 Token 状态引擎)
     // ==========================================
 /**
  * TokenBuffManager.js
  * 专门处理无人物卡绑定的纯野怪/通用 Token 的 Buff 生命周期与持久化
  * 利用 Token 自身的 gmnotes 存储结构化 Buff 数据，并实时同步到 Firebase
+ *
+ * 轮数扣减/回退算法统一委托至 BuffLifecycle（纯算法核心），
+ * 本类只负责 gmnotes 编解码与持久化。
  */
 class TokenBuffManager {
     static COMMENT_PREFIX = "<!--r20_buffs:";
@@ -3271,15 +3322,40 @@ class TokenBuffManager {
     static DEBUFF_SUFFIX = "-->";
 
     /**
+     * 解码 Token 的 gmnotes（兼容未 encodeURIComponent 的历史数据）
+     */
+    static _decodeGmnotes(token) {
+        const raw = token.get("gmnotes") || "";
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+    }
+
+    /**
+     * 将 JSON 数据块以注释形式拼接进 gmnotes 文本：
+     * 已有同名数据块则原位替换，否则追加在末尾
+     */
+    static _spliceGmnotesBlock(decoded, prefix, suffix, json) {
+        const jsonBlock = `${prefix}${json}${suffix}`;
+        const startIdx = decoded.indexOf(prefix);
+        if (startIdx !== -1) {
+            const endIdx = decoded.indexOf(suffix, startIdx);
+            if (endIdx !== -1) {
+                // 替换旧数据块
+                return decoded.substring(0, startIdx) + jsonBlock + decoded.substring(endIdx + suffix.length);
+            }
+            return decoded.substring(0, startIdx) + jsonBlock;
+        }
+        // 追加在最后
+        return decoded ? `${decoded}\n${jsonBlock}` : jsonBlock;
+    }
+
+    /**
      * 从 Token 的 gmnotes 中提取当前已登记的 Debuff 列表
      * @param {object} token Graphic Backbone 模型
      * @returns {Array} [{ key, name, rounds, enabled, ... }]
      */
     static getTokenDebuffs(token) {
         if (!token) return [];
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
+        const decoded = this._decodeGmnotes(token);
 
         const startIdx = decoded.indexOf(this.DEBUFF_PREFIX);
         if (startIdx === -1) {
@@ -3305,25 +3381,12 @@ class TokenBuffManager {
      */
     static saveTokenDebuffs(token, debuffs) {
         if (!token) return;
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
-
-        const jsonBlock = `${this.DEBUFF_PREFIX}${JSON.stringify(debuffs)}${this.DEBUFF_SUFFIX}`;
-
-        let newNotes = "";
-        const startIdx = decoded.indexOf(this.DEBUFF_PREFIX);
-        if (startIdx !== -1) {
-            const endIdx = decoded.indexOf(this.DEBUFF_SUFFIX, startIdx);
-            if (endIdx !== -1) {
-                newNotes = decoded.substring(0, startIdx) + jsonBlock + decoded.substring(endIdx + this.DEBUFF_SUFFIX.length);
-            } else {
-                newNotes = decoded.substring(0, startIdx) + jsonBlock;
-            }
-        } else {
-            newNotes = decoded ? `${decoded}\n${jsonBlock}` : jsonBlock;
-        }
-
+        const newNotes = this._spliceGmnotesBlock(
+            this._decodeGmnotes(token),
+            this.DEBUFF_PREFIX,
+            this.DEBUFF_SUFFIX,
+            JSON.stringify(debuffs)
+        );
         token.save({ gmnotes: encodeURIComponent(newNotes) });
     }
 
@@ -3404,13 +3467,7 @@ class TokenBuffManager {
      */
     static getTokenBuffs(token) {
         if (!token) return [];
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try {
-            decoded = decodeURIComponent(raw);
-        } catch (e) {
-            decoded = raw;
-        }
+        const decoded = this._decodeGmnotes(token);
 
         // 提取被注释包裹的 JSON 数据，避免干扰 GM 的正常备注
         const startIdx = decoded.indexOf(this.COMMENT_PREFIX);
@@ -3441,27 +3498,12 @@ class TokenBuffManager {
      */
     static saveTokenBuffs(token, buffs) {
         if (!token) return;
-        const raw = token.get("gmnotes") || "";
-        let decoded = "";
-        try { decoded = decodeURIComponent(raw); } catch (e) { decoded = raw; }
-
-        const jsonBlock = `${this.COMMENT_PREFIX}${JSON.stringify(buffs)}${this.COMMENT_SUFFIX}`;
-
-        let newNotes = "";
-        const startIdx = decoded.indexOf(this.COMMENT_PREFIX);
-        if (startIdx !== -1) {
-            const endIdx = decoded.indexOf(this.COMMENT_SUFFIX, startIdx);
-            if (endIdx !== -1) {
-                // 替换旧数据块
-                newNotes = decoded.substring(0, startIdx) + jsonBlock + decoded.substring(endIdx + this.COMMENT_SUFFIX.length);
-            } else {
-                newNotes = decoded.substring(0, startIdx) + jsonBlock;
-            }
-        } else {
-            // 追加在最后
-            newNotes = decoded ? `${decoded}\n${jsonBlock}` : jsonBlock;
-        }
-
+        const newNotes = this._spliceGmnotesBlock(
+            this._decodeGmnotes(token),
+            this.COMMENT_PREFIX,
+            this.COMMENT_SUFFIX,
+            JSON.stringify(buffs)
+        );
         // 保存并自动推送到 Firebase
         token.save({ gmnotes: encodeURIComponent(newNotes) });
     }
@@ -3533,25 +3575,22 @@ class TokenBuffManager {
         const debuffs = this.getTokenDebuffs(token);
         if (buffs.length === 0 && debuffs.length === 0) return [];
 
-        const tokenName = token.get("name") || "未命名棋子";
         const processed = [];
 
-        // 1. 处理正面 Buff
+        // 1. 处理正面 Buff（过期条目直接从列表除名）
         if (buffs.length > 0) {
             const remainingBuffs = [];
             for (const buff of buffs) {
-                if (buff.rounds === null || isNaN(buff.rounds)) {
+                const result = BuffLifecycle.decrementEntry(buff);
+                if (!result) {
                     remainingBuffs.push(buff);
                     continue;
                 }
-
-                const nextRounds = buff.rounds - 1;
-                if (nextRounds <= 0) {
+                if (result.status === "expired") {
                     processed.push({ name: buff.name, status: "expired" });
                 } else {
-                    buff.rounds = nextRounds;
                     remainingBuffs.push(buff);
-                    processed.push({ name: buff.name, status: "decremented", remaining: nextRounds });
+                    processed.push(result);
                 }
             }
             this.saveTokenBuffs(token, remainingBuffs);
@@ -3561,25 +3600,13 @@ class TokenBuffManager {
         if (debuffs.length > 0) {
             let debuffsModified = false;
             for (const debuff of debuffs) {
-                if (!debuff.enabled) continue;
-                if (debuff.rounds === null || isNaN(debuff.rounds)) continue;
-
-                if (debuff.rounds > 0) {
-                    const nextRounds = debuff.rounds - 1;
-                    if (nextRounds <= 0) {
-                        debuff.enabled = false;
-                        debuff.rounds = 0;
-                        processed.push({ name: `[Debuff] ${debuff.name}`, status: "expired", remaining: 0 });
-                    } else {
-                        debuff.rounds = nextRounds;
-                        processed.push({ name: `[Debuff] ${debuff.name}`, status: "decremented", remaining: nextRounds });
-                    }
-                    debuffsModified = true;
-                } else {
-                    debuff.rounds = debuff.rounds - 1;
-                    processed.push({ name: `[Debuff] ${debuff.name}`, status: "counted", remaining: debuff.rounds });
-                    debuffsModified = true;
-                }
+                const result = BuffLifecycle.decrementEntry(debuff, {
+                    isDebuff: true,
+                    formatName: (e) => `[Debuff] ${e.name}`
+                });
+                if (!result) continue;
+                debuffsModified = true;
+                processed.push(result);
             }
             if (debuffsModified) {
                 this.saveTokenDebuffs(token, debuffs);
@@ -3609,8 +3636,7 @@ class TokenBuffManager {
 
         const processed = [];
         for (const buff of buffs) {
-            if (buff.rounds === null || isNaN(buff.rounds)) continue;
-            buff.rounds = buff.rounds + 1;
+            if (!BuffLifecycle.incrementEntry(buff)) continue;
             processed.push({ name: buff.name, status: "incremented", remaining: buff.rounds });
         }
         if (buffs.length > 0) {
@@ -3619,9 +3645,7 @@ class TokenBuffManager {
 
         let debuffsModified = false;
         for (const debuff of debuffs) {
-            if (!debuff.enabled) continue;
-            if (debuff.rounds === null || isNaN(debuff.rounds)) continue;
-            debuff.rounds = debuff.rounds + 1;
+            if (!BuffLifecycle.incrementEntry(debuff, { isDebuff: true })) continue;
             processed.push({ name: `[Debuff] ${debuff.name}`, status: "incremented", remaining: debuff.rounds });
             debuffsModified = true;
         }
@@ -3635,7 +3659,7 @@ class TokenBuffManager {
 }
 
     // ==========================================
-    // 7. Pf1eBuffUI (先攻列表徽章交互层)
+    // 8. Pf1eBuffUI (先攻列表徽章交互层)
     // ==========================================
 /**
  * Pf1eBuffUI.js
@@ -4734,7 +4758,7 @@ class Pf1eBuffUI {
 }
 
     // ==========================================
-    // 8. CharacterSheetTitleCopier (官方人物卡 Title 属性快捷复制助手)
+    // 9. CharacterSheetTitleCopier (官方人物卡 Title 属性快捷复制助手)
     // ==========================================
 /**
  * Roll20 Suite - 官方人物卡控件 Title 宏属性快速复制助手
@@ -5130,7 +5154,7 @@ class CharacterSheetTitleCopier {
 }
 
     // ==========================================
-    // 9. CharacterSheetBuffEnhancer (官方人物卡 Buff 预置初始轮数注入增强器)
+    // 10. CharacterSheetBuffEnhancer (官方人物卡 Buff 预置初始轮数注入增强器)
     // ==========================================
 /**
  * Roll20 Suite - 官方人物卡 Buff 增强注入器
@@ -5453,7 +5477,7 @@ class CharacterSheetBuffEnhancer {
 }
 
     // ==========================================
-    // 10. BuffPanelStyles (面板静态 CSS 样式)
+    // 11. BuffPanelStyles (面板静态 CSS 样式)
     // ==========================================
 /**
  * BuffPanelStyles.js
@@ -5734,7 +5758,9 @@ class BuffPanelStyles {
             .r20-tab-avatar-fallback {
                 width: 100% !important;
                 height: 100% !important;
-                display: flex !important;
+                /* 显隐由内联 display 样式全权控制（getAvatarHtml 初始渲染与 img onerror 回调）：
+                   此处绝不能声明 display，否则 !important 会压过内联 display:none，
+                   导致有头像图时首字回退块与图片同时显示 */
                 align-items: center !important;
                 justify-content: center !important;
                 background: #e2e8f0 !important;
@@ -6313,7 +6339,7 @@ class BuffPanelStyles {
 }
 
     // ==========================================
-    // 11. BuffPanelTemplates (面板静态 HTML 模板)
+    // 12. BuffPanelTemplates (面板静态 HTML 模板)
     // ==========================================
 /**
  * BuffPanelTemplates.js
@@ -7350,6 +7376,7 @@ class BuffFloatingPanel {
     static _lastSelectedIdsStr = "";
     static _savedExpandedHeight = 380;
     static _renderEpoch = 0;
+    static _debounceRecalcTimer = null; // 「延迟重新计算」防抖定时器 (SuiteSettingsPanel 的 debounce_recalc 设置)
 
     /**
      * 初始化调度器工作台
@@ -9150,6 +9177,27 @@ class BuffFloatingPanel {
     }
 
     /**
+     * 响应 Buff 变更，根据设置面板「延迟重新计算」偏好 (debounce_recalc_enabled / debounce_recalc_ms)
+     * 决定是否在无操作静止一段时间后自动重算所有选中单位的加值。
+     * 本方法是与 SuiteSettingsPanel 的设置项之间唯一的消费契约，
+     * BuffDetachedWindow 的 buff 变更处理器也依赖此方法，绝不可删除！
+     */
+    static notifyBuffMutation() {
+        const enabled = SuiteConfigStore.getSetting("debounce_recalc_enabled", false);
+        if (!enabled) return;
+
+        const delayMs = SuiteConfigStore.getSetting("debounce_recalc_ms", 2000);
+        if (this._debounceRecalcTimer) {
+            clearTimeout(this._debounceRecalcTimer);
+        }
+
+        this._debounceRecalcTimer = setTimeout(async () => {
+            console.log(`[BuffFloatingPanel] 静止 ${delayMs}ms，触发防抖自动重新计算加值`);
+            await this.recalculateAllSelected();
+        }, delayMs);
+    }
+
+    /**
      * 手动批量重新计算所有当前选中的单位加值
      */
     static async recalculateAllSelected() {
@@ -9936,6 +9984,7 @@ class BuffFloatingPanel {
                 },
                 Roll20Bridge,
                 RecalcService,
+                BuffLifecycle,
                 Pf1eBuffManager,
                 SuiteConfigStore,
                 TurnOrderObserver,
