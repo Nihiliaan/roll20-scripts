@@ -238,10 +238,13 @@ export class TokenBuffManager {
         const processed = [];
 
         // 1. 处理正面 Buff（过期条目直接从列表除名；未激活条目跳过，与人物卡语义一致）
+        // 链接副本 (linkHostId + linkSourceRowId) 绝不在受术者自己的回合扣减，
+        // 只由施法者主 Buff 回合开始时统一驱动（影子链接语义，与 Pf1eBuffManager 对齐）
         if (buffs.length > 0) {
             const remainingBuffs = [];
             for (const buff of buffs) {
                 if (buff.enabled === false) { remainingBuffs.push(buff); continue; }
+                if (buff.linkHostId && buff.linkSourceRowId) { remainingBuffs.push(buff); continue; }
                 const result = BuffLifecycle.decrementEntry(buff);
                 if (!result) {
                     remainingBuffs.push(buff);
@@ -257,9 +260,10 @@ export class TokenBuffManager {
             data.buffs = remainingBuffs;
         }
 
-        // 2. 处理 Debuff 轮数倒计与到期关停
+        // 2. 处理 Debuff 轮数倒计与到期关停（链接副本同样只由宿主驱动，本回合跳过）
         if (debuffs.length > 0) {
             for (const debuff of debuffs) {
+                if (debuff.linkHostId && debuff.linkSourceRowId) continue;
                 const result = BuffLifecycle.decrementEntry(debuff, {
                     isDebuff: true,
                     formatName: (e) => `[Debuff] ${e.name}`
@@ -297,11 +301,14 @@ export class TokenBuffManager {
         const processed = [];
         for (const buff of buffs) {
             if (buff.enabled === false) continue;
+            // 链接副本的轮数由施法者宿主统一回退，受术者自己回合不重复加回
+            if (buff.linkHostId && buff.linkSourceRowId) continue;
             if (!BuffLifecycle.incrementEntry(buff)) continue;
             processed.push({ name: buff.name, status: "incremented", remaining: buff.rounds });
         }
 
         for (const debuff of debuffs) {
+            if (debuff.linkHostId && debuff.linkSourceRowId) continue;
             if (!BuffLifecycle.incrementEntry(debuff, { isDebuff: true })) continue;
             processed.push({ name: `[Debuff] ${debuff.name}`, status: "incremented", remaining: debuff.rounds });
         }

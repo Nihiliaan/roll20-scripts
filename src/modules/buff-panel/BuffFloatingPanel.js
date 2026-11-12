@@ -1637,7 +1637,8 @@ export class BuffFloatingPanel {
             <div class="r20-context-menu-item btn-ctx-unlink" style="color:#f59e0b;"><span>🔗</span><span>断开链接转为独立副本</span></div>` : ""}
             ${!isLinkedChild && hasDownstream ? `
             <div class="r20-context-menu-item btn-ctx-deactivate-downstream" style="color:#fb7185;"><span>🛑</span><span>关停当前及所有下游${isDebuff ? "状态" : "Buff"} (${buff.linkChildren.length})</span></div>
-            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>同步更新所有下游链接副本 (${buff.linkChildren.length})</span></div>` : ""}` : ""}
+            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>同步更新所有下游链接副本 (${buff.linkChildren.length})</span></div>` : ""}
+            <div class="r20-context-menu-item btn-ctx-delete-downstream" style="color:#ef5350;"><span>🧹</span><span>删除所有下游链接副本 (宿主保留) (${buff.linkChildren.length})</span></div>` : ""}
             <div class="r20-context-menu-divider"></div>
             <div class="r20-context-menu-item btn-ctx-delete" style="color:#ef5350;"><span>🗑️</span><span>彻底解除/删除${delCountLabel}</span></div>
         `;
@@ -1872,6 +1873,15 @@ export class BuffFloatingPanel {
             if (!char) return;
             await Pf1eBuffManager.deactivateBuffAndDownstream(char, buff.rowId);
             this.showNotice(`已关停当前及所有下游链接副本 (${buff.linkChildren.length})`);
+            await this.renderAllPanes();
+        });
+
+        // 删除所有下游链接子副本（宿主行保留）
+        menu.querySelector(".btn-ctx-delete-downstream")?.addEventListener("click", async () => {
+            cleanup();
+            if (!char) return;
+            const n = await Pf1eBuffManager.deleteDownstreamChildren(char, buff.rowId);
+            this.showNotice(`已删除 [${buff.name}] 的 ${n} 个下游链接副本 (宿主保留)`);
             await this.renderAllPanes();
         });
 

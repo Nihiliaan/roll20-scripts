@@ -9,8 +9,8 @@ export class SuiteConfigStore {
         turnorder_buff_abbr: false, // 先攻条 Buff 首字缩写显示
         debounce_recalc_enabled: false, // 是否在无操作后自动重算
         debounce_recalc_ms: 2000, // 无操作多少毫秒后自动重算
-        buff_show_checkbox: false, // 是否在 Buff 列表显示快速启停复选框
-        party_buffs_visible: false // 队友之间的 Buff 互相可见 (队员只读互查)
+        buff_show_checkbox: true, // 是否在 Buff 列表显示快速启停复选框 (默认开启)
+        party_buffs_visible: true // 队友之间的 Buff 互相可见 (队员只读互查，默认开启)
     };
 
     /**

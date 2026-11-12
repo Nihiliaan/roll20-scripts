@@ -2268,6 +2268,67 @@ class Pf1eBuffManager {
     }
 
     /**
+     * 删除主 Buff / Debuff 的全部下游链接子副本，但保留宿主自身行（与彻底删除的区别：老大不随之销毁）
+     * 遵循与 deleteBuffRowPermanently 相同的自下而上注销规范：
+     * 人物卡子副本走其自身的级联自毁（deleteBuffRowPermanently / deleteDebuffPermanently，可顺带清理孙辈）；
+     * 纯 Token 子副本直接移除自定义字段条目；每删一个即向宿主 link_children 除名，确保循环收敛。
+     * @param {object} hostChar 宿主 Character 模型
+     * @param {string} hostRowId 宿主 Buff 行 ID 或 condition- key
+     * @returns {Promise<number>} 实际删除的子副本数量
+     */
+    static async deleteDownstreamChildren(hostChar, hostRowId) {
+        if (!hostChar || !hostRowId) return 0;
+        await Roll20Bridge.ensureCharacterAttributes(hostChar);
+
+        const isDebuff = hostRowId.startsWith("condition-");
+        const childrenAttrName = isDebuff ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
+        let count = 0;
+
+        while (true) {
+            const children = Roll20Bridge.readJsonAttr(hostChar, childrenAttrName, null);
+            if (!Array.isArray(children) || children.length === 0) break;
+
+            const item = children[0];
+            if (!item || item.charId === hostChar.id) {
+                await this.removeDownstreamLink(hostChar, hostRowId, item?.charId || hostChar.id, item?.rowId || hostRowId);
+                continue;
+            }
+
+            const cChar = window.Campaign?.characters?.get(item.charId);
+            if (cChar) {
+                if (item.rowId && item.rowId.startsWith("condition-")) {
+                    await this.deleteDebuffPermanently(cChar, item.rowId);
+                } else {
+                    await this.deleteBuffRowPermanently(cChar, item.rowId);
+                }
+            } else {
+                // 下游为纯 Token：移除其自定义字段中的对应条目（Buff 与 Debuff 都查，链接随条目一起消失）
+                const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+                if (targetToken) {
+                    const buffsList = TokenBuffManager.getTokenBuffs(targetToken);
+                    const debuffsList = TokenBuffManager.getTokenDebuffs(targetToken);
+                    const buffsFiltered = buffsList.filter(e => e.rowId !== item.rowId);
+                    const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== item.rowId);
+                    if (buffsFiltered.length !== buffsList.length) TokenBuffManager.saveTokenBuffs(targetToken, buffsFiltered);
+                    if (debuffsFiltered.length !== debuffsList.length) TokenBuffManager.saveTokenDebuffs(targetToken, debuffsFiltered);
+                    this.notifyTokenRefresh(targetToken);
+                }
+                await this.removeDownstreamLink(hostChar, hostRowId, item.charId, item.rowId);
+            }
+            count++;
+
+            // 防御性校验：若子副本自毁后由于历史异常未能主动除名，宿主强制将其剔除，确保循环必收敛
+            const curChildren = Roll20Bridge.readJsonAttr(hostChar, childrenAttrName, null);
+            if (Array.isArray(curChildren) && curChildren.some(c => c.charId === item.charId && (c.rowId === item.rowId || (!c.rowId && !item.rowId)))) {
+                await this.removeDownstreamLink(hostChar, hostRowId, item.charId, item.rowId);
+            }
+        }
+
+        console.log(`[Pf1eBuffManager] 已删除 [${hostChar.get("name")}] 主 ${isDebuff ? "Debuff" : "Buff"} (${hostRowId}) 的 ${count} 个下游链接副本 (宿主行保留)`);
+        return count;
+    }
+
+    /**
      * 关停/解除指定角色身上的同名 Buff (基于名称)
      */
     static async removeBuffByName(character, buffName) {
@@ -3331,8 +3392,8 @@ class SuiteConfigStore {
         turnorder_buff_abbr: false, // 先攻条 Buff 首字缩写显示
         debounce_recalc_enabled: false, // 是否在无操作后自动重算
         debounce_recalc_ms: 2000, // 无操作多少毫秒后自动重算
-        buff_show_checkbox: false, // 是否在 Buff 列表显示快速启停复选框
-        party_buffs_visible: false // 队友之间的 Buff 互相可见 (队员只读互查)
+        buff_show_checkbox: true, // 是否在 Buff 列表显示快速启停复选框 (默认开启)
+        party_buffs_visible: true // 队友之间的 Buff 互相可见 (队员只读互查，默认开启)
     };
 
     /**
@@ -3804,10 +3865,13 @@ class TokenBuffManager {
         const processed = [];
 
         // 1. 处理正面 Buff（过期条目直接从列表除名；未激活条目跳过，与人物卡语义一致）
+        // 链接副本 (linkHostId + linkSourceRowId) 绝不在受术者自己的回合扣减，
+        // 只由施法者主 Buff 回合开始时统一驱动（影子链接语义，与 Pf1eBuffManager 对齐）
         if (buffs.length > 0) {
             const remainingBuffs = [];
             for (const buff of buffs) {
                 if (buff.enabled === false) { remainingBuffs.push(buff); continue; }
+                if (buff.linkHostId && buff.linkSourceRowId) { remainingBuffs.push(buff); continue; }
                 const result = BuffLifecycle.decrementEntry(buff);
                 if (!result) {
                     remainingBuffs.push(buff);
@@ -3823,9 +3887,10 @@ class TokenBuffManager {
             data.buffs = remainingBuffs;
         }
 
-        // 2. 处理 Debuff 轮数倒计与到期关停
+        // 2. 处理 Debuff 轮数倒计与到期关停（链接副本同样只由宿主驱动，本回合跳过）
         if (debuffs.length > 0) {
             for (const debuff of debuffs) {
+                if (debuff.linkHostId && debuff.linkSourceRowId) continue;
                 const result = BuffLifecycle.decrementEntry(debuff, {
                     isDebuff: true,
                     formatName: (e) => `[Debuff] ${e.name}`
@@ -3863,11 +3928,14 @@ class TokenBuffManager {
         const processed = [];
         for (const buff of buffs) {
             if (buff.enabled === false) continue;
+            // 链接副本的轮数由施法者宿主统一回退，受术者自己回合不重复加回
+            if (buff.linkHostId && buff.linkSourceRowId) continue;
             if (!BuffLifecycle.incrementEntry(buff)) continue;
             processed.push({ name: buff.name, status: "incremented", remaining: buff.rounds });
         }
 
         for (const debuff of debuffs) {
+            if (debuff.linkHostId && debuff.linkSourceRowId) continue;
             if (!BuffLifecycle.incrementEntry(debuff, { isDebuff: true })) continue;
             processed.push({ name: `[Debuff] ${debuff.name}`, status: "incremented", remaining: debuff.rounds });
         }
@@ -9213,7 +9281,8 @@ class BuffFloatingPanel {
             <div class="r20-context-menu-item btn-ctx-unlink" style="color:#f59e0b;"><span>🔗</span><span>断开链接转为独立副本</span></div>` : ""}
             ${!isLinkedChild && hasDownstream ? `
             <div class="r20-context-menu-item btn-ctx-deactivate-downstream" style="color:#fb7185;"><span>🛑</span><span>关停当前及所有下游${isDebuff ? "状态" : "Buff"} (${buff.linkChildren.length})</span></div>
-            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>同步更新所有下游链接副本 (${buff.linkChildren.length})</span></div>` : ""}` : ""}
+            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>同步更新所有下游链接副本 (${buff.linkChildren.length})</span></div>` : ""}
+            <div class="r20-context-menu-item btn-ctx-delete-downstream" style="color:#ef5350;"><span>🧹</span><span>删除所有下游链接副本 (宿主保留) (${buff.linkChildren.length})</span></div>` : ""}
             <div class="r20-context-menu-divider"></div>
             <div class="r20-context-menu-item btn-ctx-delete" style="color:#ef5350;"><span>🗑️</span><span>彻底解除/删除${delCountLabel}</span></div>
         `;
@@ -9448,6 +9517,15 @@ class BuffFloatingPanel {
             if (!char) return;
             await Pf1eBuffManager.deactivateBuffAndDownstream(char, buff.rowId);
             this.showNotice(`已关停当前及所有下游链接副本 (${buff.linkChildren.length})`);
+            await this.renderAllPanes();
+        });
+
+        // 删除所有下游链接子副本（宿主行保留）
+        menu.querySelector(".btn-ctx-delete-downstream")?.addEventListener("click", async () => {
+            cleanup();
+            if (!char) return;
+            const n = await Pf1eBuffManager.deleteDownstreamChildren(char, buff.rowId);
+            this.showNotice(`已删除 [${buff.name}] 的 ${n} 个下游链接副本 (宿主保留)`);
             await this.renderAllPanes();
         });
 

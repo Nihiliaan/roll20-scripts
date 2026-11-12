@@ -338,18 +338,19 @@ async function runAllTests() {
     const { SuiteConfigStore } = storeContext;
 
     await test('SuiteConfigStore 默认值与持久化更新', () => {
-        // 默认值
-        assert.strictEqual(SuiteConfigStore.getSetting('buff_show_checkbox'), false);
+        // 默认值（复选框与队友互见默认开启，其余默认关闭）
+        assert.strictEqual(SuiteConfigStore.getSetting('buff_show_checkbox'), true);
+        assert.strictEqual(SuiteConfigStore.getSetting('party_buffs_visible'), true);
         assert.strictEqual(SuiteConfigStore.getSetting('turnorder_buff_abbr'), false);
         assert.strictEqual(SuiteConfigStore.getSetting('unknown_key', 'fallback_val'), 'fallback_val');
 
         // 更新配置
-        SuiteConfigStore.setSetting('buff_show_checkbox', true);
-        assert.strictEqual(SuiteConfigStore.getSetting('buff_show_checkbox'), true);
+        SuiteConfigStore.setSetting('buff_show_checkbox', false);
+        assert.strictEqual(SuiteConfigStore.getSetting('buff_show_checkbox'), false);
 
         // 容错：当 localStorage 内容损坏时返回默认值
         mockStorageData['r20_suite_user_settings'] = '{bad json!';
-        assert.strictEqual(SuiteConfigStore.getSetting('buff_show_checkbox'), false);
+        assert.strictEqual(SuiteConfigStore.getSetting('buff_show_checkbox'), true);
     });
 
     // 7. 测试 RecalcService 防抖合并与未就绪兜底

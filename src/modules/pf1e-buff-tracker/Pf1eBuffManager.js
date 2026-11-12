@@ -835,6 +835,67 @@ export class Pf1eBuffManager {
     }
 
     /**
+     * 删除主 Buff / Debuff 的全部下游链接子副本，但保留宿主自身行（与彻底删除的区别：老大不随之销毁）
+     * 遵循与 deleteBuffRowPermanently 相同的自下而上注销规范：
+     * 人物卡子副本走其自身的级联自毁（deleteBuffRowPermanently / deleteDebuffPermanently，可顺带清理孙辈）；
+     * 纯 Token 子副本直接移除自定义字段条目；每删一个即向宿主 link_children 除名，确保循环收敛。
+     * @param {object} hostChar 宿主 Character 模型
+     * @param {string} hostRowId 宿主 Buff 行 ID 或 condition- key
+     * @returns {Promise<number>} 实际删除的子副本数量
+     */
+    static async deleteDownstreamChildren(hostChar, hostRowId) {
+        if (!hostChar || !hostRowId) return 0;
+        await Roll20Bridge.ensureCharacterAttributes(hostChar);
+
+        const isDebuff = hostRowId.startsWith("condition-");
+        const childrenAttrName = isDebuff ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
+        let count = 0;
+
+        while (true) {
+            const children = Roll20Bridge.readJsonAttr(hostChar, childrenAttrName, null);
+            if (!Array.isArray(children) || children.length === 0) break;
+
+            const item = children[0];
+            if (!item || item.charId === hostChar.id) {
+                await this.removeDownstreamLink(hostChar, hostRowId, item?.charId || hostChar.id, item?.rowId || hostRowId);
+                continue;
+            }
+
+            const cChar = window.Campaign?.characters?.get(item.charId);
+            if (cChar) {
+                if (item.rowId && item.rowId.startsWith("condition-")) {
+                    await this.deleteDebuffPermanently(cChar, item.rowId);
+                } else {
+                    await this.deleteBuffRowPermanently(cChar, item.rowId);
+                }
+            } else {
+                // 下游为纯 Token：移除其自定义字段中的对应条目（Buff 与 Debuff 都查，链接随条目一起消失）
+                const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+                if (targetToken) {
+                    const buffsList = TokenBuffManager.getTokenBuffs(targetToken);
+                    const debuffsList = TokenBuffManager.getTokenDebuffs(targetToken);
+                    const buffsFiltered = buffsList.filter(e => e.rowId !== item.rowId);
+                    const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== item.rowId);
+                    if (buffsFiltered.length !== buffsList.length) TokenBuffManager.saveTokenBuffs(targetToken, buffsFiltered);
+                    if (debuffsFiltered.length !== debuffsList.length) TokenBuffManager.saveTokenDebuffs(targetToken, debuffsFiltered);
+                    this.notifyTokenRefresh(targetToken);
+                }
+                await this.removeDownstreamLink(hostChar, hostRowId, item.charId, item.rowId);
+            }
+            count++;
+
+            // 防御性校验：若子副本自毁后由于历史异常未能主动除名，宿主强制将其剔除，确保循环必收敛
+            const curChildren = Roll20Bridge.readJsonAttr(hostChar, childrenAttrName, null);
+            if (Array.isArray(curChildren) && curChildren.some(c => c.charId === item.charId && (c.rowId === item.rowId || (!c.rowId && !item.rowId)))) {
+                await this.removeDownstreamLink(hostChar, hostRowId, item.charId, item.rowId);
+            }
+        }
+
+        console.log(`[Pf1eBuffManager] 已删除 [${hostChar.get("name")}] 主 ${isDebuff ? "Debuff" : "Buff"} (${hostRowId}) 的 ${count} 个下游链接副本 (宿主行保留)`);
+        return count;
+    }
+
+    /**
      * 关停/解除指定角色身上的同名 Buff (基于名称)
      */
     static async removeBuffByName(character, buffName) {
