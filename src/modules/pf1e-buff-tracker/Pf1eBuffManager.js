@@ -14,51 +14,6 @@ export class Pf1eBuffManager {
     static isScriptMutating = false;
 
     /**
-     * 为指定角色绑定属性变动监听，捕获卡面手动开启 Buff 的动作，自动按预置公式初始化轮数
-     */
-    static bindCharacterBuffFormulaListener(character) {
-        if (!character || !character.attribs || character._pf1eBuffFormulaBound) return;
-        character._pf1eBuffFormulaBound = true;
-
-        const handleAttributeMutation = async (attr, options) => {
-            if (!attr) return;
-            if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
-
-            const attrName = attr.get("name") || "";
-
-            // 响应常规 repeating_buff2_*_enable_toggle 开启，自动根据预置公式初始化轮数
-            if (attrName.startsWith("repeating_buff2_") && attrName.endsWith("_enable_toggle")) {
-                const isToggledOn = Number(attr.get("current")) === 1;
-                if (isToggledOn) {
-                    const prefix = attrName.replace("_enable_toggle", "");
-                    const roundsAttr = Roll20Bridge.findAttr(character, `${prefix}_rounds`);
-                    const curRounds = roundsAttr ? roundsAttr.get("current") : "";
-                    const isRoundsEmpty = curRounds === "" || curRounds === null || Number(curRounds) === 0;
-
-                    if (isRoundsEmpty) {
-                        const initRoundsAttr = Roll20Bridge.findAttr(character, `${prefix}_init_rounds`);
-                        const formula = initRoundsAttr ? initRoundsAttr.get("current") : "";
-                        if (formula) {
-                            const val = await Roll20Bridge.evalNativeFormula(formula, character);
-                            if (val !== null && !isNaN(val)) {
-                                console.log(`[Pf1eBuffManager] 角色卡开启 Buff (${prefix})，借用原生机制求值公式 [${formula}] = ${val}`);
-                                if (!roundsAttr) {
-                                    character.attribs.create({ name: `${prefix}_rounds`, current: val });
-                                } else {
-                                    roundsAttr.save({ current: val });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        character.attribs.on("change:current", handleAttributeMutation);
-        character.attribs.on("add", (attr, collection, options) => handleAttributeMutation(attr, options));
-    }
-
-    /**
      * 收敛全项目的「Buff/Debuff 变更 → 刷新先攻条徽章」防御性调用
      * （Pf1eBuffUI 存在循环导入风险，故以 typeof 守卫）
      */
@@ -73,10 +28,6 @@ export class Pf1eBuffManager {
      */
     static isConditionValueActive(val) {
         return val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
-    }
-
-    static generateStandardRowId() {
-        return Roll20Bridge.generateStandardRowId();
     }
 
     /**
@@ -345,18 +296,6 @@ export class Pf1eBuffManager {
     }
 
     /**
-     * 触发角色卡的 Sheet Worker 全量重算 (PFSheet.recalculate)
-     * 统一委托至 RecalcService 单源重算服务 (300ms 角色维度防抖合并)
-     * @param {object} character 
-     */
-    static async triggerRecalculate(character) {
-        if (!character) return;
-        if (typeof RecalcService !== "undefined") {
-            RecalcService.request(character, { reason: "trigger_recalculate" });
-        }
-    }
-
-    /**
      * 施加或刷新 Buff（核心幂等方法）
      * 1. 以名称判断：如果卡片中已有同名 Buff，直接启用 (_enable_toggle=1) 并刷新剩余轮数，保留其原有加值计算公式；
      * 2. 若无同名 Buff，则自动新建一行符合官方标准规范的原生 Buff 并激活。
@@ -373,8 +312,6 @@ export class Pf1eBuffManager {
 
         const cleanName = (buffName || "").trim();
         if (!cleanName) return null;
-
-        console.log(`[Pf1eBuffManager] [DEBUG_APPLY_OR_REFRESH] 角色: [${character.get("name")}], 拟施加 Buff: [${cleanName}], 现有条目数: ${character.attribs?.models?.filter(a => a.get("name")?.startsWith("repeating_buff2_")).length || 0}`);
 
         // 遍历所有 repeating_buff2_*_name 寻找同名行
         const nameAttrs = character.attribs.models.filter(a => {
@@ -480,10 +417,9 @@ export class Pf1eBuffManager {
         await this.sanitizeMalformedBuffRows(character);
 
         const cleanName = (buffName || "新Buff").trim();
-        const rowId = this.generateStandardRowId();
+        const rowId = Roll20Bridge.generateStandardRowId();
         const prefix = `repeating_buff2_${rowId}`;
 
-        console.log(`[Pf1eBuffManager] [DEBUG_ADD_BUFF] 正在为 [${character.get("name")}] 新增规范 Buff: [${cleanName}], rowId: [${rowId}], 字符安全性校验: ${!rowId.includes("_") ? "PASS" : "FAIL"}`);
 
         // 写入原生必需的核心字段（标记 bySuite 防止中间切面误触）
         const nameAttr = character.attribs.create({ name: `${prefix}_name`, current: cleanName }, { bySuite: true });
@@ -694,24 +630,6 @@ export class Pf1eBuffManager {
     ];
 
     /**
-     * 切换/设置原生 Condition 负面状态 (Debuff)
-     * @param {object} character Character Backbone 模型
-     * @param {string} conditionKey 如 "condition-Bleed"
-     * @param {boolean} enable 是否开启
-     * @param {number|null} rounds 持续轮数 (可选)
-     */
-    /**
-     * 获取人物卡上已明确登记的 Debuff 列表
-     * @param {object} character Character Backbone 模型
-     * @returns {string[]} conditionKey 数组
-     */
-    static getTrackedDebuffs(character) {
-        if (!character || !character.attribs) return [];
-        const parsed = Roll20Bridge.readJsonAttr(character, "tracked_debuffs", null);
-        return Array.isArray(parsed) ? parsed : [];
-    }
-
-    /**
      * 将某个 Debuff 登记到人物卡的 tracked_debuffs 属性中
      */
     static async addTrackedDebuff(character, conditionKey) {
@@ -739,6 +657,13 @@ export class Pf1eBuffManager {
         return true;
     }
 
+    /**
+     * 切换/设置原生 Condition 负面状态 (Debuff)
+     * @param {object} character Character Backbone 模型
+     * @param {string} conditionKey 如 "condition-Bleed"
+     * @param {boolean} enable 是否开启
+     * @param {number|null} rounds 持续轮数 (可选)
+     */
     static async toggleCondition(character, conditionKey, enable = false, rounds = null) {
         if (!character || !conditionKey) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
@@ -773,6 +698,32 @@ export class Pf1eBuffManager {
      */
     static async removeBuff(character, rowId) {
         return this.toggleBuff(character, rowId, false);
+    }
+
+    /**
+     * 从纯 Token 的自定义字段中移除某个下游链接条目（Buff 与 Debuff 两个列表都查，
+     * 按 rowId/key 匹配；变更即落盘并通知刷新）
+     * @param {object} token Graphic 模型
+     * @param {string} rowId 条目 rowId 或 condition key
+     * @returns {number} 实际移除的条目数 (0-2)
+     */
+    static _removeTokenChildEntries(token, rowId) {
+        if (!token || !rowId) return 0;
+        let removed = 0;
+        const buffsList = TokenBuffManager.getTokenBuffs(token);
+        const buffsFiltered = buffsList.filter(e => e.rowId !== rowId);
+        if (buffsFiltered.length !== buffsList.length) {
+            TokenBuffManager.saveTokenBuffs(token, buffsFiltered);
+            removed++;
+        }
+        const debuffsList = TokenBuffManager.getTokenDebuffs(token);
+        const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== rowId);
+        if (debuffsFiltered.length !== debuffsList.length) {
+            TokenBuffManager.saveTokenDebuffs(token, debuffsFiltered);
+            removed++;
+        }
+        if (removed > 0) this.notifyTokenRefresh(token);
+        return removed;
     }
 
     /**
@@ -815,19 +766,10 @@ export class Pf1eBuffManager {
                     continue;
                 }
 
-                // 下游为纯 Token：移除其自定义字段中的对应条目（Buff 与 Debuff 都查，链接随条目消失）
+                // 下游为纯 Token：移除其自定义字段中的对应条目（链接随条目消失）
                 const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                 if (!targetToken) continue;
-                const buffsList = TokenBuffManager.getTokenBuffs(targetToken);
-                const debuffsList = TokenBuffManager.getTokenDebuffs(targetToken);
-                const buffsFiltered = buffsList.filter(e => e.rowId !== item.rowId);
-                const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== item.rowId);
-                if (buffsFiltered.length !== buffsList.length || debuffsFiltered.length !== debuffsList.length) {
-                    TokenBuffManager.saveTokenBuffs(targetToken, buffsFiltered);
-                    TokenBuffManager.saveTokenDebuffs(targetToken, debuffsFiltered);
-                    this.notifyTokenRefresh(targetToken);
-                    count++;
-                }
+                if (this._removeTokenChildEntries(targetToken, item.rowId) > 0) count++;
             }
         }
         console.log(`[Pf1eBuffManager] 已关停 [${hostChar.get("name")}] 的主 ${isDebuff ? "Debuff" : "Buff"} (${hostRowId}) 及其 ${count} 个下游受术者副本`);
@@ -869,16 +811,10 @@ export class Pf1eBuffManager {
                     await this.deleteBuffRowPermanently(cChar, item.rowId);
                 }
             } else {
-                // 下游为纯 Token：移除其自定义字段中的对应条目（Buff 与 Debuff 都查，链接随条目一起消失）
+                // 下游为纯 Token：移除其自定义字段中的对应条目（链接随条目一起消失）
                 const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                 if (targetToken) {
-                    const buffsList = TokenBuffManager.getTokenBuffs(targetToken);
-                    const debuffsList = TokenBuffManager.getTokenDebuffs(targetToken);
-                    const buffsFiltered = buffsList.filter(e => e.rowId !== item.rowId);
-                    const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== item.rowId);
-                    if (buffsFiltered.length !== buffsList.length) TokenBuffManager.saveTokenBuffs(targetToken, buffsFiltered);
-                    if (debuffsFiltered.length !== debuffsList.length) TokenBuffManager.saveTokenDebuffs(targetToken, debuffsFiltered);
-                    this.notifyTokenRefresh(targetToken);
+                    this._removeTokenChildEntries(targetToken, item.rowId);
                 }
                 await this.removeDownstreamLink(hostChar, hostRowId, item.charId, item.rowId);
             }
@@ -1100,11 +1036,7 @@ export class Pf1eBuffManager {
                     // 下游为纯 Token：移除其自定义字段中的对应条目（链接随条目一起消失）
                     const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                     if (targetToken) {
-                        const entries = TokenBuffManager.getTokenBuffs(targetToken);
-                        const filtered = entries.filter(e => e.rowId !== item.rowId);
-                        if (filtered.length !== entries.length) {
-                            TokenBuffManager.saveTokenBuffs(targetToken, filtered);
-                        }
+                        this._removeTokenChildEntries(targetToken, item.rowId);
                     }
                     // 除名
                     await this.removeDownstreamLink(character, rowId, item.charId, item.rowId);
@@ -1209,7 +1141,7 @@ export class Pf1eBuffManager {
                     // 下游为纯 Token：移除其自定义字段中的对应 Debuff 登记
                     const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                     if (targetToken) {
-                        TokenBuffManager.removeTrackedDebuff(targetToken, item.rowId || conditionKey);
+                        this._removeTokenChildEntries(targetToken, item.rowId || conditionKey);
                     }
                     // 除名
                     await this.removeDownstreamLink(character, conditionKey, item.charId, item.rowId || conditionKey);
@@ -1846,13 +1778,6 @@ export class Pf1eBuffManager {
                 this.isScriptMutating = false;
             });
         }
-    }
-
-    /**
-     * 当角色行动结束时，扣减其身上所有已设置轮数的活跃 Buff (别名保持向前兼容)
-     */
-    static async tickBuffsOnTurnEnd(tokenId) {
-        return this.decrementBuffs(tokenId);
     }
 
     /**

@@ -2,6 +2,7 @@ import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
 import { Pf1eBuffManager } from "./Pf1eBuffManager.js";
 import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
+import { escapeHtml } from "../../core/Roll20Bridge.js";
 
 /**
  * Pf1eBuffUI.js
@@ -12,7 +13,6 @@ export class Pf1eBuffUI {
     static isStylesInjected = false;
     static isObserverStarted = false;
     static _observer = null;
-    static _isHookingVue = false;
 
     // 便签板（微任务任务合并队列，彻底消除连环触发与并发竞态）
     static pendingTokenIds = new Set();
@@ -484,15 +484,6 @@ export class Pf1eBuffUI {
     }
 
     /**
-     * 提取角色当前激活的原生负面状态 (Debuff / Condition) (兼容异步调用)
-     */
-    static async getActiveDebuffs(character) {
-        if (!character) return [];
-        await Roll20Bridge.ensureCharacterAttributes(character);
-        return this.getActiveDebuffsSync(character);
-    }
-
-    /**
      * 判定属性名是否属于 Buff 或 Debuff 核心控制字段
      */
     static isBuffCoreAttrName(name) {
@@ -725,12 +716,6 @@ export class Pf1eBuffUI {
         }
     }
 
-    /**
-     * 定向精准刷新单个 Token 徽章（兼容旧版异步调用）
-     */
-    static async refreshSingleTokenBadge(tokenId, options = {}) {
-        this.refreshSingleTokenBadgeSync(tokenId, options);
-    }
 
     /**
      * 纯同步：刷新单行徽章（签名守卫：未发生内容变动时跳过，保留原生节点不破坏）
@@ -887,7 +872,7 @@ export class Pf1eBuffUI {
                             } catch (err) {
                                 console.error("[Pf1eBuffUI] 保存 Debuff 轮数异常:", err);
                             }
-                            await this.refreshRowBadge(row, tokenId, { force: true });
+                            this.refreshRowBadgeSync(row, tokenId, { force: true });
                             await this.notifyPanelsRefresh();
                         }
                     });
@@ -909,7 +894,7 @@ export class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Debuff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId, { force: true });
+                    this.refreshRowBadgeSync(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 
@@ -970,7 +955,7 @@ export class Pf1eBuffUI {
                             } catch (err) {
                                 console.error("[Pf1eBuffUI] 保存 Buff 轮数异常:", err);
                             }
-                            await this.refreshRowBadge(row, tokenId, { force: true });
+                            this.refreshRowBadgeSync(row, tokenId, { force: true });
                             await this.notifyPanelsRefresh();
                         }
                     });
@@ -994,7 +979,7 @@ export class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Buff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId, { force: true });
+                    this.refreshRowBadgeSync(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 
@@ -1003,12 +988,6 @@ export class Pf1eBuffUI {
         }
     }
 
-    /**
-     * 刷新单行徽章（兼容异步调用）
-     */
-    static async refreshRowBadge(row, tokenId, options = {}) {
-        this.refreshRowBadgeSync(row, tokenId, options);
-    }
 
     /**
      * 单个 Debuff 点击快捷修改轮数/关停弹窗

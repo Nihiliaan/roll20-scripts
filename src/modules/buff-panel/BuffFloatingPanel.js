@@ -7,6 +7,7 @@ import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
 import { BuffPanelStyles } from "./BuffPanelStyles.js";
 import { BuffPanelTemplates } from "./BuffPanelTemplates.js";
 import { BuffDetachedWindow } from "./BuffDetachedWindow.js";
+import { escapeHtml } from "../../core/Roll20Bridge.js";
 
 /**
  * BuffFloatingPanel.js
@@ -34,7 +35,7 @@ export class BuffFloatingPanel {
     static lastClickedRowId = null; // 用于 Shift 区间多选的基准锚点
     static _draggedContext = null; // { type: "buff" | "tab", data: any }
     static _tabHoverTimer = null;
-    static _selectionSyncTimer = null;
+    static _selectionDebounceTimer = null;
     static _lastSelectedIdsStr = "";
     static _savedExpandedHeight = 380;
     static _renderEpoch = 0;
@@ -270,12 +271,6 @@ export class BuffFloatingPanel {
         panel.querySelector(".btn-toggle-pin")?.addEventListener("click", () => this.togglePin());
         panel.querySelector(".btn-recalc-all")?.addEventListener("click", async () => {
             await this.recalculateAllSelected();
-        });
-
-        // 标题栏操作：折叠与关闭
-        panel.querySelector(".btn-toggle-collapse")?.addEventListener("click", () => this.toggleCollapse());
-        panel.querySelector(".btn-close-panel")?.addEventListener("click", () => {
-            panel.style.display = "none";
         });
 
         // 标签栏滚轮水平横向滚动支持（直接用鼠标滚轮在棋子栏滑动查看溢出棋子）
@@ -532,30 +527,6 @@ export class BuffFloatingPanel {
                 ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
             </span>
         `.trim();
-    }
-
-    /**
-     * 从当前选区中取消选择某个 Token（直接调用 Jumpgate 官方框架 removeFromSelection）
-     */
-    static deselectToken(tokenModel) {
-        if (!tokenModel) return;
-        const tokenId = tokenModel.id || tokenModel;
-
-        const tt = window.Campaign?.engine?.tabletop;
-        if (tt && typeof tt.getSelection === "function") {
-            const currentSelection = tt.getSelection() || [];
-            const item = currentSelection.find(i => i.id === tokenId || i.model === tokenModel || i.model?.id === tokenId);
-            if (item && typeof tt.removeFromSelection === "function") {
-                try {
-                    tt.removeFromSelection(item);
-                } catch (e) {}
-            }
-        }
-        if (Array.isArray(window.selected_tokens)) {
-            window.selected_tokens = window.selected_tokens.filter(id => id !== tokenId);
-        }
-        this.checkSelectionChanged();
-        this.renderDispatcher();
     }
 
     /**
@@ -1939,7 +1910,6 @@ export class BuffFloatingPanel {
      */
     static async applyBuffToTarget(buff, target, sourceHostId = null) {
         if (!buff || !target || (sourceHostId && target.id === sourceHostId)) return;
-        console.log(`[BuffFloatingPanel] [DEBUG_APPLY] 目标: [${target.name}] (type: ${target.type}, id: ${target.id}), Buff: [${buff.name}], sourceHostId: [${sourceHostId}]`);
         const targetChar = target.type === "char" ? window.Campaign?.characters?.get(target.id) : null;
         const targetToken = target.type === "token" ? Roll20Bridge.getTokenGraphic(target.id) : null;
 
@@ -2483,9 +2453,6 @@ export class BuffFloatingPanel {
     }
 
     /**
-     * 明确展开/折叠面板状态（规范高度状态机，避免遗留巨大空白黑框）
-     */
-    /**
      * 明确展开/折叠面板状态。
      * 统一几何模型：面板是唯一的尺寸载体（正常 flex 文档流）；向上展开 = 子节点
      * 顺序颠倒（direction-up 类 → column-reverse，抽屉在上、标题栏在下）+ 面板
@@ -2495,30 +2462,20 @@ export class BuffFloatingPanel {
         if (!this.panelEl) return;
         this.isCollapsed = !!collapsed;
         const drawer = this.panelEl.querySelector(".r20-panel-content-drawer");
-        const btn = this.panelEl.querySelector(".btn-toggle-collapse");
         this.panelEl.classList.toggle("is-collapsed", this.isCollapsed);
 
         if (this.isCollapsed) {
             if (drawer) drawer.style.display = "none";
-            if (btn) btn.textContent = "▸";
             this.panelEl.style.height = "auto";
             this.panelEl.style.minHeight = "0px"; // 压过基础 CSS 的 min-height:200px，避免折叠后残留大白框
             return;
         }
 
         // 展开即落位：以标题栏当前位置为锚，朝向由「下方剩余空间 vs 面板高度」判定
-        if (btn) btn.textContent = "▾";
         if (drawer) drawer.style.display = "";
         this.panelEl.style.minHeight = "";
         const headerEl = this.panelEl.querySelector(".r20-panel-header");
         this.placePanel(headerEl ? headerEl.getBoundingClientRect().top : this.panelEl.offsetTop);
-    }
-
-    /**
-     * 切换展开/折叠面板
-     */
-    static toggleCollapse() {
-        this.setCollapse(!this.isCollapsed);
     }
 
     /**

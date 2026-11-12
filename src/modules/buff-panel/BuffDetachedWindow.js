@@ -4,6 +4,7 @@ import { DragGestures } from "../../core/DragGestures.js";
 import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
 import { Pf1eBuffUI } from "../pf1e-buff-tracker/Pf1eBuffUI.js";
 import { BuffFloatingPanel } from "./BuffFloatingPanel.js";
+import { escapeHtml } from "../../core/Roll20Bridge.js";
 
 /**
  * BuffDetachedWindow.js

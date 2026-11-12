@@ -87,7 +87,7 @@ async function runAllTests() {
         assert.strictEqual(Roll20Bridge.escapeHtml('<tag>'), '&lt;tag&gt;');
     });
 
-    // 2. 测试 Pf1eBuffManager.generateStandardRowId
+    // 2. 测试 Roll20Bridge.generateStandardRowId
     const managerContext = loadModuleInContext('src/modules/pf1e-buff-tracker/Pf1eBuffManager.js', {
         window: {},
         console: console,
@@ -95,8 +95,8 @@ async function runAllTests() {
     });
     const { Pf1eBuffManager } = managerContext;
 
-    await test('Pf1eBuffManager.generateStandardRowId 规格与无下划线保证', () => {
-        const id = Pf1eBuffManager.generateStandardRowId();
+    await test('Roll20Bridge.generateStandardRowId 规格与无下划线保证', () => {
+        const id = Roll20Bridge.generateStandardRowId();
         assert.strictEqual(typeof id, 'string');
         assert.strictEqual(id.length, 20);
         assert.strictEqual(id.startsWith('-'), true);
@@ -104,7 +104,7 @@ async function runAllTests() {
 
         // 批量生成 2000 个 ID，校验绝对不产生下划线（规避 repeating_buff2__xxx 截断事故）
         for (let i = 0; i < 2000; i++) {
-            const generated = Pf1eBuffManager.generateStandardRowId();
+            const generated = Roll20Bridge.generateStandardRowId();
             assert.strictEqual(generated.length, 20);
             assert.strictEqual(generated.startsWith('-'), true);
             assert.strictEqual(generated.includes('_'), false, `生成的 ID 包含非法下划线: ${generated}`);

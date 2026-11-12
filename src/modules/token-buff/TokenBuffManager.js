@@ -281,13 +281,6 @@ export class TokenBuffManager {
     }
 
     /**
-     * 兼容别名
-     */
-    static tickBuffsOnTurnEnd(tokenId) {
-        return this.decrementBuffs(tokenId);
-    }
-
-    /**
      * 倒先攻时，将被拉回排头的 Token 身上的 Buff/Debuff 加回 1 轮
      */
     static incrementBuffsOnTurnRevert(tokenOrId) {

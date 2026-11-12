@@ -54,13 +54,6 @@ export class Roll20Bridge {
     }
 
     /**
-     * 等待战役就绪 (别名兼容)
-     */
-    static waitForCampaign(timeoutMs = 30000) {
-        return this.waitForReady(timeoutMs);
-    }
-
-    /**
      * 获取当前主战役模型
      */
     static getCampaign() {
@@ -188,21 +181,6 @@ export class Roll20Bridge {
         return true;
     }
 
-    /**
-     * 向 Roll20 聊天栏无损推送一条消息
-     * @param {string} message 要发送的文本或宏模板
-     */
-    static sendChatMessage(message) {
-        const textarea = document.querySelector("#textchat-input textarea");
-        const sendBtn = document.querySelector("#chatSendBtn");
-        if (textarea && sendBtn) {
-            textarea.value = message;
-            textarea.dispatchEvent(new Event("input", { bubbles: true }));
-            sendBtn.click();
-        } else {
-            console.warn("[Roll20Bridge] 无法找到聊天输入组件");
-        }
-    }
     /**
      * 判断当前登录用户是否具备 GM 权限
      * @returns {boolean}
@@ -379,20 +357,6 @@ export class Roll20Bridge {
             if (this.isCurrentPlayerInParty() && this.isPartyMember(tokenOrId)) {
                 return true;
             }
-        }
-        return false;
-    }
-
-    /**
-     * 调起 Roll20 宿主原生的角色卡弹窗
-     * @param {string} characterId
-     */
-    static openCharacterSheet(characterId) {
-        if (!characterId) return false;
-        const el = document.querySelector('.journalitem[data-itemid="' + characterId + '"] .namecontainer');
-        if (el) {
-            el.click();
-            return true;
         }
         return false;
     }

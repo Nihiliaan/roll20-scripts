@@ -139,13 +139,6 @@ class Roll20Bridge {
     }
 
     /**
-     * 等待战役就绪 (别名兼容)
-     */
-    static waitForCampaign(timeoutMs = 30000) {
-        return this.waitForReady(timeoutMs);
-    }
-
-    /**
      * 获取当前主战役模型
      */
     static getCampaign() {
@@ -273,21 +266,6 @@ class Roll20Bridge {
         return true;
     }
 
-    /**
-     * 向 Roll20 聊天栏无损推送一条消息
-     * @param {string} message 要发送的文本或宏模板
-     */
-    static sendChatMessage(message) {
-        const textarea = document.querySelector("#textchat-input textarea");
-        const sendBtn = document.querySelector("#chatSendBtn");
-        if (textarea && sendBtn) {
-            textarea.value = message;
-            textarea.dispatchEvent(new Event("input", { bubbles: true }));
-            sendBtn.click();
-        } else {
-            console.warn("[Roll20Bridge] 无法找到聊天输入组件");
-        }
-    }
     /**
      * 判断当前登录用户是否具备 GM 权限
      * @returns {boolean}
@@ -464,20 +442,6 @@ class Roll20Bridge {
             if (this.isCurrentPlayerInParty() && this.isPartyMember(tokenOrId)) {
                 return true;
             }
-        }
-        return false;
-    }
-
-    /**
-     * 调起 Roll20 宿主原生的角色卡弹窗
-     * @param {string} characterId
-     */
-    static openCharacterSheet(characterId) {
-        if (!characterId) return false;
-        const el = document.querySelector('.journalitem[data-itemid="' + characterId + '"] .namecontainer');
-        if (el) {
-            el.click();
-            return true;
         }
         return false;
     }
@@ -1447,51 +1411,6 @@ class Pf1eBuffManager {
     static isScriptMutating = false;
 
     /**
-     * 为指定角色绑定属性变动监听，捕获卡面手动开启 Buff 的动作，自动按预置公式初始化轮数
-     */
-    static bindCharacterBuffFormulaListener(character) {
-        if (!character || !character.attribs || character._pf1eBuffFormulaBound) return;
-        character._pf1eBuffFormulaBound = true;
-
-        const handleAttributeMutation = async (attr, options) => {
-            if (!attr) return;
-            if (options?.byScript || Pf1eBuffManager.isScriptMutating) return;
-
-            const attrName = attr.get("name") || "";
-
-            // 响应常规 repeating_buff2_*_enable_toggle 开启，自动根据预置公式初始化轮数
-            if (attrName.startsWith("repeating_buff2_") && attrName.endsWith("_enable_toggle")) {
-                const isToggledOn = Number(attr.get("current")) === 1;
-                if (isToggledOn) {
-                    const prefix = attrName.replace("_enable_toggle", "");
-                    const roundsAttr = Roll20Bridge.findAttr(character, `${prefix}_rounds`);
-                    const curRounds = roundsAttr ? roundsAttr.get("current") : "";
-                    const isRoundsEmpty = curRounds === "" || curRounds === null || Number(curRounds) === 0;
-
-                    if (isRoundsEmpty) {
-                        const initRoundsAttr = Roll20Bridge.findAttr(character, `${prefix}_init_rounds`);
-                        const formula = initRoundsAttr ? initRoundsAttr.get("current") : "";
-                        if (formula) {
-                            const val = await Roll20Bridge.evalNativeFormula(formula, character);
-                            if (val !== null && !isNaN(val)) {
-                                console.log(`[Pf1eBuffManager] 角色卡开启 Buff (${prefix})，借用原生机制求值公式 [${formula}] = ${val}`);
-                                if (!roundsAttr) {
-                                    character.attribs.create({ name: `${prefix}_rounds`, current: val });
-                                } else {
-                                    roundsAttr.save({ current: val });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        character.attribs.on("change:current", handleAttributeMutation);
-        character.attribs.on("add", (attr, collection, options) => handleAttributeMutation(attr, options));
-    }
-
-    /**
      * 收敛全项目的「Buff/Debuff 变更 → 刷新先攻条徽章」防御性调用
      * （Pf1eBuffUI 存在循环导入风险，故以 typeof 守卫）
      */
@@ -1506,10 +1425,6 @@ class Pf1eBuffManager {
      */
     static isConditionValueActive(val) {
         return val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
-    }
-
-    static generateStandardRowId() {
-        return Roll20Bridge.generateStandardRowId();
     }
 
     /**
@@ -1778,18 +1693,6 @@ class Pf1eBuffManager {
     }
 
     /**
-     * 触发角色卡的 Sheet Worker 全量重算 (PFSheet.recalculate)
-     * 统一委托至 RecalcService 单源重算服务 (300ms 角色维度防抖合并)
-     * @param {object} character 
-     */
-    static async triggerRecalculate(character) {
-        if (!character) return;
-        if (typeof RecalcService !== "undefined") {
-            RecalcService.request(character, { reason: "trigger_recalculate" });
-        }
-    }
-
-    /**
      * 施加或刷新 Buff（核心幂等方法）
      * 1. 以名称判断：如果卡片中已有同名 Buff，直接启用 (_enable_toggle=1) 并刷新剩余轮数，保留其原有加值计算公式；
      * 2. 若无同名 Buff，则自动新建一行符合官方标准规范的原生 Buff 并激活。
@@ -1806,8 +1709,6 @@ class Pf1eBuffManager {
 
         const cleanName = (buffName || "").trim();
         if (!cleanName) return null;
-
-        console.log(`[Pf1eBuffManager] [DEBUG_APPLY_OR_REFRESH] 角色: [${character.get("name")}], 拟施加 Buff: [${cleanName}], 现有条目数: ${character.attribs?.models?.filter(a => a.get("name")?.startsWith("repeating_buff2_")).length || 0}`);
 
         // 遍历所有 repeating_buff2_*_name 寻找同名行
         const nameAttrs = character.attribs.models.filter(a => {
@@ -1913,10 +1814,9 @@ class Pf1eBuffManager {
         await this.sanitizeMalformedBuffRows(character);
 
         const cleanName = (buffName || "新Buff").trim();
-        const rowId = this.generateStandardRowId();
+        const rowId = Roll20Bridge.generateStandardRowId();
         const prefix = `repeating_buff2_${rowId}`;
 
-        console.log(`[Pf1eBuffManager] [DEBUG_ADD_BUFF] 正在为 [${character.get("name")}] 新增规范 Buff: [${cleanName}], rowId: [${rowId}], 字符安全性校验: ${!rowId.includes("_") ? "PASS" : "FAIL"}`);
 
         // 写入原生必需的核心字段（标记 bySuite 防止中间切面误触）
         const nameAttr = character.attribs.create({ name: `${prefix}_name`, current: cleanName }, { bySuite: true });
@@ -2127,24 +2027,6 @@ class Pf1eBuffManager {
     ];
 
     /**
-     * 切换/设置原生 Condition 负面状态 (Debuff)
-     * @param {object} character Character Backbone 模型
-     * @param {string} conditionKey 如 "condition-Bleed"
-     * @param {boolean} enable 是否开启
-     * @param {number|null} rounds 持续轮数 (可选)
-     */
-    /**
-     * 获取人物卡上已明确登记的 Debuff 列表
-     * @param {object} character Character Backbone 模型
-     * @returns {string[]} conditionKey 数组
-     */
-    static getTrackedDebuffs(character) {
-        if (!character || !character.attribs) return [];
-        const parsed = Roll20Bridge.readJsonAttr(character, "tracked_debuffs", null);
-        return Array.isArray(parsed) ? parsed : [];
-    }
-
-    /**
      * 将某个 Debuff 登记到人物卡的 tracked_debuffs 属性中
      */
     static async addTrackedDebuff(character, conditionKey) {
@@ -2172,6 +2054,13 @@ class Pf1eBuffManager {
         return true;
     }
 
+    /**
+     * 切换/设置原生 Condition 负面状态 (Debuff)
+     * @param {object} character Character Backbone 模型
+     * @param {string} conditionKey 如 "condition-Bleed"
+     * @param {boolean} enable 是否开启
+     * @param {number|null} rounds 持续轮数 (可选)
+     */
     static async toggleCondition(character, conditionKey, enable = false, rounds = null) {
         if (!character || !conditionKey) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
@@ -2206,6 +2095,32 @@ class Pf1eBuffManager {
      */
     static async removeBuff(character, rowId) {
         return this.toggleBuff(character, rowId, false);
+    }
+
+    /**
+     * 从纯 Token 的自定义字段中移除某个下游链接条目（Buff 与 Debuff 两个列表都查，
+     * 按 rowId/key 匹配；变更即落盘并通知刷新）
+     * @param {object} token Graphic 模型
+     * @param {string} rowId 条目 rowId 或 condition key
+     * @returns {number} 实际移除的条目数 (0-2)
+     */
+    static _removeTokenChildEntries(token, rowId) {
+        if (!token || !rowId) return 0;
+        let removed = 0;
+        const buffsList = TokenBuffManager.getTokenBuffs(token);
+        const buffsFiltered = buffsList.filter(e => e.rowId !== rowId);
+        if (buffsFiltered.length !== buffsList.length) {
+            TokenBuffManager.saveTokenBuffs(token, buffsFiltered);
+            removed++;
+        }
+        const debuffsList = TokenBuffManager.getTokenDebuffs(token);
+        const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== rowId);
+        if (debuffsFiltered.length !== debuffsList.length) {
+            TokenBuffManager.saveTokenDebuffs(token, debuffsFiltered);
+            removed++;
+        }
+        if (removed > 0) this.notifyTokenRefresh(token);
+        return removed;
     }
 
     /**
@@ -2248,19 +2163,10 @@ class Pf1eBuffManager {
                     continue;
                 }
 
-                // 下游为纯 Token：移除其自定义字段中的对应条目（Buff 与 Debuff 都查，链接随条目消失）
+                // 下游为纯 Token：移除其自定义字段中的对应条目（链接随条目消失）
                 const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                 if (!targetToken) continue;
-                const buffsList = TokenBuffManager.getTokenBuffs(targetToken);
-                const debuffsList = TokenBuffManager.getTokenDebuffs(targetToken);
-                const buffsFiltered = buffsList.filter(e => e.rowId !== item.rowId);
-                const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== item.rowId);
-                if (buffsFiltered.length !== buffsList.length || debuffsFiltered.length !== debuffsList.length) {
-                    TokenBuffManager.saveTokenBuffs(targetToken, buffsFiltered);
-                    TokenBuffManager.saveTokenDebuffs(targetToken, debuffsFiltered);
-                    this.notifyTokenRefresh(targetToken);
-                    count++;
-                }
+                if (this._removeTokenChildEntries(targetToken, item.rowId) > 0) count++;
             }
         }
         console.log(`[Pf1eBuffManager] 已关停 [${hostChar.get("name")}] 的主 ${isDebuff ? "Debuff" : "Buff"} (${hostRowId}) 及其 ${count} 个下游受术者副本`);
@@ -2302,16 +2208,10 @@ class Pf1eBuffManager {
                     await this.deleteBuffRowPermanently(cChar, item.rowId);
                 }
             } else {
-                // 下游为纯 Token：移除其自定义字段中的对应条目（Buff 与 Debuff 都查，链接随条目一起消失）
+                // 下游为纯 Token：移除其自定义字段中的对应条目（链接随条目一起消失）
                 const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                 if (targetToken) {
-                    const buffsList = TokenBuffManager.getTokenBuffs(targetToken);
-                    const debuffsList = TokenBuffManager.getTokenDebuffs(targetToken);
-                    const buffsFiltered = buffsList.filter(e => e.rowId !== item.rowId);
-                    const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== item.rowId);
-                    if (buffsFiltered.length !== buffsList.length) TokenBuffManager.saveTokenBuffs(targetToken, buffsFiltered);
-                    if (debuffsFiltered.length !== debuffsList.length) TokenBuffManager.saveTokenDebuffs(targetToken, debuffsFiltered);
-                    this.notifyTokenRefresh(targetToken);
+                    this._removeTokenChildEntries(targetToken, item.rowId);
                 }
                 await this.removeDownstreamLink(hostChar, hostRowId, item.charId, item.rowId);
             }
@@ -2533,11 +2433,7 @@ class Pf1eBuffManager {
                     // 下游为纯 Token：移除其自定义字段中的对应条目（链接随条目一起消失）
                     const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                     if (targetToken) {
-                        const entries = TokenBuffManager.getTokenBuffs(targetToken);
-                        const filtered = entries.filter(e => e.rowId !== item.rowId);
-                        if (filtered.length !== entries.length) {
-                            TokenBuffManager.saveTokenBuffs(targetToken, filtered);
-                        }
+                        this._removeTokenChildEntries(targetToken, item.rowId);
                     }
                     // 除名
                     await this.removeDownstreamLink(character, rowId, item.charId, item.rowId);
@@ -2642,7 +2538,7 @@ class Pf1eBuffManager {
                     // 下游为纯 Token：移除其自定义字段中的对应 Debuff 登记
                     const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
                     if (targetToken) {
-                        TokenBuffManager.removeTrackedDebuff(targetToken, item.rowId || conditionKey);
+                        this._removeTokenChildEntries(targetToken, item.rowId || conditionKey);
                     }
                     // 除名
                     await this.removeDownstreamLink(character, conditionKey, item.charId, item.rowId || conditionKey);
@@ -3282,13 +3178,6 @@ class Pf1eBuffManager {
     }
 
     /**
-     * 当角色行动结束时，扣减其身上所有已设置轮数的活跃 Buff (别名保持向前兼容)
-     */
-    static async tickBuffsOnTurnEnd(tokenId) {
-        return this.decrementBuffs(tokenId);
-    }
-
-    /**
      * 反向倒先攻时，将被拉回排头的单位及其主 Buff 下游受术者加回 1 轮
      */
     static async incrementBuffsOnTurnRevert(tokenOrChar) {
@@ -3379,7 +3268,7 @@ class Pf1eBuffManager {
 }
 
     // ==========================================
-    // 6. SuiteConfigStore 战役云端配置卡存储层
+    // 6. SuiteConfigStore 用户本地偏好设置存储层 (localStorage)
     // ==========================================
 /**
  * SuiteConfigStore.js
@@ -3908,13 +3797,6 @@ class TokenBuffManager {
     }
 
     /**
-     * 兼容别名
-     */
-    static tickBuffsOnTurnEnd(tokenId) {
-        return this.decrementBuffs(tokenId);
-    }
-
-    /**
      * 倒先攻时，将被拉回排头的 Token 身上的 Buff/Debuff 加回 1 轮
      */
     static incrementBuffsOnTurnRevert(tokenOrId) {
@@ -3961,7 +3843,6 @@ class Pf1eBuffUI {
     static isStylesInjected = false;
     static isObserverStarted = false;
     static _observer = null;
-    static _isHookingVue = false;
 
     // 便签板（微任务任务合并队列，彻底消除连环触发与并发竞态）
     static pendingTokenIds = new Set();
@@ -4433,15 +4314,6 @@ class Pf1eBuffUI {
     }
 
     /**
-     * 提取角色当前激活的原生负面状态 (Debuff / Condition) (兼容异步调用)
-     */
-    static async getActiveDebuffs(character) {
-        if (!character) return [];
-        await Roll20Bridge.ensureCharacterAttributes(character);
-        return this.getActiveDebuffsSync(character);
-    }
-
-    /**
      * 判定属性名是否属于 Buff 或 Debuff 核心控制字段
      */
     static isBuffCoreAttrName(name) {
@@ -4674,12 +4546,6 @@ class Pf1eBuffUI {
         }
     }
 
-    /**
-     * 定向精准刷新单个 Token 徽章（兼容旧版异步调用）
-     */
-    static async refreshSingleTokenBadge(tokenId, options = {}) {
-        this.refreshSingleTokenBadgeSync(tokenId, options);
-    }
 
     /**
      * 纯同步：刷新单行徽章（签名守卫：未发生内容变动时跳过，保留原生节点不破坏）
@@ -4836,7 +4702,7 @@ class Pf1eBuffUI {
                             } catch (err) {
                                 console.error("[Pf1eBuffUI] 保存 Debuff 轮数异常:", err);
                             }
-                            await this.refreshRowBadge(row, tokenId, { force: true });
+                            this.refreshRowBadgeSync(row, tokenId, { force: true });
                             await this.notifyPanelsRefresh();
                         }
                     });
@@ -4858,7 +4724,7 @@ class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Debuff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId, { force: true });
+                    this.refreshRowBadgeSync(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 
@@ -4919,7 +4785,7 @@ class Pf1eBuffUI {
                             } catch (err) {
                                 console.error("[Pf1eBuffUI] 保存 Buff 轮数异常:", err);
                             }
-                            await this.refreshRowBadge(row, tokenId, { force: true });
+                            this.refreshRowBadgeSync(row, tokenId, { force: true });
                             await this.notifyPanelsRefresh();
                         }
                     });
@@ -4943,7 +4809,7 @@ class Pf1eBuffUI {
                     } catch (err) {
                         console.error("[Pf1eBuffUI] 关停解除 Buff 异常:", err);
                     }
-                    await this.refreshRowBadge(row, tokenId, { force: true });
+                    this.refreshRowBadgeSync(row, tokenId, { force: true });
                     await this.notifyPanelsRefresh();
                 });
 
@@ -4952,12 +4818,6 @@ class Pf1eBuffUI {
         }
     }
 
-    /**
-     * 刷新单行徽章（兼容异步调用）
-     */
-    static async refreshRowBadge(row, tokenId, options = {}) {
-        this.refreshRowBadgeSync(row, tokenId, options);
-    }
 
     /**
      * 单个 Debuff 点击快捷修改轮数/关停弹窗
@@ -7678,7 +7538,7 @@ class BuffFloatingPanel {
     static lastClickedRowId = null; // 用于 Shift 区间多选的基准锚点
     static _draggedContext = null; // { type: "buff" | "tab", data: any }
     static _tabHoverTimer = null;
-    static _selectionSyncTimer = null;
+    static _selectionDebounceTimer = null;
     static _lastSelectedIdsStr = "";
     static _savedExpandedHeight = 380;
     static _renderEpoch = 0;
@@ -7914,12 +7774,6 @@ class BuffFloatingPanel {
         panel.querySelector(".btn-toggle-pin")?.addEventListener("click", () => this.togglePin());
         panel.querySelector(".btn-recalc-all")?.addEventListener("click", async () => {
             await this.recalculateAllSelected();
-        });
-
-        // 标题栏操作：折叠与关闭
-        panel.querySelector(".btn-toggle-collapse")?.addEventListener("click", () => this.toggleCollapse());
-        panel.querySelector(".btn-close-panel")?.addEventListener("click", () => {
-            panel.style.display = "none";
         });
 
         // 标签栏滚轮水平横向滚动支持（直接用鼠标滚轮在棋子栏滑动查看溢出棋子）
@@ -8176,30 +8030,6 @@ class BuffFloatingPanel {
                 ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
             </span>
         `.trim();
-    }
-
-    /**
-     * 从当前选区中取消选择某个 Token（直接调用 Jumpgate 官方框架 removeFromSelection）
-     */
-    static deselectToken(tokenModel) {
-        if (!tokenModel) return;
-        const tokenId = tokenModel.id || tokenModel;
-
-        const tt = window.Campaign?.engine?.tabletop;
-        if (tt && typeof tt.getSelection === "function") {
-            const currentSelection = tt.getSelection() || [];
-            const item = currentSelection.find(i => i.id === tokenId || i.model === tokenModel || i.model?.id === tokenId);
-            if (item && typeof tt.removeFromSelection === "function") {
-                try {
-                    tt.removeFromSelection(item);
-                } catch (e) {}
-            }
-        }
-        if (Array.isArray(window.selected_tokens)) {
-            window.selected_tokens = window.selected_tokens.filter(id => id !== tokenId);
-        }
-        this.checkSelectionChanged();
-        this.renderDispatcher();
     }
 
     /**
@@ -9583,7 +9413,6 @@ class BuffFloatingPanel {
      */
     static async applyBuffToTarget(buff, target, sourceHostId = null) {
         if (!buff || !target || (sourceHostId && target.id === sourceHostId)) return;
-        console.log(`[BuffFloatingPanel] [DEBUG_APPLY] 目标: [${target.name}] (type: ${target.type}, id: ${target.id}), Buff: [${buff.name}], sourceHostId: [${sourceHostId}]`);
         const targetChar = target.type === "char" ? window.Campaign?.characters?.get(target.id) : null;
         const targetToken = target.type === "token" ? Roll20Bridge.getTokenGraphic(target.id) : null;
 
@@ -10127,9 +9956,6 @@ class BuffFloatingPanel {
     }
 
     /**
-     * 明确展开/折叠面板状态（规范高度状态机，避免遗留巨大空白黑框）
-     */
-    /**
      * 明确展开/折叠面板状态。
      * 统一几何模型：面板是唯一的尺寸载体（正常 flex 文档流）；向上展开 = 子节点
      * 顺序颠倒（direction-up 类 → column-reverse，抽屉在上、标题栏在下）+ 面板
@@ -10139,30 +9965,20 @@ class BuffFloatingPanel {
         if (!this.panelEl) return;
         this.isCollapsed = !!collapsed;
         const drawer = this.panelEl.querySelector(".r20-panel-content-drawer");
-        const btn = this.panelEl.querySelector(".btn-toggle-collapse");
         this.panelEl.classList.toggle("is-collapsed", this.isCollapsed);
 
         if (this.isCollapsed) {
             if (drawer) drawer.style.display = "none";
-            if (btn) btn.textContent = "▸";
             this.panelEl.style.height = "auto";
             this.panelEl.style.minHeight = "0px"; // 压过基础 CSS 的 min-height:200px，避免折叠后残留大白框
             return;
         }
 
         // 展开即落位：以标题栏当前位置为锚，朝向由「下方剩余空间 vs 面板高度」判定
-        if (btn) btn.textContent = "▾";
         if (drawer) drawer.style.display = "";
         this.panelEl.style.minHeight = "";
         const headerEl = this.panelEl.querySelector(".r20-panel-header");
         this.placePanel(headerEl ? headerEl.getBoundingClientRect().top : this.panelEl.offsetTop);
-    }
-
-    /**
-     * 切换展开/折叠面板
-     */
-    static toggleCollapse() {
-        this.setCollapse(!this.isCollapsed);
     }
 
     /**
