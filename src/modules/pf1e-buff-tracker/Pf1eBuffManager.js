@@ -1,6 +1,7 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { RecalcService } from "../../core/RecalcService.js";
 import { BuffLifecycle } from "../../core/BuffLifecycle.js";
+import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
 
 /**
  * Pf1eBuffManager.js
@@ -30,12 +31,12 @@ export class Pf1eBuffManager {
                 const isToggledOn = Number(attr.get("current")) === 1;
                 if (isToggledOn) {
                     const prefix = attrName.replace("_enable_toggle", "");
-                    const roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+                    const roundsAttr = Roll20Bridge.findAttr(character, `${prefix}_rounds`);
                     const curRounds = roundsAttr ? roundsAttr.get("current") : "";
                     const isRoundsEmpty = curRounds === "" || curRounds === null || Number(curRounds) === 0;
 
                     if (isRoundsEmpty) {
-                        const initRoundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
+                        const initRoundsAttr = Roll20Bridge.findAttr(character, `${prefix}_init_rounds`);
                         const formula = initRoundsAttr ? initRoundsAttr.get("current") : "";
                         if (formula) {
                             const val = await Roll20Bridge.evalNativeFormula(formula, character);
@@ -57,35 +58,25 @@ export class Pf1eBuffManager {
         character.attribs.on("add", (attr, collection, options) => handleAttributeMutation(attr, options));
     }
 
+    /**
+     * 收敛全项目的「Buff/Debuff 变更 → 刷新先攻条徽章」防御性调用
+     * （Pf1eBuffUI 存在循环导入风险，故以 typeof 守卫）
+     */
+    static notifyTokenRefresh(character) {
+        if (character && typeof Pf1eBuffUI !== "undefined") {
+            Pf1eBuffUI.requestTokenRefresh(character.id);
+        }
+    }
+
+    /**
+     * 判定 Condition 属性当前值是否为激活态（"0"/0/""/null/undefined/false 均视为关停）
+     */
+    static isConditionValueActive(val) {
+        return val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
+    }
+
     static generateStandardRowId() {
-        let id = "";
-        if (typeof window !== "undefined" && typeof window.generateUUID === "function") {
-            id = window.generateUUID();
-        }
-        if (!id) {
-            // 回退实现：标准 Roll20 Push ID 生成器（严格剔除下划线 _，防止破坏 repeating_section_([^_]+) 正则分割）
-            const PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-            let now = new Date().getTime();
-            const timeStampChars = new Array(8);
-            for (let i = 7; i >= 0; i--) {
-                timeStampChars[i] = PUSH_CHARS.charAt(now % 63);
-                now = Math.floor(now / 63);
-            }
-            id = timeStampChars.join("");
-            for (let i = 0; i < 12; i++) {
-                id += PUSH_CHARS.charAt(Math.floor(Math.random() * 63));
-            }
-        }
-        // 核心工业级约束：坚决剔除下划线 _（替换为合法字母 a），防止截断 Roll20 官方 repeating_buff2_([^_]+) 正则
-        id = id.replace(/_/g, "a");
-        // 规避 Roll20 Jumpgate 坏行检测判定：
-        // Jumpgate 规则：若 ID 以 '-' 开头且全为纯小写 (le.substring(0,1)==='-' && le.toLowerCase()===le)，
-        // 则会将其判定为坏死行并注入 'repitembroken' 样式类导致弹出红字报错。
-        // 因此必须保留天然大小写，且若首字符为 '-' 时确保包含大写字母。
-        if (id.startsWith("-") && id.toLowerCase() === id) {
-            id = id.substring(0, 1) + id.charAt(1).toUpperCase() + id.substring(2);
-        }
-        return id;
+        return Roll20Bridge.generateStandardRowId();
     }
 
     /**
@@ -156,7 +147,7 @@ export class Pf1eBuffManager {
         }
 
         // 同步更新 _reporder_repeating_buff2
-        const orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+        const orderAttr = Roll20Bridge.findAttr(character, "_reporder_repeating_buff2");
         if (orderAttr && orderAttr.get("current")) {
             let curOrder = String(orderAttr.get("current"));
             for (const [malformedRowId, { cleanRowId }] of malformedMap.entries()) {
@@ -291,7 +282,7 @@ export class Pf1eBuffManager {
         }
 
         // 按照 Roll20 官方 _reporder_repeating_buff2 顺序重排
-        const orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+        const orderAttr = Roll20Bridge.findAttr(character, "_reporder_repeating_buff2");
         if (orderAttr && orderAttr.get("current")) {
             const orderList = orderAttr.get("current").split(",").map(id => id.trim().toLowerCase()).filter(Boolean);
             const orderMap = new Map();
@@ -339,7 +330,7 @@ export class Pf1eBuffManager {
         }
 
         const newOrderStr = orderList.join(",");
-        let orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+        let orderAttr = Roll20Bridge.findAttr(character, "_reporder_repeating_buff2");
         if (orderAttr) {
             orderAttr.save({ current: newOrderStr });
         } else {
@@ -397,7 +388,7 @@ export class Pf1eBuffManager {
             const prefix = nameAttr.get("name").replace("_name", "");
             const rowId = prefix.replace("repeating_buff2_", "");
 
-            let toggleAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_enable_toggle`);
+            let toggleAttr = Roll20Bridge.findAttr(character, `${prefix}_enable_toggle`);
             if (!toggleAttr) {
                 toggleAttr = character.attribs.create({ name: `${prefix}_enable_toggle`, current: 1 });
             } else {
@@ -409,7 +400,7 @@ export class Pf1eBuffManager {
 
             // 更新或保存预置初始轮数/公式
             if (initRounds !== null && initRounds !== undefined) {
-                let initAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`);
+                let initAttr = Roll20Bridge.findAttr(character, `${prefix}_init_rounds`);
                 if (!initAttr) {
                     if (initRounds !== "") character.attribs.create({ name: `${prefix}_init_rounds`, current: initRounds });
                 } else {
@@ -420,14 +411,14 @@ export class Pf1eBuffManager {
             let effectiveRounds = rounds;
             if (effectiveRounds === null || isNaN(effectiveRounds)) {
                 // 借用原生机制求值预置公式
-                const targetFormula = initRounds || (character.attribs.models.find(a => a.get("name") === `${prefix}_init_rounds`)?.get("current"));
+                const targetFormula = initRounds || (Roll20Bridge.findAttr(character, `${prefix}_init_rounds`)?.get("current"));
                 if (targetFormula) {
                     const evalVal = await Roll20Bridge.evalNativeFormula(targetFormula, character);
                     if (evalVal !== null && !isNaN(evalVal)) effectiveRounds = evalVal;
                 }
             }
 
-            let roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+            let roundsAttr = Roll20Bridge.findAttr(character, `${prefix}_rounds`);
             if (effectiveRounds !== null && !isNaN(effectiveRounds)) {
                 if (!roundsAttr) {
                     roundsAttr = character.attribs.create({ name: `${prefix}_rounds`, current: Number(effectiveRounds), max: Number(effectiveRounds) });
@@ -444,7 +435,7 @@ export class Pf1eBuffManager {
                 for (const [k, v] of Object.entries(extraAttrs)) {
                     if (k === "name" || k === "enable_toggle" || k === "rounds" || k === "init_rounds" || k === "row_id") continue;
                     const attrFullName = `${prefix}_${k}`;
-                    let subAttr = character.attribs.models.find(a => a.get("name") === attrFullName);
+                    let subAttr = Roll20Bridge.findAttr(character, attrFullName);
                     if (!subAttr) {
                         character.attribs.create({ name: attrFullName, current: v });
                     } else {
@@ -455,8 +446,8 @@ export class Pf1eBuffManager {
 
             // 若本次刷新为独立普通副本（未包含 link_host_id），清除该条目可能残留的旧影子链接
             if (!extraAttrs || !extraAttrs.link_host_id) {
-                const oldHostAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_link_host_id`);
-                const oldSrcAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_link_source_row_id`);
+                const oldHostAttr = Roll20Bridge.findAttr(character, `${prefix}_link_host_id`);
+                const oldSrcAttr = Roll20Bridge.findAttr(character, `${prefix}_link_source_row_id`);
                 const oldHostId = oldHostAttr ? oldHostAttr.get("current") : null;
                 const oldSrcRowId = oldSrcAttr ? oldSrcAttr.get("current") : null;
                 if (oldHostAttr) oldHostAttr.destroy();
@@ -534,7 +525,7 @@ export class Pf1eBuffManager {
         }
 
         // 同步规范维护 _reporder_repeating_buff2 顺序
-        let orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+        let orderAttr = Roll20Bridge.findAttr(character, "_reporder_repeating_buff2");
         if (!orderAttr) {
             character.attribs.create({
                 name: "_reporder_repeating_buff2",
@@ -559,7 +550,7 @@ export class Pf1eBuffManager {
     static ensureNativeRequiredAttrs(character, prefix, rowId) {
         const checkAndCreate = (subKey, defaultVal) => {
             const fullKey = `${prefix}_${subKey}`;
-            let attr = character.attribs.models.find(a => a.get("name") === fullKey);
+            let attr = Roll20Bridge.findAttr(character, fullKey);
             if (!attr) {
                 character.attribs.create({ name: fullKey, current: defaultVal });
             }
@@ -584,13 +575,9 @@ export class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
 
         const targetPrefix = `repeating_buff2_${rowId}`;
-        const lowerPrefix = `repeating_buff2_${rowId.toLowerCase()}`;
 
         // 1. 读取该 Buff 的预置初始轮数/公式 (init_rounds)
-        const initRoundsAttr = character.attribs.models.find(a => {
-            const n = a.get("name") || "";
-            return n === `${targetPrefix}_init_rounds` || n.toLowerCase() === `${lowerPrefix}_init_rounds`;
-        });
+        const initRoundsAttr = Roll20Bridge.findAttrCI(character, `${targetPrefix}_init_rounds`);
 
         const formula = initRoundsAttr ? String(initRoundsAttr.get("current") ?? "").trim() : "";
         let finalRounds = null;
@@ -609,10 +596,7 @@ export class Pf1eBuffManager {
         }
 
         // 2. 找到或创建当前剩余轮数属性 (rounds) 并赋值
-        let roundsAttr = character.attribs.models.find(a => {
-            const n = a.get("name") || "";
-            return n === `${targetPrefix}_rounds` || n.toLowerCase() === `${lowerPrefix}_rounds`;
-        });
+        let roundsAttr = Roll20Bridge.findAttrCI(character, `${targetPrefix}_rounds`);
 
         if (finalRounds !== null && !isNaN(finalRounds)) {
             if (!roundsAttr) {
@@ -647,33 +631,20 @@ export class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
 
         const targetPrefix = `repeating_buff2_${rowId}`;
-        const lowerPrefix = `repeating_buff2_${rowId.toLowerCase()}`;
 
         // 合并行动一：若开启，强制原子重置为初始满轮数；若关停，轮数清零防僵尸残留
         if (enable) {
             await this.resetBuffRoundsToInitial(character, rowId);
         } else {
-            const roundsAttr = character.attribs.models.find(a => {
-                const n = a.get("name") || "";
-                return n === `${targetPrefix}_rounds` || n.toLowerCase() === `${lowerPrefix}_rounds`;
-            });
+            const roundsAttr = Roll20Bridge.findAttrCI(character, `${targetPrefix}_rounds`);
             if (roundsAttr && roundsAttr.get("current") !== 0 && roundsAttr.get("current") !== "0") {
                 roundsAttr.save({ current: 0 });
             }
         }
 
         // 合并行动二：设置原生激活开关 enable_toggle
-        let toggleAttr = character.attribs.models.find(a => {
-            const n = a.get("name") || "";
-            return n === `${targetPrefix}_enable_toggle` || n.toLowerCase() === `${lowerPrefix}_enable_toggle`;
-        });
-
         const val = enable ? 1 : 0;
-        if (!toggleAttr) {
-            toggleAttr = character.attribs.create({ name: `${targetPrefix}_enable_toggle`, current: val });
-        } else {
-            toggleAttr.save({ current: val });
-        }
+        Roll20Bridge.upsertAttr(character, `${targetPrefix}_enable_toggle`, val, { ci: true });
 
         // 合并行动三：驱动官方加值重算管线 (让官方脚本去给整张人物卡设置加值/减值)
         console.log(`[Pf1eBuffManager] 已${enable ? "启用" : "关停"} ${character.get("name")} 的 Buff (${rowId})，正在联动重算加值...`);
@@ -736,14 +707,8 @@ export class Pf1eBuffManager {
      */
     static getTrackedDebuffs(character) {
         if (!character || !character.attribs) return [];
-        const attr = character.attribs.models.find(a => a.get("name") === "tracked_debuffs");
-        if (!attr || !attr.get("current")) return [];
-        try {
-            const parsed = JSON.parse(attr.get("current"));
-            return Array.isArray(parsed) ? parsed : [];
-        } catch (e) {
-            return [];
-        }
+        const parsed = Roll20Bridge.readJsonAttr(character, "tracked_debuffs", null);
+        return Array.isArray(parsed) ? parsed : [];
     }
 
     /**
@@ -752,20 +717,11 @@ export class Pf1eBuffManager {
     static async addTrackedDebuff(character, conditionKey) {
         if (!character || !conditionKey || !character.attribs) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
-        let attr = character.attribs.models.find(a => a.get("name") === "tracked_debuffs");
-        let list = [];
-        if (attr && attr.get("current")) {
-            try { list = JSON.parse(attr.get("current")); } catch (e) { list = []; }
-        }
+        let list = Roll20Bridge.readJsonAttr(character, "tracked_debuffs");
         if (!Array.isArray(list)) list = [];
         if (!list.includes(conditionKey)) {
             list.push(conditionKey);
-            const jsonStr = JSON.stringify(list);
-            if (!attr) {
-                character.attribs.create({ name: "tracked_debuffs", current: jsonStr });
-            } else {
-                attr.save({ current: jsonStr });
-            }
+            Roll20Bridge.writeJsonAttr(character, "tracked_debuffs", list);
         }
         return true;
     }
@@ -776,17 +732,10 @@ export class Pf1eBuffManager {
     static async removeTrackedDebuff(character, conditionKey) {
         if (!character || !conditionKey || !character.attribs) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
-        let attr = character.attribs.models.find(a => a.get("name") === "tracked_debuffs");
-        if (!attr || !attr.get("current")) return false;
-        let list = [];
-        try { list = JSON.parse(attr.get("current")); } catch (e) { list = []; }
+        const list = Roll20Bridge.readJsonAttr(character, "tracked_debuffs", null);
         if (!Array.isArray(list)) return false;
         const filtered = list.filter(k => k !== conditionKey);
-        if (filtered.length === 0) {
-            attr.destroy();
-        } else {
-            attr.save({ current: JSON.stringify(filtered) });
-        }
+        Roll20Bridge.writeJsonAttr(character, "tracked_debuffs", filtered, { destroyIfEmpty: true });
         return true;
     }
 
@@ -794,7 +743,7 @@ export class Pf1eBuffManager {
         if (!character || !conditionKey) return false;
         await Roll20Bridge.ensureCharacterAttributes(character);
 
-        let condAttr = character.attribs.models.find(a => a.get("name") === conditionKey);
+        let condAttr = Roll20Bridge.findAttr(character, conditionKey);
         const val = enable ? 1 : 0;
         if (!condAttr) {
             condAttr = character.attribs.create({ name: conditionKey, current: val });
@@ -803,7 +752,7 @@ export class Pf1eBuffManager {
         }
 
         const roundsKey = `${conditionKey}_rounds`;
-        let roundsAttr = character.attribs.models.find(a => a.get("name") === roundsKey);
+        let roundsAttr = Roll20Bridge.findAttr(character, roundsKey);
         if (rounds !== null && rounds !== undefined && rounds !== "") {
             if (!roundsAttr) {
                 character.attribs.create({ name: roundsKey, current: rounds });
@@ -843,20 +792,11 @@ export class Pf1eBuffManager {
         } else {
             await this.toggleBuff(hostChar, hostRowId, false);
         }
-        if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(hostChar.id);
+        this.notifyTokenRefresh(hostChar);
 
-        // 2. 获取并自动拓扑自愈下游受术者列表
+        // 2. 获取下游受术者列表（拓扑自愈由 GM 加载房间后的 healDownstreamTopology 统一执行）
         const attrName = isDebuff ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
-        let childrenAttr = hostChar.attribs.models.find(a => a.get("name") === attrName);
-        let children = [];
-        if (childrenAttr && childrenAttr.get("current")) {
-            try { children = JSON.parse(childrenAttr.get("current")); } catch (e) { children = []; }
-        }
-        if (!Array.isArray(children) || children.length === 0) {
-            if (!isDebuff) {
-                children = await this.discoverDownstreamLinks(hostChar.id, hostRowId);
-            }
-        }
+        const children = Roll20Bridge.readJsonAttr(hostChar, attrName);
 
         let count = 0;
         if (Array.isArray(children)) {
@@ -865,12 +805,27 @@ export class Pf1eBuffManager {
                 if (targetChar) {
                     if (isDebuff || item.rowId.startsWith("condition-")) {
                         await this.toggleCondition(targetChar, item.rowId, false);
-                        const hAttr = targetChar.attribs.models.find(a => a.get("name") === `${item.rowId}_link_host_id`);
+                        const hAttr = Roll20Bridge.findAttr(targetChar, `${item.rowId}_link_host_id`);
                         if (hAttr) hAttr.destroy();
                     } else {
                         await this.toggleBuff(targetChar, item.rowId, false);
                     }
-                    if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
+                    this.notifyTokenRefresh(targetChar);
+                    count++;
+                    continue;
+                }
+
+                // 下游为纯 Token：移除其自定义字段中的对应条目（Buff 与 Debuff 都查，链接随条目消失）
+                const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+                if (!targetToken) continue;
+                const buffsList = TokenBuffManager.getTokenBuffs(targetToken);
+                const debuffsList = TokenBuffManager.getTokenDebuffs(targetToken);
+                const buffsFiltered = buffsList.filter(e => e.rowId !== item.rowId);
+                const debuffsFiltered = debuffsList.filter(e => (e.rowId || e.key) !== item.rowId);
+                if (buffsFiltered.length !== buffsList.length || debuffsFiltered.length !== debuffsList.length) {
+                    TokenBuffManager.saveTokenBuffs(targetToken, buffsFiltered);
+                    TokenBuffManager.saveTokenDebuffs(targetToken, debuffsFiltered);
+                    this.notifyTokenRefresh(targetToken);
                     count++;
                 }
             }
@@ -900,21 +855,12 @@ export class Pf1eBuffManager {
         if (!hostChar || !hostRowId || !childCharId || !childRowId || !hostChar.attribs) return;
         await Roll20Bridge.ensureCharacterAttributes(hostChar);
         const attrName = hostRowId.startsWith("condition-") ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
-        let attr = hostChar.attribs.models.find(a => a.get("name") === attrName);
-        let children = [];
-        if (attr && attr.get("current")) {
-            try { children = JSON.parse(attr.get("current")); } catch (e) { children = []; }
-        }
+        let children = Roll20Bridge.readJsonAttr(hostChar, attrName);
         if (!Array.isArray(children)) children = [];
         if (!children.some(c => c.charId === childCharId && c.rowId === childRowId)) {
             children.push({ charId: childCharId, rowId: childRowId });
         }
-        const jsonStr = JSON.stringify(children);
-        if (!attr) {
-            hostChar.attribs.create({ name: attrName, current: jsonStr });
-        } else {
-            attr.save({ current: jsonStr });
-        }
+        Roll20Bridge.writeJsonAttr(hostChar, attrName, children);
     }
 
     /**
@@ -924,17 +870,10 @@ export class Pf1eBuffManager {
         if (!hostChar || !hostRowId || !hostChar.attribs) return;
         await Roll20Bridge.ensureCharacterAttributes(hostChar);
         const attrName = hostRowId.startsWith("condition-") ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
-        let attr = hostChar.attribs.models.find(a => a.get("name") === attrName);
-        if (!attr || !attr.get("current")) return;
-        let children = [];
-        try { children = JSON.parse(attr.get("current")); } catch (e) { children = []; }
+        const children = Roll20Bridge.readJsonAttr(hostChar, attrName, null);
         if (!Array.isArray(children)) return;
         const filtered = children.filter(c => !(c.charId === childCharId && (c.rowId === childRowId || (!c.rowId && childRowId === hostRowId))));
-        if (filtered.length === 0) {
-            attr.destroy();
-        } else {
-            attr.save({ current: JSON.stringify(filtered) });
-        }
+        Roll20Bridge.writeJsonAttr(hostChar, attrName, filtered, { destroyIfEmpty: true });
     }
 
     /**
@@ -946,8 +885,8 @@ export class Pf1eBuffManager {
 
         const isDebuff = rowId.startsWith("condition-");
         const prefix = isDebuff ? rowId : `repeating_buff2_${rowId}`;
-        const hostAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_link_host_id`);
-        const srcAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_link_source_row_id`);
+        const hostAttr = Roll20Bridge.findAttr(character, `${prefix}_link_host_id`);
+        const srcAttr = Roll20Bridge.findAttr(character, `${prefix}_link_source_row_id`);
 
         const hostId = hostAttr ? hostAttr.get("current") : null;
         const srcRowId = srcAttr ? srcAttr.get("current") : null;
@@ -1017,7 +956,7 @@ export class Pf1eBuffManager {
         const srcAttrName = `${conditionKey}_link_source_row_id`;
 
         if (linkHostId) {
-            let hostAttr = targetChar.attribs.models.find(a => a.get("name") === hostAttrName);
+            let hostAttr = Roll20Bridge.findAttr(targetChar, hostAttrName);
             if (!hostAttr) {
                 targetChar.attribs.create({ name: hostAttrName, current: linkHostId });
             } else {
@@ -1025,7 +964,7 @@ export class Pf1eBuffManager {
             }
 
             const srcRowId = linkSourceRowId || conditionKey;
-            let srcAttr = targetChar.attribs.models.find(a => a.get("name") === srcAttrName);
+            let srcAttr = Roll20Bridge.findAttr(targetChar, srcAttrName);
             if (!srcAttr) {
                 targetChar.attribs.create({ name: srcAttrName, current: srcRowId });
             } else {
@@ -1038,8 +977,8 @@ export class Pf1eBuffManager {
             }
         } else {
             // 普通副本施加：彻底斩断该 Debuff 可能存在的旧影子链接（通知旧宿主除名并销毁元属性）
-            const oldHostAttr = targetChar.attribs.models.find(a => a.get("name") === hostAttrName);
-            const oldSrcAttr = targetChar.attribs.models.find(a => a.get("name") === srcAttrName);
+            const oldHostAttr = Roll20Bridge.findAttr(targetChar, hostAttrName);
+            const oldSrcAttr = Roll20Bridge.findAttr(targetChar, srcAttrName);
             const oldHostId = oldHostAttr ? oldHostAttr.get("current") : null;
             const oldSrcRowId = oldSrcAttr ? oldSrcAttr.get("current") : null;
 
@@ -1080,10 +1019,7 @@ export class Pf1eBuffManager {
             // === 阶段一：老大只需循环调用小弟自毁，直到自己小弟一个都不剩 ===
             const childrenAttrName = `${prefix}_link_children`;
             while (true) {
-                const childrenAttr = character.attribs.models.find(a => a.get("name") === childrenAttrName);
-                if (!childrenAttr || !childrenAttr.get("current")) break;
-                let children = [];
-                try { children = JSON.parse(childrenAttr.get("current")); } catch (e) { children = []; }
+                const children = Roll20Bridge.readJsonAttr(character, childrenAttrName, null);
                 if (!Array.isArray(children) || children.length === 0) break;
 
                 const item = children[0];
@@ -1100,25 +1036,30 @@ export class Pf1eBuffManager {
                         await this.deleteBuffRowPermanently(cChar, item.rowId, visited);
                     }
                 } else {
-                    // 若小弟角色已从战役移除（孤儿脏数据），直接在老大处除名
+                    // 下游为纯 Token：移除其自定义字段中的对应条目（链接随条目一起消失）
+                    const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+                    if (targetToken) {
+                        const entries = TokenBuffManager.getTokenBuffs(targetToken);
+                        const filtered = entries.filter(e => e.rowId !== item.rowId);
+                        if (filtered.length !== entries.length) {
+                            TokenBuffManager.saveTokenBuffs(targetToken, filtered);
+                        }
+                    }
+                    // 除名
                     await this.removeDownstreamLink(character, rowId, item.charId, item.rowId);
                 }
 
                 // 防御性校验：若小弟自毁后由于历史异常未能主动除名，老大强制将其剔除，确保循环必收敛
-                const checkAttr = character.attribs.models.find(a => a.get("name") === childrenAttrName);
-                if (checkAttr && checkAttr.get("current")) {
-                    let curChildren = [];
-                    try { curChildren = JSON.parse(checkAttr.get("current")); } catch (e) { curChildren = []; }
-                    if (Array.isArray(curChildren) && curChildren.some(c => c.charId === item.charId && c.rowId === item.rowId)) {
-                        await this.removeDownstreamLink(character, rowId, item.charId, item.rowId);
-                    }
+                const curChildren = Roll20Bridge.readJsonAttr(character, childrenAttrName, null);
+                if (Array.isArray(curChildren) && curChildren.some(c => c.charId === item.charId && c.rowId === item.rowId)) {
+                    await this.removeDownstreamLink(character, rowId, item.charId, item.rowId);
                 }
             }
 
             // === 阶段二：小弟全部除名销毁后，自身再行销毁 ===
             // 1. 若自身也是某个上一级宿主的子条目，在自身自毁时自然向上一级宿主除名
-            const hostAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_link_host_id`);
-            const srcAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_link_source_row_id`);
+            const hostAttr = Roll20Bridge.findAttr(character, `${prefix}_link_host_id`);
+            const srcAttr = Roll20Bridge.findAttr(character, `${prefix}_link_source_row_id`);
             if (hostAttr && srcAttr) {
                 const hostId = hostAttr.get("current");
                 const srcRowId = srcAttr.get("current");
@@ -1141,7 +1082,7 @@ export class Pf1eBuffManager {
                 console.log(`[Pf1eBuffManager] 已物理彻底销毁 ${character.get("name")} 的 Buff [${rowId}] 共 ${toDestroy.length} 项原生属性`);
 
                 // 同步从 _reporder_repeating_buff2 顺序列表中移除
-                const orderAttr = character.attribs.models.find(a => a.get("name") === "_reporder_repeating_buff2");
+                const orderAttr = Roll20Bridge.findAttr(character, "_reporder_repeating_buff2");
                 if (orderAttr && orderAttr.get("current")) {
                     const curVal = String(orderAttr.get("current"));
                     const filtered = curVal.split(",").filter(id => id.trim().toLowerCase() !== rowId.toLowerCase()).join(",");
@@ -1187,10 +1128,7 @@ export class Pf1eBuffManager {
             // === 阶段一：老大只需循环调用小弟自毁，直到自己小弟一个都不剩 ===
             const childrenAttrName = `${conditionKey}_link_children`;
             while (true) {
-                const childrenAttr = character.attribs.models.find(a => a.get("name") === childrenAttrName);
-                if (!childrenAttr || !childrenAttr.get("current")) break;
-                let children = [];
-                try { children = JSON.parse(childrenAttr.get("current")); } catch (e) { children = []; }
+                const children = Roll20Bridge.readJsonAttr(character, childrenAttrName, null);
                 if (!Array.isArray(children) || children.length === 0) break;
 
                 const item = children[0];
@@ -1207,18 +1145,19 @@ export class Pf1eBuffManager {
                         await this.deleteBuffRowPermanently(targetChar, item.rowId, visited);
                     }
                 } else {
-                    // 若受术者已离线或被删除，直接除名
+                    // 下游为纯 Token：移除其自定义字段中的对应 Debuff 登记
+                    const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+                    if (targetToken) {
+                        TokenBuffManager.removeTrackedDebuff(targetToken, item.rowId || conditionKey);
+                    }
+                    // 除名
                     await this.removeDownstreamLink(character, conditionKey, item.charId, item.rowId || conditionKey);
                 }
 
                 // 防御性校验：确保必定收敛剔除
-                const checkAttr = character.attribs.models.find(a => a.get("name") === childrenAttrName);
-                if (checkAttr && checkAttr.get("current")) {
-                    let curChildren = [];
-                    try { curChildren = JSON.parse(checkAttr.get("current")); } catch (e) { curChildren = []; }
-                    if (Array.isArray(curChildren) && curChildren.some(c => c.charId === item.charId && (c.rowId === item.rowId || (!c.rowId && item.rowId === conditionKey)))) {
-                        await this.removeDownstreamLink(character, conditionKey, item.charId, item.rowId || conditionKey);
-                    }
+                const curChildren = Roll20Bridge.readJsonAttr(character, childrenAttrName, null);
+                if (Array.isArray(curChildren) && curChildren.some(c => c.charId === item.charId && (c.rowId === item.rowId || (!c.rowId && item.rowId === conditionKey)))) {
+                    await this.removeDownstreamLink(character, conditionKey, item.charId, item.rowId || conditionKey);
                 }
             }
 
@@ -1226,8 +1165,8 @@ export class Pf1eBuffManager {
             // 1. 若自己是受术者（记录了 link_host_id），在自毁时向上级施法者汇报并在其 link_children 中除名
             const hostAttrName = `${conditionKey}_link_host_id`;
             const srcAttrName = `${conditionKey}_link_source_row_id`;
-            let hostAttr = character.attribs.models.find(a => a.get("name") === hostAttrName);
-            let srcAttr = character.attribs.models.find(a => a.get("name") === srcAttrName);
+            let hostAttr = Roll20Bridge.findAttr(character, hostAttrName);
+            let srcAttr = Roll20Bridge.findAttr(character, srcAttrName);
             const hostId = hostAttr ? hostAttr.get("current") : null;
             const srcRowId = srcAttr ? srcAttr.get("current") : null;
 
@@ -1241,20 +1180,18 @@ export class Pf1eBuffManager {
             if (srcAttr) srcAttr.destroy();
 
             // 2. 销毁自身可能残留的 link_children 索引属性
-            let leftChildrenAttr = character.attribs.models.find(a => a.get("name") === childrenAttrName);
+            let leftChildrenAttr = Roll20Bridge.findAttr(character, childrenAttrName);
             if (leftChildrenAttr) leftChildrenAttr.destroy();
 
             // 3. 关停自身该状态并销毁轮数
             await this.toggleCondition(character, conditionKey, false);
-            const roundsAttr = character.attribs.models.find(a => a.get("name") === `${conditionKey}_rounds`);
+            const roundsAttr = Roll20Bridge.findAttr(character, `${conditionKey}_rounds`);
             if (roundsAttr) roundsAttr.destroy();
 
             // 4. 从 tracked_debuffs 属性中彻底除名
             await this.removeTrackedDebuff(character, conditionKey);
 
-            if (typeof Pf1eBuffUI !== "undefined") {
-                Pf1eBuffUI.requestTokenRefresh(character.id);
-            }
+            this.notifyTokenRefresh(character);
 
             console.log(`[Pf1eBuffManager] 已物理彻底销毁 [${character.get("name")}] 的 Debuff [${conditionKey}] 及其链接关系`);
             return true;
@@ -1278,7 +1215,7 @@ export class Pf1eBuffManager {
 
         // 读取下游当前的 rounds，保证下游剩余轮数绝对不被宿主重置覆盖！
         const childPrefix = `repeating_buff2_${childRowId}`;
-        const childRoundsAttr = targetChar.attribs.models.find(a => a.get("name") === `${childPrefix}_rounds`);
+        const childRoundsAttr = Roll20Bridge.findAttr(targetChar, `${childPrefix}_rounds`);
         const childCurrentRounds = childRoundsAttr ? childRoundsAttr.get("current") : "";
 
         // 提取加值细目：严格排除本地独立字段（rounds, enable_toggle, link_*）
@@ -1316,7 +1253,7 @@ export class Pf1eBuffManager {
             for (const ha of hostIdAttrs) {
                 if (ha.get("current") === hostCharId) {
                     const prefix = ha.get("name").replace("_link_host_id", "");
-                    const sourceRowAttr = c.attribs.models.find(a => a.get("name") === `${prefix}_link_source_row_id`);
+                    const sourceRowAttr = Roll20Bridge.findAttr(c, `${prefix}_link_source_row_id`);
                     if (sourceRowAttr && sourceRowAttr.get("current") === hostRowId) {
                         const childRowId = prefix.replace("repeating_buff2_", "");
                         found.push({ charId: c.id, rowId: childRowId });
@@ -1328,34 +1265,105 @@ export class Pf1eBuffManager {
     }
 
     /**
-     * 从宿主广播同步给所有下游订阅副本 (具备索引缺失自动反向发现与拓扑自愈能力)
+     * 下游副本是否仍然存在（人物卡子行 / Token 自定义字段条目 / Debuff 登记）。
+     * 仅目标存在而子副本已被删除 → 视为幽灵登记。
+     */
+    static _downstreamCopyAlive(childRef) {
+        const char = window.Campaign?.characters?.get(childRef.charId);
+        if (char && char.attribs) {
+            return !!Roll20Bridge.findAttr(char, `repeating_buff2_${childRef.rowId}_name`);
+        }
+        const token = Roll20Bridge.getTokenGraphic(childRef.charId);
+        if (token) {
+            if (TokenBuffManager.getTokenBuffs(token).some(e => e.rowId === childRef.rowId)) return true;
+            return TokenBuffManager.getTokenDebuffs(token).some(d => (d.rowId || d.key) === childRef.rowId);
+        }
+        return false;
+    }
+
+    /**
+     * 父子 Buff 链接拓扑自愈：以 GM 身份加载房间后运行一次（不再随每次加减 Buff 运行）。
+     * 1. 幽灵剔除：link_children 中下游副本已不存在的登记被清除（目标存在但子行已删也算幽灵）；
+     * 2. 索引重建：下游索引缺失时，全战役反向发现并重建。
+     * @returns {number} 发生过修复的宿主条目数
+     */
+    static async healDownstreamTopology() {
+        if (!window.Campaign?.characters) return 0;
+        let healed = 0;
+        for (const host of window.Campaign.characters.models) {
+            try {
+                await Roll20Bridge.ensureCharacterAttributes(host);
+
+                // 正面 Buff 宿主
+                const buffs = await this.getAllBuffs(host);
+                for (const buff of buffs) {
+                    if (buff.linkHostId && buff.linkSourceRowId) continue; // 自己是子节点，跳过
+                    const attrName = `repeating_buff2_${buff.rowId}_link_children`;
+                    const raw = Array.isArray(buff.linkChildren) ? buff.linkChildren : [];
+                    // 1. 幽灵剔除：下游副本已不存在
+                    const kids = raw.filter(k => this._downstreamCopyAlive(k));
+                    // 2. 索引缺失重建
+                    if (kids.length === 0) {
+                        const found = await this.discoverDownstreamLinks(host.id, buff.rowId);
+                        if (found.length > 0) kids.push(...found);
+                    }
+                    if (kids.length !== raw.length || (raw.length === 0 && kids.length > 0)) {
+                        const existing = Roll20Bridge.findAttr(host, attrName);
+                        const json = JSON.stringify(kids);
+                        if (existing) existing.save({ current: json });
+                        else host.attribs.create({ name: attrName, current: json });
+                        healed++;
+                        console.log(`[Pf1eBuffManager] 拓扑自愈：[${host.get("name")}] 的 Buff [${buff.name}] 清理至 ${kids.length} 个有效下游索引`);
+                    }
+                }
+
+                // Debuff 宿主
+                const debuffs = Pf1eBuffUI.getAllDebuffsSync(host);
+                for (const d of debuffs) {
+                    const attrName = `${d.key}_link_children`;
+                    let raw = [];
+                    const existing = Roll20Bridge.findAttr(host, attrName);
+                    if (existing && existing.get("current")) {
+                        try { raw = JSON.parse(existing.get("current")); } catch (e) { raw = []; }
+                    }
+                    if (!Array.isArray(raw)) raw = [];
+                    const kids = raw.filter(k => this._downstreamCopyAlive(k));
+                    if (kids.length === 0) {
+                        const found = await this.discoverDownstreamLinks(host.id, d.key);
+                        if (found.length > 0) kids.push(...found);
+                    }
+                    if (kids.length !== raw.length || (raw.length === 0 && kids.length > 0)) {
+                        const json = JSON.stringify(kids);
+                        if (kids.length > 0) {
+                            if (existing) existing.save({ current: json });
+                            else host.attribs.create({ name: attrName, current: json });
+                        } else if (existing) {
+                            existing.destroy();
+                        }
+                        healed++;
+                        console.log(`[Pf1eBuffManager] 拓扑自愈：[${host.get("name")}] 的 Debuff [${d.name}] 清理至 ${kids.length} 个有效下游索引`);
+                    }
+                }
+            } catch (e) {
+                console.error(`[Pf1eBuffManager] 拓扑自愈异常 ([${host.get("name")}]):`, e);
+            }
+        }
+        return healed;
+    }
+
+    /**
+     * 从宿主广播同步给所有下游订阅副本 (拓扑自愈由 GM 加载房间后的 healDownstreamTopology 统一执行)
      */
     static async broadcastDownstreamSync(hostChar, hostRowId) {
         if (!hostChar || !hostRowId) return 0;
         await Roll20Bridge.ensureCharacterAttributes(hostChar);
         const prefix = `repeating_buff2_${hostRowId}`;
-        let childrenAttr = hostChar.attribs.models.find(a => a.get("name") === `${prefix}_link_children`);
-
-        let children = [];
-        if (childrenAttr && childrenAttr.get("current")) {
-            try { children = JSON.parse(childrenAttr.get("current")); } catch (e) { children = []; }
-        }
-
-        // 拓扑自愈：若宿主未登记下游（如老版本建立的链接），全量反查战役自愈修复索引
-        if (!Array.isArray(children) || children.length === 0) {
-            children = await this.discoverDownstreamLinks(hostChar.id, hostRowId);
-            if (children.length > 0) {
-                const jsonStr = JSON.stringify(children);
-                if (!childrenAttr) {
-                    childrenAttr = hostChar.attribs.create({ name: `${prefix}_link_children`, current: jsonStr });
-                } else {
-                    childrenAttr.save({ current: jsonStr });
-                }
-                console.log(`[Pf1eBuffManager] 拓扑自愈：为 [${hostChar.get("name")}] 自动恢复 ${children.length} 个下游链接索引`);
-            }
-        }
-
+        const children = Roll20Bridge.readJsonAttr(hostChar, `${prefix}_link_children`);
         if (!Array.isArray(children) || children.length === 0) return 0;
+
+        const hostBuffs = await this.getAllBuffs(hostChar);
+        const hostBuff = hostBuffs.find(b => b.rowId === hostRowId);
+        if (!hostBuff) return 0;
 
         let count = 0;
         for (const item of children) {
@@ -1364,9 +1372,30 @@ export class Pf1eBuffManager {
                 const ok = await this.syncBuffToDownstream(hostChar, hostRowId, targetChar, item.rowId);
                 if (ok) {
                     count++;
-                    if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
+                    this.notifyTokenRefresh(targetChar);
+                }
+                continue;
+            }
+
+            // 下游为纯 Token：同步名称与细目加值（严格保留下游剩余轮数，绝不被宿主覆盖）
+            const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+            if (!targetToken) continue;
+            const entries = TokenBuffManager.getTokenBuffs(targetToken);
+            const entry = entries.find(e => e.rowId === item.rowId);
+            if (!entry) continue;
+
+            entry.name = hostBuff.name;
+            const cleanAttrs = {};
+            if (hostBuff.extraAttrs) {
+                for (const [k, v] of Object.entries(hostBuff.extraAttrs)) {
+                    if (k === "rounds" || k === "enable_toggle" || k === "name" || k === "init_rounds" || k.startsWith("link_")) continue;
+                    cleanAttrs[k] = v;
                 }
             }
+            entry.extraAttrs = Object.keys(cleanAttrs).length > 0 ? cleanAttrs : null;
+            TokenBuffManager.saveTokenBuffs(targetToken, entries);
+            count++;
+            this.notifyTokenRefresh(targetToken);
         }
         return count;
     }
@@ -1379,7 +1408,7 @@ export class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
 
         const attrName = `repeating_buff2_${rowId}_rounds`;
-        let roundsAttr = character.attribs.models.find(a => a.get("name") === attrName);
+        let roundsAttr = Roll20Bridge.findAttr(character, attrName);
 
         if (!roundsAttr) {
             roundsAttr = character.attribs.create({ name: attrName, current: rounds, max: rounds });
@@ -1397,7 +1426,7 @@ export class Pf1eBuffManager {
         await Roll20Bridge.ensureCharacterAttributes(character);
 
         const attrName = `repeating_buff2_${rowId}_init_rounds`;
-        let initAttr = character.attribs.models.find(a => a.get("name") === attrName);
+        let initAttr = Roll20Bridge.findAttr(character, attrName);
         const val = (initRounds !== null && initRounds !== undefined) ? String(initRounds).trim() : "";
 
         if (!initAttr) {
@@ -1421,7 +1450,7 @@ export class Pf1eBuffManager {
         const prefixWithUnderscore = `${prefix}_`;
 
         // 1. 更新名称
-        let nameAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_name`);
+        let nameAttr = Roll20Bridge.findAttr(character, `${prefix}_name`);
         if (!nameAttr) {
             nameAttr = character.attribs.create({ name: `${prefix}_name`, current: name });
         } else {
@@ -1429,7 +1458,7 @@ export class Pf1eBuffManager {
         }
 
         // 2. 更新轮数
-        let roundsAttr = character.attribs.models.find(a => a.get("name") === `${prefix}_rounds`);
+        let roundsAttr = Roll20Bridge.findAttr(character, `${prefix}_rounds`);
         const roundsVal = (rounds !== null && rounds !== undefined && rounds !== "") ? rounds : "";
         if (!roundsAttr) {
             roundsAttr = character.attribs.create({ name: `${prefix}_rounds`, current: roundsVal });
@@ -1440,7 +1469,7 @@ export class Pf1eBuffManager {
         // 3. 更新预置初始轮数/公式
         if (initRounds !== null && initRounds !== undefined) {
             const initKey = `${prefix}_init_rounds`;
-            let initAttr = character.attribs.models.find(a => a.get("name") === initKey);
+            let initAttr = Roll20Bridge.findAttr(character, initKey);
             if (!initAttr) {
                 if (initRounds !== "") character.attribs.create({ name: initKey, current: initRounds });
             } else {
@@ -1471,7 +1500,7 @@ export class Pf1eBuffManager {
             // 写入或更新新的扩展字段
             for (const [subKey, val] of Object.entries(extraAttrs)) {
                 const fullKey = `${prefix}_${subKey}`;
-                let attr = character.attribs.models.find(a => a.get("name") === fullKey);
+                let attr = Roll20Bridge.findAttr(character, fullKey);
                 if (!attr) {
                     character.attribs.create({ name: fullKey, current: val });
                 } else {
@@ -1483,6 +1512,129 @@ export class Pf1eBuffManager {
         console.log(`[Pf1eBuffManager] 已更新 ${character.get("name")} 的 Buff [${name}] (${rowId})`);
         RecalcService.request(character, { reason: "update_buff_row" });
         return true;
+    }
+
+    /**
+     * 下游子节点（人物卡 / 纯 Token 双后端）的统一条目视图。
+     * view 为 BuffLifecycle 兼容的 { name, rounds, enabled }；persist() 落盘；onExpire() 过期副作用；notify() 刷新 UI。
+     * 目标既非人物卡也非 Token 时返回 null。
+     */
+    static async _downstreamChildView(childRef, { isDebuff = false, conditionKey = null, buffName = "", hostCharacter = null, hostRowId = null } = {}) {
+        const targetChar = window.Campaign?.characters?.get(childRef.charId);
+
+        // ---- 人物卡后端 ----
+        if (targetChar && targetChar.attribs) {
+            await Roll20Bridge.ensureCharacterAttributes(targetChar);
+            const targetName = targetChar.get("name") || "未知角色";
+
+            if (isDebuff) {
+                const key = conditionKey || childRef.rowId;
+                const condAttr = Roll20Bridge.findAttr(targetChar, key);
+                const isActive = condAttr && this.isConditionValueActive(condAttr.get("current"));
+                if (!isActive) return null;
+                const roundsAttr = Roll20Bridge.findAttr(targetChar, `${key}_rounds`);
+                const raw = roundsAttr ? roundsAttr.get("current") : "";
+                const view = {
+                    name: `[Debuff链接] ${buffName} (受术者: ${targetName})`,
+                    rounds: (raw !== "" && raw !== null && !isNaN(Number(raw))) ? Number(raw) : 0,
+                    enabled: true
+                };
+                return {
+                    view,
+                    persist: async () => {
+                        if (roundsAttr) roundsAttr.save({ current: view.rounds }, { byScript: true });
+                        else targetChar.attribs.create({ name: `${key}_rounds`, current: view.rounds });
+                    },
+                    onExpire: async () => {
+                        await this.toggleCondition(targetChar, key, false);
+                        const hostAttr = Roll20Bridge.findAttr(targetChar, `${key}_link_host_id`);
+                        if (hostAttr) hostAttr.destroy();
+                    },
+                    notify: () => this.notifyTokenRefresh(targetChar)
+                };
+            }
+
+            const childPrefix = `repeating_buff2_${childRef.rowId}`;
+            const toggleAttr = Roll20Bridge.findAttr(targetChar, `${childPrefix}_enable_toggle`);
+            if (!toggleAttr || Number(toggleAttr.get("current")) !== 1) return null;
+            const roundsAttr = Roll20Bridge.findAttr(targetChar, `${childPrefix}_rounds`);
+            const raw = roundsAttr ? roundsAttr.get("current") : "";
+            const view = {
+                name: `${buffName} (受术者: ${targetName})`,
+                rounds: (raw !== "" && raw !== null && !isNaN(Number(raw))) ? Number(raw) : null,
+                enabled: true
+            };
+            return {
+                view,
+                persist: async () => {
+                    if (roundsAttr) roundsAttr.save({ current: view.rounds }, { byScript: true });
+                    else await this.setBuffRounds(targetChar, childRef.rowId, view.rounds);
+                },
+                onExpire: async () => { await this.removeBuff(targetChar, childRef.rowId); },
+                notify: () => this.notifyTokenRefresh(targetChar)
+            };
+        }
+
+        // ---- 纯 Token 后端 ----
+        const targetToken = Roll20Bridge.getTokenGraphic(childRef.charId);
+        if (!targetToken) return null;
+        const targetName = targetToken.get("name") || "未知棋子";
+
+        if (isDebuff) {
+            const key = conditionKey || childRef.rowId;
+            const debuffList = TokenBuffManager.getTokenDebuffs(targetToken);
+            const entry = debuffList.find(d => (d.key || d.rowId) === key);
+            if (!entry || entry.enabled === false) return null;
+            const view = {
+                name: `[Debuff链接] ${buffName} (受术者: ${targetName})`,
+                rounds: entry.rounds,
+                enabled: entry.enabled
+            };
+            return {
+                view,
+                persist: async () => {
+                    entry.rounds = view.rounds;
+                    entry.enabled = view.enabled;
+                    TokenBuffManager.saveTokenDebuffs(targetToken, debuffList);
+                },
+                onExpire: async () => {
+                    // 与人物卡语义一致：关停状态并断开影子链接（条目保留为已关停登记）
+                    entry.enabled = false;
+                    entry.rounds = 0;
+                    entry.linkHostId = null;
+                    entry.linkSourceRowId = null;
+                    TokenBuffManager.saveTokenDebuffs(targetToken, debuffList);
+                },
+                notify: () => this.notifyTokenRefresh(targetToken)
+            };
+        }
+
+        const buffList = TokenBuffManager.getTokenBuffs(targetToken);
+        const entry = buffList.find(e => e.rowId === childRef.rowId);
+        if (!entry || entry.enabled === false) return null;
+        const view = {
+            name: `${buffName} (受术者: ${targetName})`,
+            rounds: entry.rounds,
+            enabled: entry.enabled
+        };
+        return {
+            view,
+            persist: async () => {
+                entry.rounds = view.rounds;
+                entry.enabled = view.enabled;
+                TokenBuffManager.saveTokenBuffs(targetToken, buffList);
+            },
+            onExpire: async () => {
+                const idx = buffList.indexOf(entry);
+                if (idx >= 0) buffList.splice(idx, 1);
+                TokenBuffManager.saveTokenBuffs(targetToken, buffList);
+                // 条目已随过期移除，同步向宿主除名，杜绝幽灵计数
+                if (hostCharacter && hostRowId) {
+                    await this.removeDownstreamLink(hostCharacter, hostRowId, childRef.charId, childRef.rowId);
+                }
+            },
+            notify: () => this.notifyTokenRefresh(targetToken)
+        };
     }
 
     /**
@@ -1545,99 +1697,63 @@ export class Pf1eBuffManager {
                 if (!buff.linkChildren || buff.linkChildren.length === 0) continue;
 
                 for (const childRef of buff.linkChildren) {
-                    const targetChar = window.Campaign?.characters?.get(childRef.charId);
-                    if (!targetChar || !targetChar.attribs) continue;
-                    await Roll20Bridge.ensureCharacterAttributes(targetChar);
+                    const child = await this._downstreamChildView(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
+                    if (!child) continue;
 
-                    const childPrefix = `repeating_buff2_${childRef.rowId}`;
-                    const childToggleAttr = targetChar.attribs.models.find(a => a.get("name") === `${childPrefix}_enable_toggle`);
-                    const childRoundsAttr = targetChar.attribs.models.find(a => a.get("name") === `${childPrefix}_rounds`);
-
-                    // 仅当受术者身上该 Buff 处于激活状态时才扣减轮数
-                    const isChildEnabled = childToggleAttr ? (Number(childToggleAttr.get("current")) === 1) : false;
-                    if (!isChildEnabled) continue;
-
-                    const currentVal = childRoundsAttr ? childRoundsAttr.get("current") : "";
-                    const childName = `${buff.name} (受术者: ${targetChar.get("name")})`;
-                    const result = BuffLifecycle.decrementEntry({
-                        name: childName,
-                        rounds: (currentVal !== "" && currentVal !== null && !isNaN(Number(currentVal))) ? Number(currentVal) : null
-                    });
+                    const result = BuffLifecycle.decrementEntry(child.view);
                     if (!result) continue;
 
                     if (result.status === "expired") {
-                        await this.removeBuff(targetChar, childRef.rowId);
-                        processed.push({ name: childName, status: "expired", remaining: 0 });
+                        await child.onExpire();
+                        processed.push({ name: child.view.name, status: "expired", remaining: 0 });
                     } else {
-                        childRoundsAttr.save({ current: result.remaining }, { byScript: true });
+                        await child.persist();
                         processed.push(result);
                     }
-                    if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
+                    child.notify();
                 }
             }
 
             // 2.2 施法者 Debuff 驱动下游受术者扣轮
             // 施法者名下所有建立链接的 Debuff，无论施法者自身是否处于该状态，统一驱动扣减受术者 1 轮
             for (const def of this.PF1E_DEBUFF_DEFINITIONS) {
-                const childrenAttr = character.attribs.models.find(a => a.get("name") === `${def.key}_link_children`);
-                if (!childrenAttr || !childrenAttr.get("current")) continue;
-                let children = [];
-                try { children = JSON.parse(childrenAttr.get("current")); } catch (e) { children = []; }
+                const children = Roll20Bridge.readJsonAttr(character, `${def.key}_link_children`);
                 if (!Array.isArray(children) || children.length === 0) continue;
 
                 for (const childRef of children) {
-                    const targetChar = window.Campaign?.characters?.get(childRef.charId);
-                    if (!targetChar || !targetChar.attribs) continue;
-                    await Roll20Bridge.ensureCharacterAttributes(targetChar);
+                    const child = await this._downstreamChildView(childRef, { isDebuff: true, conditionKey: def.key, buffName: def.name });
+                    if (!child) continue;
 
-                    // 检查受术者身上该状态是否开启
-                    const targetCondAttr = targetChar.attribs.models.find(a => a.get("name") === def.key);
-                    const isTargetActive = targetCondAttr && targetCondAttr.get("current") !== "0" && targetCondAttr.get("current") !== 0 && targetCondAttr.get("current") !== "" && targetCondAttr.get("current") !== false && targetCondAttr.get("current") !== null;
-                    if (!isTargetActive) continue;
-
-                    let targetRoundsAttr = targetChar.attribs.models.find(a => a.get("name") === `${def.key}_rounds`);
-                    const rawRounds = targetRoundsAttr ? targetRoundsAttr.get("current") : "";
-                    const hasRounds = rawRounds !== "" && rawRounds !== null && !isNaN(Number(rawRounds));
-                    const debuffName = `[Debuff链接] ${def.name} (受术者: ${targetChar.get("name")})`;
-                    // 缺失轮数属性按 0 轮处理（进入正计轮分支）
-                    const result = BuffLifecycle.decrementEntry(
-                        { name: debuffName, rounds: hasRounds ? Number(rawRounds) : 0 },
-                        { isDebuff: true }
-                    );
+                    const result = BuffLifecycle.decrementEntry(child.view, { isDebuff: true });
                     if (!result) continue;
 
                     if (result.status === "expired") {
-                        await this.toggleCondition(targetChar, def.key, false);
-                        const hostAttr = targetChar.attribs.models.find(a => a.get("name") === `${def.key}_link_host_id`);
-                        if (hostAttr) hostAttr.destroy();
-                        processed.push({ name: debuffName, status: "expired", remaining: 0 });
-                    } else if (result.status === "counted" && !targetRoundsAttr) {
-                        targetChar.attribs.create({ name: `${def.key}_rounds`, current: result.remaining });
-                        processed.push(result);
+                        await child.onExpire();
+                        processed.push({ name: child.view.name, status: "expired", remaining: 0 });
                     } else {
-                        targetRoundsAttr.save({ current: result.remaining }, { byScript: true });
+                        await child.persist();
                         processed.push(result);
                     }
-                    if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
+                    child.notify();
                 }
             }
 
             // 3. 扣减 / 累加自身 Debuff (负面状态 condition-*)
             await Roll20Bridge.ensureCharacterAttributes(character);
             for (const def of this.PF1E_DEBUFF_DEFINITIONS) {
-                const condAttr = character.attribs.models.find(a => a.get("name") === def.key);
+                const condAttr = Roll20Bridge.findAttr(character, def.key);
                 if (!condAttr) continue;
                 const val = condAttr.get("current");
-                const isActive = val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
+                const isActive = this.isConditionValueActive(val);
                 if (!isActive) continue;
 
                 // 若该 Debuff 是影子链接副本 (由施法者远程驱动)，受术者自己回合绝不自扣！
-                const hostAttr = character.attribs.models.find(a => a.get("name") === `${def.key}_link_host_id`);
+                const hostAttr = Roll20Bridge.findAttr(character, `${def.key}_link_host_id`);
                 if (hostAttr && hostAttr.get("current")) {
                     continue;
                 }
 
-                let roundsAttr = character.attribs.models.find(a => a.get("name") === `${def.key}_rounds`);
+                let roundsAttr = Roll20Bridge.findAttr(character, `${def.key}_rounds`);
                 const rawRounds = roundsAttr ? roundsAttr.get("current") : "";
                 const hasRounds = rawRounds !== "" && rawRounds !== null && !isNaN(Number(rawRounds));
                 // 缺失轮数属性按 0 轮处理（进入正计轮分支）
@@ -1725,40 +1841,28 @@ export class Pf1eBuffManager {
                 if (!buff.linkChildren || buff.linkChildren.length === 0) continue;
 
                 for (const childRef of buff.linkChildren) {
-                    const targetChar = window.Campaign?.characters?.get(childRef.charId);
-                    if (!targetChar || !targetChar.attribs) continue;
-                    await Roll20Bridge.ensureCharacterAttributes(targetChar);
+                    const child = await this._downstreamChildView(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
+                    if (!child) continue;
 
-                    const childPrefix = `repeating_buff2_${childRef.rowId}`;
-                    const childToggleAttr = targetChar.attribs.models.find(a => a.get("name") === `${childPrefix}_enable_toggle`);
-                    const childRoundsAttr = targetChar.attribs.models.find(a => a.get("name") === `${childPrefix}_rounds`);
-
-                    const isChildEnabled = childToggleAttr ? (Number(childToggleAttr.get("current")) === 1) : false;
-                    if (!isChildEnabled) continue;
-
-                    const currentVal = childRoundsAttr ? childRoundsAttr.get("current") : "";
-                    if (currentVal === "" || currentVal === null || isNaN(Number(currentVal))) continue;
-
-                    const childName = `${buff.name} (受术者: ${targetChar.get("name")})`;
-                    const result = BuffLifecycle.incrementEntry({ name: childName, rounds: Number(currentVal) });
+                    const result = BuffLifecycle.incrementEntry(child.view);
                     if (!result) continue;
 
-                    childRoundsAttr.save({ current: result.remaining }, { byScript: true });
-                    if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
-                    processed.push({ name: childName, status: "incremented", remaining: result.remaining });
+                    await child.persist();
+                    child.notify();
+                    processed.push({ name: child.view.name, status: "incremented", remaining: result.remaining });
                 }
             }
 
             // 3. 加回自身 Debuff
             await Roll20Bridge.ensureCharacterAttributes(character);
             for (const def of this.PF1E_DEBUFF_DEFINITIONS) {
-                const condAttr = character.attribs.models.find(a => a.get("name") === def.key);
+                const condAttr = Roll20Bridge.findAttr(character, def.key);
                 if (!condAttr) continue;
                 const val = condAttr.get("current");
-                const isActive = val !== "0" && val !== 0 && val !== "" && val !== null && val !== undefined && val !== false;
+                const isActive = this.isConditionValueActive(val);
                 if (!isActive) continue;
 
-                let roundsAttr = character.attribs.models.find(a => a.get("name") === `${def.key}_rounds`);
+                let roundsAttr = Roll20Bridge.findAttr(character, `${def.key}_rounds`);
                 const rawRounds = roundsAttr ? roundsAttr.get("current") : "";
                 const hasRounds = rawRounds !== "" && rawRounds !== null && !isNaN(Number(rawRounds));
                 if (!hasRounds) continue;

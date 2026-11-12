@@ -10,7 +10,7 @@
  *
  * 本模块只负责"判定下一状态"，不做任何持久化；
  * 各 Manager 将返回的 status 映射到自己的持久化后端
- * （角色卡属性 / token gmnotes）。
+ * （角色卡属性 / Token 自定义字段）。
  */
 export class BuffLifecycle {
     /**

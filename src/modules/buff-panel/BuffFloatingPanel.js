@@ -73,10 +73,8 @@ export class BuffFloatingPanel {
         // 绑定悬停自动展开/收起（完整复原上一版成熟交互）
         this.initHoverCollapse();
 
-        // 若处于未固定状态，默认收拢为折叠条
-        if (!this.isPinned) {
-            this.setCollapse(true);
-        }
+        // 固定状态直接展开套用几何，未固定状态收拢为折叠条（两种状态都走统一入口）
+        this.setCollapse(!this.isPinned);
 
         // 监听选区变化与快捷键
         this.initSelectionListeners();
@@ -181,39 +179,54 @@ export class BuffFloatingPanel {
         document.body.appendChild(panel);
         this.panelEl = panel;
 
+        // 图片加载失败统一降级（捕获阶段监听：error 不冒泡；CSP 禁止内联 onerror，必须用 addEventListener）
+        document.addEventListener("error", (e) => {
+            const t = e.target;
+            if (!t || !t.classList) return;
+            if (t.classList.contains("r20-tab-avatar")) {
+                t.style.display = "none";
+                const fb = t.nextElementSibling;
+                if (fb && fb.classList.contains("r20-tab-avatar-fallback")) fb.style.display = "flex";
+            } else if (t.classList.contains("r20-buff-host-avatar")) {
+                t.style.display = "none";
+            }
+        }, true);
+
         // 拖拽窗口标题栏移动
         const header = panel.querySelector(".r20-panel-header");
-        let isDragging = false;
-        let startX = 0, startY = 0;
-        let startLeft = 0, startTop = 0;
-
-        header.addEventListener("mousedown", (e) => {
-            if (e.target.closest("button")) return;
-            isDragging = true;
-            startX = e.clientX;
-            startY = e.clientY;
-            startLeft = panel.offsetLeft;
-            startTop = panel.offsetTop;
-
-            const onMouseMove = (moveEvent) => {
-                if (!isDragging) return;
-                const dx = moveEvent.clientX - startX;
-                const dy = moveEvent.clientY - startY;
-                panel.style.left = `${Math.max(10, Math.min(window.innerWidth - panel.offsetWidth - 10, startLeft + dx))}px`;
-                panel.style.top = `${Math.max(10, Math.min(window.innerHeight - panel.offsetHeight - 10, startTop + dy))}px`;
+        // 标题栏拖拽：面板本体实时跟手（指针捕获），松手后判向落位
+        header.style.touchAction = "none";
+        let headerDragState = null;
+        DragGestures.bind(header, {
+            isIgnored: (e) => !!e.target.closest("button"),
+            onStart: (e, start) => {
+                this._headerDragging = true;
+                headerDragState = {
+                    grabDX: start.x - panel.offsetLeft,
+                    grabDY: start.y - header.getBoundingClientRect().top
+                };
+            },
+            onMove: (e) => {
+                if (!headerDragState) return;
+                const headerH = header.offsetHeight || 30;
+                // 标题栏锚定钳制：锚点值（向下=top，向上=bottom）保证标题栏完整留在窗口内
+                const headerTop = Math.max(10, Math.min(window.innerHeight - headerH - 10, e.clientY - headerDragState.grabDY));
+                panel.style.left = `${Math.max(10, Math.min(window.innerWidth - panel.offsetWidth - 10, e.clientX - headerDragState.grabDX))}px`;
                 panel.style.right = "auto";
-                panel.style.bottom = "auto";
-            };
-
-            const onMouseUp = () => {
-                isDragging = false;
-                document.removeEventListener("mousemove", onMouseMove);
-                document.removeEventListener("mouseup", onMouseUp);
+                if (this.isDirectionUp) {
+                    panel.style.top = "auto";
+                    panel.style.bottom = `${Math.max(10, window.innerHeight - headerTop - headerH)}px`;
+                } else {
+                    panel.style.bottom = "auto";
+                    panel.style.top = `${headerTop}px`;
+                }
+            },
+            onEnd: () => {
+                this._headerDragging = false;
+                headerDragState = null;
+                this.placePanel(header.getBoundingClientRect().top);
                 this.savePositionAndSize();
-            };
-
-            document.addEventListener("mousemove", onMouseMove);
-            document.addEventListener("mouseup", onMouseUp);
+            }
         });
 
         // 监听尺寸自由缩放并记忆
@@ -225,6 +238,33 @@ export class BuffFloatingPanel {
             });
             ro.observe(panel);
         }
+
+        // 统一缩放手柄：面板是唯一尺寸载体，直接改面板宽高；
+        // 手柄贴面板外侧角（向下=右下，向上=右上），方向类只翻转位置与光标形状
+        const resizeHandle = document.createElement("div");
+        resizeHandle.className = "r20-resize-handle";
+        resizeHandle.title = "拖拽调整窗口大小";
+        resizeHandle.style.touchAction = "none";
+        let resizeState = null;
+        DragGestures.bind(resizeHandle, {
+            onStart: (e, start) => {
+                resizeState = { startW: panel.offsetWidth, startH: panel.offsetHeight };
+            },
+            onMove: (e, start) => {
+                if (!resizeState) return;
+                const nextW = Math.max(280, Math.min(window.innerWidth - 20, resizeState.startW + (e.clientX - start.x)));
+                // 向下展开面板向下生长 (+dy)，向上展开底边锚定向上生长 (-dy)
+                const dir = this.isDirectionUp ? -1 : 1;
+                const nextH = Math.max(200, Math.min(window.innerHeight - 40, resizeState.startH + dir * (e.clientY - start.y)));
+                panel.style.width = `${nextW}px`;
+                panel.style.height = `${nextH}px`;
+            },
+            onEnd: () => {
+                resizeState = null;
+                this.savePositionAndSize();
+            }
+        });
+        panel.appendChild(resizeHandle);
 
         // 标题栏操作：固定窗口、批量重新计算选中单位
         panel.querySelector(".btn-toggle-pin")?.addEventListener("click", () => this.togglePin());
@@ -270,11 +310,24 @@ export class BuffFloatingPanel {
                 e.preventDefault();
                 const ctx = this._draggedContext;
                 ctx._hasSpawned = true; // 锁定防止误触发窗口撕裂
+
+                if (ctx.tabType === "dynamic") {
+                    // 与 📌 按钮共用同一准入与钉选实现：无人物卡的纯 Token 拒绝并提示，
+                    // 有人物卡的棋子（ctx.id 为人物卡 id）或 represents 角色的 Token 正常钉选
+                    const pinnedId = this.pinTargetToken(
+                        ctx.token || Roll20Bridge.getTokenGraphic(ctx.id),
+                        { type: ctx.targetType || "token", id: ctx.id, name: ctx.name, char: ctx.char || null }
+                    );
+                    if (!pinnedId) return;
+                    return;
+                }
+
+                // 独立窗口 Tab 拖回常驻栏合并（ctx.id 恒为人物卡 id）
                 const charId = ctx.id;
                 if (charId && !this.pinnedCharIds.includes(charId)) {
                     this.pinnedCharIds.push(charId);
                     this.savePinnedChars();
-                    if (ctx.tabType === "detached" && ctx.winId) {
+                    if (ctx.winId) {
                         const win = BuffDetachedWindow.instances.get(ctx.winId);
                         if (win) win.removeTab(charId);
                     }
@@ -453,14 +506,31 @@ export class BuffFloatingPanel {
 
     /**
      * 生成 Tab 纯净 Token 图标结构（带失败优雅降级首字 fallback）
+     * 注意：不使用内联 onerror（Roll20 CSP 禁止内联事件处理器），加载失败降级由
+     * createPanelDOM 里 document 捕获阶段的 error 监听器统一处理
      */
     static getAvatarHtml(name, avatarUrl) {
         const initial = (name || "?").trim().charAt(0).toUpperCase();
         return `
             <div class="r20-tab-avatar-box">
-                ${avatarUrl ? `<img class="r20-tab-avatar" src="${escapeHtml(avatarUrl)}" alt="" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" />` : ""}
+                ${avatarUrl ? `<img class="r20-tab-avatar" src="${escapeHtml(avatarUrl)}" alt="" />` : ""}
                 <div class="r20-tab-avatar-fallback" style="${avatarUrl ? 'display:none;' : 'display:flex;'}">${escapeHtml(initial)}</div>
             </div>
+        `.trim();
+    }
+
+    /**
+     * 生成「链接自施法者」影子链接徽章（🔗 + 施法者头像，头像加载失败自动隐藏）
+     * 单一实现供主面板 Buff 行 / Debuff 行与独立二级窗口共用，修改徽章样式只改这里
+     */
+    static getLinkBadgeHtml(hostChar) {
+        const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
+        const hostName = hostChar?.get("name") || "未知施法者";
+        return `
+            <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
+                🔗
+                ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}">` : ""}
+            </span>
         `.trim();
     }
 
@@ -560,6 +630,9 @@ export class BuffFloatingPanel {
                     tabType: "dynamic",
                     id,
                     name,
+                    targetType: type,
+                    token,
+                    char,
                     startX: e.clientX,
                     startY: e.clientY,
                     _hasSpawned: false
@@ -594,11 +667,20 @@ export class BuffFloatingPanel {
         // 2. 构建右侧常驻固定角色 Tab（若在选区中则呈现选中高亮；若已在独立窗口中则排除）
         this.pinnedCharIds.forEach((charId, pIdx) => {
             if (detachedCharIds.has(charId)) return;
+
+            const char = window.Campaign?.characters?.get(charId);
+            if (!char) {
+                // 自愈：钉选 ID 无法解析为人物卡（历史脏数据 / 误钉选的无卡棋子 token id），
+                // 从常驻栏静默清除，避免渲染出"(未知角色)"左括号僵尸 Tab
+                console.info(`[BuffFloatingPanel] 常驻栏钉选 ID [${charId}] 无法解析为人物卡，已自动清除`);
+                this.pinnedCharIds = this.pinnedCharIds.filter(id => id !== charId);
+                this.savePinnedChars();
+                return;
+            }
             // 权限守卫：非 GM 玩家无权查看该角色时，严防泄漏，跳过渲染
             if (!Roll20Bridge.canViewCharacterBuffs(charId)) return;
 
-            const char = window.Campaign?.characters?.get(charId);
-            const name = char ? (char.get("name") || "未命名") : "(未知角色)";
+            const name = char.get("name") || "未命名";
             const isActive = this.activeTarget && this.activeTarget.id === charId && this.activeTarget.type === "char";
             const isSelected = selectedTokens.some(st => (st.char?.id === charId) || (st.token?.id === charId));
 
@@ -686,6 +768,17 @@ export class BuffFloatingPanel {
             this.bindTabBuffHover(tab, { type: "char", id: charId, name });
             pinnedContainer.appendChild(tab);
         });
+
+        // ➕ 钉选角色搜索按钮（常驻栏末尾；renderTabs 每次清空容器后需重建）
+        const addPinnedBtn = document.createElement("button");
+        addPinnedBtn.className = "r20-btn-icon btn-add-pinned-char";
+        addPinnedBtn.title = "钉选指定角色到常驻标签栏";
+        addPinnedBtn.textContent = "➕";
+        addPinnedBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this.showAddPinnedCharMenu(addPinnedBtn);
+        });
+        pinnedContainer.appendChild(addPinnedBtn);
 
         // 3. 自动调和与回退当前激活的 Tab 目标
         this.reconcileActiveTarget(selectedTokens);
@@ -856,6 +949,7 @@ export class BuffFloatingPanel {
             buffs = await Pf1eBuffManager.getAllBuffs(char);
             debuffs = await Pf1eBuffUI.getAllDebuffs(char);
         } else if (token) {
+            // Token 数据已在 TokenBuffManager 读取时归一化（结构与人物卡一致），此处直接使用
             buffs = TokenBuffManager.getTokenBuffs(token).filter(b => !b.isDebuff);
             debuffs = TokenBuffManager.getTokenDebuffs(token).map(b => ({
                 rowId: b.rowId || b.key || b.name,
@@ -863,7 +957,7 @@ export class BuffFloatingPanel {
                 name: b.name,
                 enabled: b.enabled === true,
                 rounds: (b.rounds !== undefined && b.rounds !== null) ? b.rounds : null,
-                initRounds: b.initialRounds || null,
+                initRounds: b.initRounds || null,
                 isDebuff: true,
                 linkHostId: b.linkHostId || null,
                 linkSourceRowId: b.linkSourceRowId || null,
@@ -916,6 +1010,7 @@ export class BuffFloatingPanel {
                 await this.renderViewport();
             } else if (token) {
                 TokenBuffManager.saveTokenBuffs(token, []);
+                TokenBuffManager.saveTokenDebuffs(token, []);
                 this.showNotice(`已清空 [${name}] 的全部 Buff 与状态`);
                 await Pf1eBuffUI.refreshAllBadges();
                 await this.renderViewport();
@@ -923,7 +1018,7 @@ export class BuffFloatingPanel {
         });
 
         toolbar.querySelector(".btn-add-buff-to-active")?.addEventListener("click", () => {
-            if (char) this.showBuffEditorDialog(null, char);
+            this.showBuffEditorDialog(null, char, token);
         });
 
         fragment.appendChild(toolbar);
@@ -960,14 +1055,7 @@ export class BuffFloatingPanel {
                 let linkBadgeHtml = "";
                 if (d.linkHostId) {
                     const hostChar = window.Campaign?.characters?.get(d.linkHostId);
-                    const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
-                    const hostName = hostChar?.get("name") || "未知施法者";
-                    linkBadgeHtml = `
-                        <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
-                            🔗
-                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}" onerror="this.style.display='none';">` : ""}
-                        </span>
-                    `;
+                    linkBadgeHtml = this.getLinkBadgeHtml(hostChar);
                 } else if (Array.isArray(d.linkChildren) && d.linkChildren.length > 0) {
                     linkBadgeHtml = `
                         <span class="r20-buff-link-badge" style="color:#f43f5e;" title="🔗 名下维持着 ${d.linkChildren.length} 个受术者的 Debuff 链接">
@@ -1027,7 +1115,7 @@ export class BuffFloatingPanel {
                             }
                             if (char) {
                                 const roundsKey = `${d.key}_rounds`;
-                                let roundsAttr = char.attribs.models.find(a => a.get("name") === roundsKey);
+                                let roundsAttr = Roll20Bridge.findAttr(char, roundsKey);
                                 const roundVal = newRounds !== null ? newRounds : "";
                                 if (roundsAttr) roundsAttr.save({ current: roundVal });
                                 else char.attribs.create({ name: roundsKey, current: roundVal });
@@ -1184,14 +1272,7 @@ export class BuffFloatingPanel {
                 let linkBadgeHtml = "";
                 if (b.linkHostId) {
                     const hostChar = window.Campaign?.characters?.get(b.linkHostId);
-                    const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
-                    const hostName = hostChar?.get("name") || "未知施法者";
-                    linkBadgeHtml = `
-                        <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
-                            🔗
-                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}" onerror="this.style.display='none';">` : ""}
-                        </span>
-                    `;
+                    linkBadgeHtml = this.getLinkBadgeHtml(hostChar);
                 } else if (Array.isArray(b.linkChildren) && b.linkChildren.length > 0) {
                     linkBadgeHtml = `
                         <span class="r20-buff-link-badge" style="color:#60a5fa;" title="🔗 名下维持着 ${b.linkChildren.length} 个受术者的子链接 Buff">
@@ -1231,7 +1312,28 @@ export class BuffFloatingPanel {
                 curEl?.addEventListener("click", (e) => {
                     e.stopPropagation();
                     e.preventDefault();
-                    if (!char) return;
+                    if (!char && !token) return;
+
+                    // 纯 Token：直接改写自定义字段中的轮数（清空 = 常驻）
+                    if (token) {
+                        Roll20Bridge.attachInlineRoundEditor(curEl, {
+                            initialValue: curVal !== null ? curVal : "",
+                            placeholder: "常驻",
+                            className: "r20-input-round-inline",
+                            onCommit: async (raw) => {
+                                const newRounds = (raw !== "" && !isNaN(Number(raw))) ? Number(raw) : null;
+                                const list = TokenBuffManager.getTokenBuffs(token);
+                                const target = list.find(x => x.name === b.name);
+                                if (target) {
+                                    target.rounds = newRounds;
+                                    TokenBuffManager.saveTokenBuffs(token, list);
+                                }
+                                await Pf1eBuffUI.refreshAllBadges();
+                                await this.renderViewport();
+                            }
+                        });
+                        return;
+                    }
 
                     Roll20Bridge.attachInlineRoundEditor(curEl, {
                         initialValue: curVal !== null ? curVal : "",
@@ -1262,7 +1364,27 @@ export class BuffFloatingPanel {
                 initEl?.addEventListener("click", (e) => {
                     e.stopPropagation();
                     e.preventDefault();
-                    if (!char) return;
+                    if (!char && !token) return;
+
+                    // 纯 Token：直接改写自定义字段中的初始轮数（清空 = 无预置轮数）
+                    if (token) {
+                        Roll20Bridge.attachInlineRoundEditor(initEl, {
+                            initialValue: initVal !== null ? initVal : "",
+                            placeholder: "-",
+                            className: "r20-input-round-inline",
+                            onCommit: async (raw) => {
+                                const newInit = (raw !== "" && !isNaN(Number(raw))) ? Number(raw) : null;
+                                const list = TokenBuffManager.getTokenBuffs(token);
+                                const target = list.find(x => x.name === b.name);
+                                if (target) {
+                                    target.initRounds = newInit;
+                                    TokenBuffManager.saveTokenBuffs(token, list);
+                                }
+                                await this.renderViewport();
+                            }
+                        });
+                        return;
+                    }
 
                     Roll20Bridge.attachInlineRoundEditor(initEl, {
                         initialValue: initVal !== null ? initVal : "",
@@ -1282,13 +1404,30 @@ export class BuffFloatingPanel {
                         await Pf1eBuffManager.unlinkBuff(char, b.rowId);
                         this.showNotice(`已断开 [${b.name}] 链接，转为独立副本`);
                         await this.renderViewport();
+                    } else if (token && b.linkHostId) {
+                        // 纯 Token：清顶层链接字段，并向宿主除名
+                        const list = TokenBuffManager.getTokenBuffs(token);
+                        const target = list.find(x => x.rowId === b.rowId);
+                        if (target) {
+                            const srcRowId = target.linkSourceRowId;
+                            const hostId = target.linkHostId;
+                            target.linkHostId = null;
+                            target.linkSourceRowId = null;
+                            TokenBuffManager.saveTokenBuffs(token, list);
+                            const hostChar = window.Campaign?.characters?.get(hostId);
+                            if (hostChar && srcRowId) {
+                                await Pf1eBuffManager.removeDownstreamLink(hostChar, srcRowId, token.id, b.rowId);
+                            }
+                        }
+                        this.showNotice(`已断开 [${b.name}] 链接，转为独立副本`);
+                        await this.renderViewport();
                     }
                 });
 
                 // 编辑细目
                 item.querySelector(".btn-edit-buff-row")?.addEventListener("click", (e) => {
                     e.stopPropagation();
-                    this.showBuffEditorDialog(b, char);
+                    this.showBuffEditorDialog(b, char, token);
                 });
 
                 // 单击条目多选高亮 (支持 Shift 区间连选与 Ctrl/Cmd 追加)
@@ -1604,32 +1743,37 @@ export class BuffFloatingPanel {
                 this.showNotice("未选中任何目标单位");
                 return;
             }
+            const buffsToApply = await this.resolveBuffsForBatchApply(buff, char, token, selectedRowIds);
             let count = 0;
-            let selfActivated = false;
+            const selfActivatedNames = [];
             for (const t of selected) {
-                if (!t.char) continue;
-                if (t.char.id === char.id) {
-                    if (isDebuff) {
-                        // 负面状态施加给选中目标时，默认排除施法者自身！
-                        continue;
-                    }
-                    // 正面 Buff：当前角色也是选中单位，激活自身该 Buff！
-                    if (!buff.enabled) {
-                        await Pf1eBuffManager.toggleBuff(char, buff.rowId, true);
-                        buff.enabled = true;
-                        selfActivated = true;
+                // 人物卡单位走角色卡后端；纯 Token 单位走自定义字段后端（链接 Debuff 对 Token 退化为独立副本）
+                const target = t.char
+                    ? { type: "char", id: t.char.id, name: t.char.get("name") }
+                    : (t.token ? { type: "token", id: t.token.id, name: t.token.get("name") } : null);
+                if (!target) continue;
+                if (t.char && t.char.id === char.id) {
+                    // 自身：逐个激活选中的正面条目（Debuff 排除施法者自身）
+                    for (const b of buffsToApply) {
+                        const bIsDebuff = !!b.isDebuff || (typeof b.rowId === "string" && b.rowId.startsWith("condition-"));
+                        if (bIsDebuff) continue;
+                        if (!b.enabled) {
+                            await Pf1eBuffManager.toggleBuff(char, b.rowId, true);
+                            b.enabled = true;
+                            selfActivatedNames.push(b.name);
+                        }
                     }
                 } else {
-                    await this.applyBuffToTarget(buff, { type: "char", id: t.char.id, name: t.char.get("name") }, char.id);
-                    count++;
+                    for (const b of buffsToApply) {
+                        await this.applyBuffToTarget(b, target, char.id);
+                        count++;
+                    }
                 }
             }
-            if (selfActivated && typeof Pf1eBuffUI !== "undefined") {
-                Pf1eBuffUI.requestTokenRefresh(char.id);
-            }
-            const msg = selfActivated 
-                ? `已激活自身 Buff，并为 ${count} 个其他选中单位施加链接 Buff`
-                : `已为 ${count} 个选中单位施加链接 ${isDebuff ? "负面状态" : "Buff"}`;
+            if (selfActivatedNames.length > 0) this.notifyTokenRefresh(char);
+            const msg = selfActivatedNames.length > 0
+                ? `已激活自身 ${selfActivatedNames.length} 项，并为 ${count} 个目标施加链接（${buffsToApply.length} 项 × 选中单位）`
+                : `已为 ${count} 个目标施加链接（${buffsToApply.length} 项 × 选中单位）`;
             this.showNotice(msg);
             await this.renderViewport();
         });
@@ -1642,32 +1786,36 @@ export class BuffFloatingPanel {
                 this.showNotice("未选中任何目标单位");
                 return;
             }
+            const buffsToApply = await this.resolveBuffsForBatchApply(buff, char, token, selectedRowIds);
             let count = 0;
-            let selfActivated = false;
+            const selfActivatedNames = [];
             for (const t of selected) {
-                if (!t.char) continue;
-                if (t.char.id === char.id) {
-                    if (isDebuff) {
-                        // 负面状态施加给选中目标时，默认排除施法者自身！
-                        continue;
-                    }
-                    // 正面 Buff：当前角色也是选中单位，激活自身该 Buff！
-                    if (!buff.enabled) {
-                        await Pf1eBuffManager.toggleBuff(char, buff.rowId, true);
-                        buff.enabled = true;
-                        selfActivated = true;
+                const target = t.char
+                    ? { type: "char", id: t.char.id, name: t.char.get("name") }
+                    : (t.token ? { type: "token", id: t.token.id, name: t.token.get("name") } : null);
+                if (!target) continue;
+                if (t.char && t.char.id === char.id) {
+                    // 自身：逐个激活选中的正面条目（Debuff 排除施法者自身）
+                    for (const b of buffsToApply) {
+                        const bIsDebuff = !!b.isDebuff || (typeof b.rowId === "string" && b.rowId.startsWith("condition-"));
+                        if (bIsDebuff) continue;
+                        if (!b.enabled) {
+                            await Pf1eBuffManager.toggleBuff(char, b.rowId, true);
+                            b.enabled = true;
+                            selfActivatedNames.push(b.name);
+                        }
                     }
                 } else {
-                    await this.applyBuffToTarget(buff, { type: "char", id: t.char.id, name: t.char.get("name") }, null);
-                    count++;
+                    for (const b of buffsToApply) {
+                        await this.applyBuffToTarget(b, target, null);
+                        count++;
+                    }
                 }
             }
-            if (selfActivated && typeof Pf1eBuffUI !== "undefined") {
-                Pf1eBuffUI.requestTokenRefresh(char.id);
-            }
-            const msg = selfActivated 
-                ? `已激活自身 Buff，并为 ${count} 个其他选中单位施加普通 Buff 副本`
-                : `已为 ${count} 个选中单位施加普通 ${isDebuff ? "负面状态" : "Buff"} 副本`;
+            if (selfActivatedNames.length > 0) this.notifyTokenRefresh(char);
+            const msg = selfActivatedNames.length > 0
+                ? `已激活自身 ${selfActivatedNames.length} 项，并为 ${count} 个目标施加普通副本（${buffsToApply.length} 项 × 选中单位）`
+                : `已为 ${count} 个目标施加普通副本（${buffsToApply.length} 项 × 选中单位）`;
             this.showNotice(msg);
             await this.renderViewport();
         });
@@ -1753,6 +1901,15 @@ export class BuffFloatingPanel {
                 await this.renderViewport();
             } else if (token) {
                 for (const rId of delIds) {
+                    // 若条目是链接副本，先向宿主除名（否则宿主子计数残留幽灵）
+                    const list = TokenBuffManager.getTokenBuffs(token);
+                    const victim = list.find(e => e.rowId === rId || e.name === rId);
+                    if (victim && victim.linkHostId) {
+                        const hostChar = window.Campaign?.characters?.get(victim.linkHostId);
+                        if (hostChar && victim.linkSourceRowId) {
+                            await Pf1eBuffManager.removeDownstreamLink(hostChar, victim.linkSourceRowId, token.id, victim.rowId);
+                        }
+                    }
                     TokenBuffManager.removeTrackedDebuff(token, rId);
                     TokenBuffManager.removeBuff(token, rId);
                     this.selectedBuffRowIds.delete(rId);
@@ -1790,9 +1947,17 @@ export class BuffFloatingPanel {
                     key: condKey,
                     name: buff.name,
                     rounds: buff.rounds,
-                    initialRounds: null,
-                    enabled: true
+                    initRounds: null,
+                    enabled: true,
+                    linkHostId: sourceHostId || null,
+                    linkSourceRowId: sourceHostId ? buff.rowId : null
                 });
+                if (sourceHostId) {
+                    const hostChar = window.Campaign?.characters?.get(sourceHostId);
+                    if (hostChar) {
+                        await Pf1eBuffManager.recordDownstreamLink(hostChar, condKey, targetToken.id, condKey);
+                    }
+                }
                 this.showNotice(`已为 [${target.name}] 施加负面状态 [${buff.name}]`);
                 if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
                 await this.renderViewport();
@@ -1829,13 +1994,41 @@ export class BuffFloatingPanel {
             if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
             await this.renderViewport();
         } else if (targetToken) {
-            const list = TokenBuffManager.getTokenBuffs(targetToken);
-            list.push({ name: buff.name, rounds: buff.rounds, initialRounds: buff.initRounds });
-            TokenBuffManager.saveTokenBuffs(targetToken, list);
-            this.showNotice(`已为 [${target.name}] 施加 Buff [${buff.name}]`);
+            // 纯 Token：链接 Buff 记录影子链接元数据并向宿主登记下游；普通副本彻底独立
+            const entry = TokenBuffManager.applyOrRefreshBuff(targetToken, buff.name, buff.rounds, null, buff.initRounds);
+            if (entry && sourceHostId && buff.rowId) {
+                // 关键：applyOrRefreshBuff 内部已保存，必须重新读取列表、按 rowId 定位到
+                // 刚落盘的条目再写入链接元数据——直接改旧对象会被随后的保存覆盖丢失
+                const list = TokenBuffManager.getTokenBuffs(targetToken);
+                const stored = list.find(x => x.rowId === entry.rowId);
+                if (stored) {
+                    // 链接元数据写在顶层字段（与人物卡 getAllBuffs 输出一致），extraAttrs 只存细目
+                    stored.linkHostId = sourceHostId;
+                    stored.linkSourceRowId = buff.rowId;
+                    TokenBuffManager.saveTokenBuffs(targetToken, list);
+                }
+                const hostChar = window.Campaign?.characters?.get(sourceHostId);
+                if (hostChar) {
+                    await Pf1eBuffManager.recordDownstreamLink(hostChar, buff.rowId, targetToken.id, entry.rowId);
+                }
+            }
+            this.showNotice(`已为 [${target.name}] 施加 ${sourceHostId ? "链接" : ""} Buff [${buff.name}]`);
             if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
             await this.renderViewport();
         }
+    }
+
+    /**
+     * 解析批量施加的条目列表：右键行在多选中且选中不止一行 → 施加全部选中条目；否则只施加右键行
+     */
+    static async resolveBuffsForBatchApply(buff, char, token, selectedRowIds) {
+        const sel = new Set(selectedRowIds || []);
+        if (!sel.has(buff.rowId) || sel.size <= 1) return [buff];
+        const all = char
+            ? [...(await Pf1eBuffManager.getAllBuffs(char)), ...Pf1eBuffUI.getAllDebuffsSync(char)]
+            : [...TokenBuffManager.getTokenBuffs(token), ...TokenBuffManager.getTokenDebuffs(token)];
+        const matched = all.filter(b => sel.has(b.rowId));
+        return matched.length > 0 ? matched : [buff];
     }
 
     /**
@@ -1915,6 +2108,7 @@ export class BuffFloatingPanel {
 
     /**
      * 将动态选区的单位钉选至常驻标签栏
+     * @returns {string|null} 成功钉选（或已被钉选）的人物卡 id；无人物卡等准入失败返回 null
      */
     static pinTargetToken(token, { type, id, name, char }) {
         let charId = null;
@@ -1931,7 +2125,7 @@ export class BuffFloatingPanel {
 
         if (!charId) {
             this.showNotice(`该单位未关联人物卡，无法钉选`);
-            return;
+            return null;
         }
 
         if (!this.pinnedCharIds.includes(charId)) {
@@ -1940,6 +2134,7 @@ export class BuffFloatingPanel {
             this.showNotice(`已将【${name}】钉选至常驻标签栏`);
             this.renderDispatcher();
         }
+        return charId;
     }
 
     /**
@@ -1958,6 +2153,96 @@ export class BuffFloatingPanel {
         try {
             localStorage.setItem(this.PINNED_CHARS_KEY, JSON.stringify(this.pinnedCharIds));
         } catch (e) {}
+    }
+
+    /**
+     * 弹出添加固定角色菜单（带实时搜索框、滚动条与边界自适应翻转）
+     * 恢复自 v0.9.26：下方空间不足时自动向上翻转展开
+     */
+    static showAddPinnedCharMenu(anchorBtn) {
+        document.querySelector(".r20-pinned-char-picker")?.remove();
+
+        const characters = window.Campaign?.characters?.models || [];
+        const unpinned = characters.filter(c => !c.get("archived") && !this.pinnedCharIds.includes(c.id));
+
+        const menu = document.createElement("div");
+        menu.className = "r20-context-menu r20-pinned-char-picker";
+        menu.style.width = "220px";
+        menu.style.maxHeight = "320px";
+        menu.style.display = "flex";
+        menu.style.flexDirection = "column";
+        menu.style.padding = "6px";
+        menu.style.boxSizing = "border-box";
+        menu.style.zIndex = "10050";
+
+        // 智能定位：下方空间不足时向上翻转
+        const rect = anchorBtn.getBoundingClientRect();
+        const pickerHeight = 300;
+        const spaceBelow = window.innerHeight - rect.bottom;
+        if (spaceBelow < pickerHeight && rect.top > pickerHeight) {
+            menu.style.top = `${rect.top - pickerHeight - 4}px`;
+        } else {
+            menu.style.top = `${rect.bottom + 4}px`;
+        }
+        menu.style.right = `${Math.max(10, window.innerWidth - rect.right)}px`;
+
+        // 搜索输入框
+        const searchBox = document.createElement("div");
+        searchBox.style.cssText = "margin-bottom:6px; flex-shrink:0;";
+        searchBox.innerHTML = `
+            <input type="text" class="r20-pinned-search" placeholder="🔍 搜索角色名称..."
+                style="width:100%; box-sizing:border-box; background:#ffffff; border:1px solid #d0d0d0; color:#333333; padding:5px 8px; border-radius:4px; font-size:11px; outline:none;">
+        `;
+        menu.appendChild(searchBox);
+
+        // 滚动列表容器
+        const listContainer = document.createElement("div");
+        listContainer.style.cssText = "flex:1 1 auto; overflow-y:auto; max-height:240px; scrollbar-width:thin;";
+
+        if (unpinned.length === 0) {
+            listContainer.innerHTML = `<div style="padding:10px; color:#94a3b8; font-size:11px; text-align:center;">无可用未钉选角色</div>`;
+        } else {
+            const itemNodes = [];
+            unpinned.forEach(c => {
+                const name = c.get("name") || "未命名";
+                const item = document.createElement("div");
+                item.className = "r20-context-menu-item";
+                item.style.cssText = "padding:5px 8px; border-radius:3px; cursor:pointer;";
+                item.innerHTML = `<span>🛡️</span><span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${Roll20Bridge.escapeHtml(name)}</span>`;
+                item.addEventListener("click", async () => {
+                    menu.remove();
+                    this.pinnedCharIds.push(c.id);
+                    this.savePinnedChars();
+                    await this.renderDispatcher();
+                });
+                listContainer.appendChild(item);
+                itemNodes.push({ el: item, name });
+            });
+
+            // 搜索过滤
+            const searchInput = searchBox.querySelector(".r20-pinned-search");
+            searchInput.addEventListener("input", (e) => {
+                const q = e.target.value.trim().toLowerCase();
+                itemNodes.forEach(({ el, name }) => {
+                    const match = !q || name.toLowerCase().includes(q);
+                    el.style.display = match ? "flex" : "none";
+                });
+            });
+
+            setTimeout(() => searchInput.focus(), 50);
+        }
+
+        menu.appendChild(listContainer);
+
+        const closeHandler = (e) => {
+            if (!menu.contains(e.target) && e.target !== anchorBtn) {
+                menu.remove();
+                document.removeEventListener("mousedown", closeHandler);
+            }
+        };
+        setTimeout(() => document.addEventListener("mousedown", closeHandler), 10);
+
+        document.body.appendChild(menu);
     }
 
     /**
@@ -2151,32 +2436,72 @@ export class BuffFloatingPanel {
     }
 
     /**
+     * 更新布局展开方向（恢复自 v0.8.0）：以标题栏在屏幕上/下半区为纯粹基准
+     * direction-up：面板停靠屏幕下半区时，内容抽屉在标题栏上方向上展开
+     */
+    /**
+     * 落位与朝向判定（唯一实现）：
+     * 比较标题栏下方到屏幕底部的剩余空间与面板高度——
+     * 剩余空间更大 → 抽屉放标题栏之后（向下展开，top 锚定）；
+     * 面板高度更大 → 抽屉挪到标题栏之前（direction-up 类翻转节点顺序，bottom 锚定），
+     * 两种情况标题栏的屏幕位置都保持在 headerClientY 不动。
+     * @param {number} headerClientY 标题栏目标屏幕 Y
+     */
+    static placePanel(headerClientY) {
+        if (!this.panelEl) return;
+        const headerEl = this.panelEl.querySelector(".r20-panel-header");
+        const headerH = headerEl ? headerEl.offsetHeight : 30;
+        const panelH = this._savedExpandedHeight || 380;
+        const spaceBelow = window.innerHeight - headerClientY - headerH;
+
+        // 节点顺序由 direction 类驱动（CSS: .direction-up { flex-direction: column-reverse }）
+        this.isDirectionUp = spaceBelow < panelH;
+        this.panelEl.classList.toggle("direction-up", this.isDirectionUp);
+        this.panelEl.classList.toggle("direction-down", !this.isDirectionUp);
+
+        // 锚定：向下锚标题栏顶边，向上锚标题栏底边，标题栏位置不动
+        if (this.isDirectionUp) {
+            this.panelEl.style.top = "auto";
+            this.panelEl.style.bottom = `${Math.max(10, window.innerHeight - headerClientY - headerH)}px`;
+        } else {
+            this.panelEl.style.bottom = "auto";
+            this.panelEl.style.top = `${Math.max(10, headerClientY)}px`;
+        }
+        if (!this.isCollapsed) {
+            this.panelEl.style.height = `${panelH}px`;
+        }
+    }
+
+    /**
      * 明确展开/折叠面板状态（规范高度状态机，避免遗留巨大空白黑框）
+     */
+    /**
+     * 明确展开/折叠面板状态。
+     * 统一几何模型：面板是唯一的尺寸载体（正常 flex 文档流）；向上展开 = 子节点
+     * 顺序颠倒（direction-up 类 → column-reverse，抽屉在上、标题栏在下）+ 面板
+     * 改用底边锚定（top:auto/bottom:X），标题栏在屏幕上的位置保持不动。
      */
     static setCollapse(collapsed) {
         if (!this.panelEl) return;
         this.isCollapsed = !!collapsed;
         const drawer = this.panelEl.querySelector(".r20-panel-content-drawer");
         const btn = this.panelEl.querySelector(".btn-toggle-collapse");
+        this.panelEl.classList.toggle("is-collapsed", this.isCollapsed);
 
         if (this.isCollapsed) {
-            // 折叠：记忆当前真实高度，将容器收拢为 auto，禁用 resize
-            if (this.panelEl.offsetHeight > 50) {
-                this._savedExpandedHeight = this.panelEl.offsetHeight;
-            }
             if (drawer) drawer.style.display = "none";
             if (btn) btn.textContent = "▸";
             this.panelEl.style.height = "auto";
-            this.panelEl.style.minHeight = "0px";
-            this.panelEl.style.resize = "none";
-        } else {
-            // 展开：恢复记忆高度，启用 resize
-            if (drawer) drawer.style.display = "flex";
-            if (btn) btn.textContent = "▾";
-            this.panelEl.style.height = `${this._savedExpandedHeight || 380}px`;
-            this.panelEl.style.minHeight = "200px";
-            this.panelEl.style.resize = "both";
+            this.panelEl.style.minHeight = "0px"; // 压过基础 CSS 的 min-height:200px，避免折叠后残留大白框
+            return;
         }
+
+        // 展开即落位：以标题栏当前位置为锚，朝向由「下方剩余空间 vs 面板高度」判定
+        if (btn) btn.textContent = "▾";
+        if (drawer) drawer.style.display = "";
+        this.panelEl.style.minHeight = "";
+        const headerEl = this.panelEl.querySelector(".r20-panel-header");
+        this.placePanel(headerEl ? headerEl.getBoundingClientRect().top : this.panelEl.offsetTop);
     }
 
     /**
@@ -2225,6 +2550,7 @@ export class BuffFloatingPanel {
         });
 
         this.panelEl.addEventListener("mouseleave", () => {
+            if (this._headerDragging) return; // 原生拖拽标题栏期间不自动折叠
             if (!this.isPinned && !this.isCollapsed) {
                 hoverTimer = setTimeout(() => {
                     if (!this.isPinned) this.setCollapse(true);
@@ -2242,8 +2568,9 @@ export class BuffFloatingPanel {
             const savedPos = localStorage.getItem(this.POS_KEY);
             if (savedPos) {
                 const { left, top } = JSON.parse(savedPos);
+                // 恢复标题栏屏幕位置；朝向与锚定交由 setCollapse 展开时的 placePanel 统一判定
                 this.panelEl.style.left = `${Math.max(10, Math.min(window.innerWidth - 320, left))}px`;
-                this.panelEl.style.top = `${Math.max(10, Math.min(window.innerHeight - 200, top))}px`;
+                this.panelEl.style.top = `${Math.max(10, Math.min(window.innerHeight - 40, top))}px`;
                 this.panelEl.style.right = "auto";
                 this.panelEl.style.bottom = "auto";
             } else {
@@ -2256,7 +2583,10 @@ export class BuffFloatingPanel {
             if (savedSize) {
                 const { width, height } = JSON.parse(savedSize);
                 this.panelEl.style.width = `${Math.max(280, Math.min(window.innerWidth - 20, width))}px`;
-                this.panelEl.style.height = `${Math.max(200, Math.min(window.innerHeight - 20, height))}px`;
+                // 高度唯一真源：只写入 _savedExpandedHeight（面板高度由 setCollapse 落位时统一设置）
+                if (height > 50) {
+                    this._savedExpandedHeight = Math.max(200, Math.min(window.innerHeight - 40, height));
+                }
             }
         } catch (e) {}
     }
@@ -2267,13 +2597,19 @@ export class BuffFloatingPanel {
     static savePositionAndSize() {
         if (!this.panelEl) return;
         try {
+            // 持久化标题栏的屏幕 Y（向上展开模式下面板 offsetTop 是盒子顶边而非标题栏）
+            const headerEl = this.panelEl.querySelector(".r20-panel-header");
             localStorage.setItem(this.POS_KEY, JSON.stringify({
                 left: this.panelEl.offsetLeft,
-                top: this.panelEl.offsetTop
+                top: headerEl ? Math.round(headerEl.getBoundingClientRect().top) : this.panelEl.offsetTop
             }));
+            // 高度唯一真源：展开时面板可实测，折叠时沿用记忆高度
+            if (!this.isCollapsed && this.panelEl.offsetHeight > 50) {
+                this._savedExpandedHeight = this.panelEl.offsetHeight;
+            }
             localStorage.setItem(this.SIZE_KEY, JSON.stringify({
                 width: this.panelEl.offsetWidth,
-                height: this.panelEl.offsetHeight
+                height: this._savedExpandedHeight || 380
             }));
         } catch (e) {}
     }
@@ -2383,7 +2719,7 @@ export class BuffFloatingPanel {
                         key: condKey,
                         name: dName,
                         rounds: 0,
-                        initialRounds: 0,
+                        initRounds: 0,
                         enabled: false
                     });
                     BuffFloatingPanel.showNotice(`已为 [${name}] 添加状态 [${dName}] (0轮, 未激活)`);
@@ -2414,7 +2750,7 @@ export class BuffFloatingPanel {
     /**
      * 调出 Buff 编辑细目弹窗 (完整继承 e3a4247 原版：支持名称、初始轮数/公式、当前轮数与 JSON 加值细目字典)
      */
-    static showBuffEditorDialog(existingNode = null, charTarget = null) {
+    static showBuffEditorDialog(existingNode = null, charTarget = null, tokenTarget = null) {
         document.querySelector(".r20-dialog-mask")?.remove();
         document.querySelector(".r20-buff-editor-dialog")?.remove();
 
@@ -2509,6 +2845,29 @@ export class BuffFloatingPanel {
                     this.showNotice(`✅ 已新增 Buff [${name}]`);
                 }
                 await Pf1eBuffUI.refreshAllBadges();
+                await this.renderViewport();
+            } else if (tokenTarget) {
+                // 纯 Token：新增直接追加条目；编辑按原名称定位自定义字段中的条目后整体改写
+                const list = TokenBuffManager.getTokenBuffs(tokenTarget);
+                if (isEditing) {
+                    const target = list.find(x => x.name === existingNode.name);
+                    if (target) {
+                        target.name = name;
+                        target.rounds = rounds === "" ? null : rounds;
+                        target.initRounds = initRounds === "" ? null : initRounds;
+                        target.extraAttrs = Object.keys(extraAttrs).length > 0 ? extraAttrs : null;
+                        this.showNotice(`✅ 已更新 Token Buff [${name}]`);
+                    }
+                } else {
+                    list.push({
+                        name,
+                        rounds: rounds === "" ? null : rounds,
+                        initRounds: initRounds === "" ? null : initRounds,
+                        extraAttrs: Object.keys(extraAttrs).length > 0 ? extraAttrs : null
+                    });
+                    this.showNotice(`✅ 已新增 Token Buff [${name}]`);
+                }
+                TokenBuffManager.saveTokenBuffs(tokenTarget, list);
                 await this.renderViewport();
             }
         });

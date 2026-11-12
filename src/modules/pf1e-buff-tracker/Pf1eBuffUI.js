@@ -366,11 +366,7 @@ export class Pf1eBuffUI {
         const debuffs = [];
 
         // 优先读取人物卡上的 tracked_debuffs 明确登记列表
-        const trackedAttr = models.find(a => a.get("name") === "tracked_debuffs");
-        let trackedKeys = [];
-        if (trackedAttr && trackedAttr.get("current")) {
-            try { trackedKeys = JSON.parse(trackedAttr.get("current")); } catch (e) { trackedKeys = []; }
-        }
+        let trackedKeys = Roll20Bridge.readJsonAttr(character, "tracked_debuffs");
         if (!Array.isArray(trackedKeys)) trackedKeys = [];
         const trackedSet = new Set(trackedKeys);
 
@@ -870,7 +866,7 @@ export class Pf1eBuffUI {
                             try {
                                 if (character) {
                                     const condKey = `${debuff.key}_rounds`;
-                                    let attr = character.attribs.models.find(a => a.get("name") === condKey);
+                                    let attr = Roll20Bridge.findAttr(character, condKey);
                                     if (newRounds !== null) {
                                         if (attr) {
                                             attr.save({ current: newRounds });
@@ -1044,9 +1040,9 @@ export class Pf1eBuffUI {
         // 解除
         mask.querySelector(".btn-delete").addEventListener("click", async () => {
             try {
-                const condAttr = character.attribs?.models?.find(a => a.get("name") === debuff.key);
+                const condAttr = Roll20Bridge.findAttr(character, debuff.key);
                 if (condAttr) condAttr.save({ current: "0" });
-                const roundsAttr = character.attribs?.models?.find(a => a.get("name") === `${debuff.key}_rounds`);
+                const roundsAttr = Roll20Bridge.findAttr(character, `${debuff.key}_rounds`);
                 if (roundsAttr) roundsAttr.destroy();
                 this.requestTokenRefresh(tokenId);
             } catch (err) {
@@ -1062,7 +1058,7 @@ export class Pf1eBuffUI {
             const inputVal = mask.querySelector(".input-rounds").value.trim();
             try {
                 const roundsKey = `${debuff.key}_rounds`;
-                let roundsAttr = character.attribs?.models?.find(a => a.get("name") === roundsKey);
+                let roundsAttr = Roll20Bridge.findAttr(character, roundsKey);
                 if (inputVal === "" || isNaN(Number(inputVal))) {
                     if (roundsAttr) roundsAttr.destroy();
                 } else {

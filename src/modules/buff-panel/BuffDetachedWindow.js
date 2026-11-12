@@ -1,5 +1,6 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
+import { DragGestures } from "../../core/DragGestures.js";
 import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
 import { Pf1eBuffUI } from "../pf1e-buff-tracker/Pf1eBuffUI.js";
 import { BuffFloatingPanel } from "./BuffFloatingPanel.js";
@@ -105,33 +106,23 @@ export class BuffDetachedWindow {
         document.body.appendChild(el);
         this.domEl = el;
 
-        // 窗口拖动
+        // 窗口拖动（统一手势工具：指针捕获，几何钳制留在本模块）
         const header = el.querySelector(".r20-panel-header");
-        let isDragging = false;
-        let startX = 0, startY = 0, startLeft = 0, startTop = 0;
-
-        header.addEventListener("mousedown", (e) => {
-            if (e.target.closest("button")) return;
-            isDragging = true;
-            startX = e.clientX;
-            startY = e.clientY;
-            startLeft = el.offsetLeft;
-            startTop = el.offsetTop;
-
-            const onMouseMove = (me) => {
-                if (!isDragging) return;
-                el.style.left = `${Math.max(10, Math.min(window.innerWidth - el.offsetWidth - 10, startLeft + (me.clientX - startX)))}px`;
-                el.style.top = `${Math.max(10, Math.min(window.innerHeight - el.offsetHeight - 10, startTop + (me.clientY - startY)))}px`;
-            };
-
-            const onMouseUp = () => {
-                isDragging = false;
-                document.removeEventListener("mousemove", onMouseMove);
-                document.removeEventListener("mouseup", onMouseUp);
-            };
-
-            document.addEventListener("mousemove", onMouseMove);
-            document.addEventListener("mouseup", onMouseUp);
+        header.style.touchAction = "none";
+        let dragState = null;
+        DragGestures.bind(header, {
+            isIgnored: (e) => !!e.target.closest("button"),
+            onStart: (e, start) => {
+                dragState = { startLeft: el.offsetLeft, startTop: el.offsetTop };
+            },
+            onMove: (e, start) => {
+                if (!dragState) return;
+                el.style.left = `${Math.max(10, Math.min(window.innerWidth - el.offsetWidth - 10, dragState.startLeft + (e.clientX - start.x)))}px`;
+                el.style.top = `${Math.max(10, Math.min(window.innerHeight - el.offsetHeight - 10, dragState.startTop + (e.clientY - start.y)))}px`;
+            },
+            onEnd: () => {
+                dragState = null;
+            }
         });
 
         // 关闭窗口
@@ -487,14 +478,7 @@ export class BuffDetachedWindow {
                 let linkBadgeHtml = "";
                 if (b.linkHostId) {
                     const hostChar = window.Campaign?.characters?.get(b.linkHostId);
-                    const hostAvatar = hostChar?.getAvatar ? hostChar.getAvatar() : (hostChar?.get("avatar") || "");
-                    const hostName = hostChar?.get("name") || "未知施法者";
-                    linkBadgeHtml = `
-                        <span class="r20-buff-link-badge btn-unlink" title="🔗 链接自 [${escapeHtml(hostName)}]，点击解除链接转为独立副本">
-                            🔗
-                            ${hostAvatar ? `<img src="${escapeHtml(hostAvatar)}" class="r20-buff-host-avatar" alt="${escapeHtml(hostName)}" onerror="this.style.display='none';">` : ""}
-                        </span>
-                    `;
+                    linkBadgeHtml = BuffFloatingPanel.getLinkBadgeHtml(hostChar);
                 }
 
                 item.innerHTML = `

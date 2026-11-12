@@ -36,7 +36,7 @@ export class BuffPanelStyles {
                 user-select: none;
                 box-sizing: border-box;
                 display: flex !important;
-                flex-direction: column !important;
+                flex-direction: column;
                 background: #ffffff !important;
                 border: 1px solid #c7c7c7 !important;
                 border-radius: 4px;
@@ -102,6 +102,19 @@ export class BuffPanelStyles {
             }
 
             /* 抽屉式内容折叠容器 */
+            /* ==========================================================================
+               方向性展开：向上展开 = 子节点顺序颠倒（column-reverse，抽屉在上、标题栏
+               在下）+ 面板底边锚定（setCollapse 内联 top:auto/bottom:X），标题栏屏幕
+               位置不动。面板是唯一尺寸载体，方向类只影响节点顺序与手柄位置。
+               ========================================================================== */
+            #r20-buff-panel {
+                resize: none;
+            }
+
+            #r20-buff-panel.direction-up {
+                flex-direction: column-reverse;
+            }
+
             .r20-panel-content-drawer {
                 background: #ffffff;
                 box-sizing: border-box;
@@ -110,6 +123,29 @@ export class BuffPanelStyles {
                 flex: 1 1 auto;
                 min-height: 0;
                 overflow: hidden;
+            }
+
+            /* 统一缩放手柄：贴面板外侧角（向下=右下，向上=右上） */
+            .r20-resize-handle {
+                position: absolute;
+                right: 0;
+                bottom: 0;
+                width: 16px;
+                height: 16px;
+                z-index: 6;
+                cursor: nwse-resize;
+                background: linear-gradient(135deg, transparent 0 55%, #b0b0b0 55% 65%, transparent 65% 75%, #b0b0b0 75% 85%, transparent 85%);
+            }
+            #r20-buff-panel.direction-up .r20-resize-handle {
+                top: 0;
+                bottom: auto;
+                cursor: nesw-resize;
+            }
+            #r20-buff-panel.is-collapsed .r20-resize-handle {
+                display: none;
+            }
+            .r20-resize-handle:hover {
+                background: linear-gradient(135deg, transparent 0 55%, #555555 55% 65%, transparent 65% 75%, #555555 75% 85%, transparent 85%);
             }
 
             /* ==========================================================================

@@ -4,84 +4,78 @@ import { BuffLifecycle } from "../../core/BuffLifecycle.js";
 /**
  * TokenBuffManager.js
  * 专门处理无人物卡绑定的纯野怪/通用 Token 的 Buff 生命周期与持久化
- * 利用 Token 自身的 gmnotes 存储结构化 Buff 数据，并实时同步到 Firebase
+ *
+ * 存储介质：Token Graphic 模型上的自定义字段 `r20_suite_buffs`
+ * （JSON: { buffs: [...], debuffs: [...] }，经实验验证可随 Firebase 持久化并跨页面刷新存活）。
+ * 不占用 gmnotes——那是用户可见可编辑的笔记空间，混入结构化数据会被用户编辑冲掉。
+ *
+ * 数据结构与人物卡 (Pf1eBuffManager.getAllBuffs) 保持完全一致的字段语义：
+ * { rowId, name, enabled, rounds, initRounds, extraAttrs, linkHostId, linkSourceRowId, linkChildren }
+ * 所有写入方负责按此结构落盘；读取端直读直返，不做迁移清洗。
  *
  * 轮数扣减/回退算法统一委托至 BuffLifecycle（纯算法核心），
- * 本类只负责 gmnotes 编解码与持久化。
+ * 本类只负责自定义字段的读写。
  */
 export class TokenBuffManager {
-    static COMMENT_PREFIX = "<!--r20_buffs:";
-    static COMMENT_SUFFIX = "-->";
-    static DEBUFF_PREFIX = "<!--r20_debuffs:";
-    static DEBUFF_SUFFIX = "-->";
+    static FIELD = "r20_suite_buffs";
 
     /**
-     * 解码 Token 的 gmnotes（兼容未 encodeURIComponent 的历史数据）
+     * 读取整份数据（缺失/损坏时返回空结构）
      */
-    static _decodeGmnotes(token) {
-        const raw = token.get("gmnotes") || "";
-        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+    static _load(token) {
+        let data = null;
+        try { data = JSON.parse(token.get(this.FIELD) || "null"); } catch (e) { data = null; }
+        if (!data || typeof data !== "object") data = {};
+        if (!Array.isArray(data.buffs)) data.buffs = [];
+        if (!Array.isArray(data.debuffs)) data.debuffs = [];
+        return data;
     }
 
     /**
-     * 将 JSON 数据块以注释形式拼接进 gmnotes 文本：
-     * 已有同名数据块则原位替换，否则追加在末尾
+     * 整份数据写回自定义字段（推送到 Firebase）
      */
-    static _spliceGmnotesBlock(decoded, prefix, suffix, json) {
-        const jsonBlock = `${prefix}${json}${suffix}`;
-        const startIdx = decoded.indexOf(prefix);
-        if (startIdx !== -1) {
-            const endIdx = decoded.indexOf(suffix, startIdx);
-            if (endIdx !== -1) {
-                // 替换旧数据块
-                return decoded.substring(0, startIdx) + jsonBlock + decoded.substring(endIdx + suffix.length);
-            }
-            return decoded.substring(0, startIdx) + jsonBlock;
-        }
-        // 追加在最后
-        return decoded ? `${decoded}\n${jsonBlock}` : jsonBlock;
+    static _save(token, data) {
+        token.save({ [this.FIELD]: JSON.stringify(data) });
     }
 
     /**
-     * 从 Token 的 gmnotes 中提取当前已登记的 Debuff 列表
+     * 从 Token 的自定义字段中提取 Buff 列表
      * @param {object} token Graphic Backbone 模型
-     * @returns {Array} [{ key, name, rounds, enabled, ... }]
+     * @returns {Array} 标准结构条目 [{ rowId, name, enabled, rounds, initRounds, ... }]
+     */
+    static getTokenBuffs(token) {
+        if (!token) return [];
+        return this._load(token).buffs;
+    }
+
+    /**
+     * 将 Buff 列表持久化回 Token 的自定义字段
+     */
+    static saveTokenBuffs(token, buffs) {
+        if (!token) return;
+        const data = this._load(token);
+        data.buffs = buffs;
+        this._save(token, data);
+    }
+
+    /**
+     * 从 Token 的自定义字段中提取当前已登记的 Debuff 列表
+     * @param {object} token Graphic Backbone 模型
+     * @returns {Array} [{ key, rowId, name, rounds, enabled, isDebuff }]
      */
     static getTokenDebuffs(token) {
         if (!token) return [];
-        const decoded = this._decodeGmnotes(token);
-
-        const startIdx = decoded.indexOf(this.DEBUFF_PREFIX);
-        if (startIdx === -1) {
-            // 兼容旧版混在 r20_buffs 里的情况
-            const allBuffs = this.getTokenBuffs(token);
-            return allBuffs.filter(b => !!b.isDebuff);
-        }
-
-        const endIdx = decoded.indexOf(this.DEBUFF_SUFFIX, startIdx);
-        if (endIdx === -1) return [];
-
-        const jsonStr = decoded.substring(startIdx + this.DEBUFF_PREFIX.length, endIdx);
-        try {
-            return JSON.parse(jsonStr);
-        } catch (e) {
-            console.error("[TokenBuffManager] 解析 Token Debuff 数据失败:", e);
-            return [];
-        }
+        return this._load(token).debuffs;
     }
 
     /**
-     * 将 Debuff 列表持久化回 Token 的 gmnotes
+     * 将 Debuff 列表持久化回 Token 的自定义字段
      */
     static saveTokenDebuffs(token, debuffs) {
         if (!token) return;
-        const newNotes = this._spliceGmnotesBlock(
-            this._decodeGmnotes(token),
-            this.DEBUFF_PREFIX,
-            this.DEBUFF_SUFFIX,
-            JSON.stringify(debuffs)
-        );
-        token.save({ gmnotes: encodeURIComponent(newNotes) });
+        const data = this._load(token);
+        data.debuffs = debuffs;
+        this._save(token, data);
     }
 
     /**
@@ -95,14 +89,19 @@ export class TokenBuffManager {
         if (existing) {
             if (debuffData.rounds !== undefined) existing.rounds = debuffData.rounds;
             if (debuffData.enabled !== undefined) existing.enabled = debuffData.enabled;
+            if (debuffData.linkHostId !== undefined) existing.linkHostId = debuffData.linkHostId;
+            if (debuffData.linkSourceRowId !== undefined) existing.linkSourceRowId = debuffData.linkSourceRowId;
         } else {
             list.push({
                 key: key,
-                rowId: key,
+                rowId: debuffData.rowId || key,
                 name: debuffData.name || key,
                 rounds: debuffData.rounds !== undefined ? debuffData.rounds : 0,
-                initialRounds: debuffData.initialRounds !== undefined ? debuffData.initialRounds : 0,
+                initRounds: debuffData.initRounds !== undefined ? debuffData.initRounds : 0,
                 enabled: debuffData.enabled !== undefined ? debuffData.enabled : false,
+                linkHostId: debuffData.linkHostId || null,
+                linkSourceRowId: debuffData.linkSourceRowId || null,
+                linkChildren: [],
                 isDebuff: true
             });
         }
@@ -155,64 +154,18 @@ export class TokenBuffManager {
     }
 
     /**
-     * 从 Token 的 gmnotes 中提取当前所有激活的 Buff 列表
-     * @param {object} token Graphic Backbone 模型
-     * @returns {Array} [{ name, rounds, initialRounds }]
-     */
-    static getTokenBuffs(token) {
-        if (!token) return [];
-        const decoded = this._decodeGmnotes(token);
-
-        // 提取被注释包裹的 JSON 数据，避免干扰 GM 的正常备注
-        const startIdx = decoded.indexOf(this.COMMENT_PREFIX);
-        if (startIdx === -1) {
-            // 兼容直接存 JSON 的情况
-            if (decoded.trim().startsWith("[") && decoded.trim().endsWith("]")) {
-                try { return JSON.parse(decoded.trim()); } catch (e) { return []; }
-            }
-            return [];
-        }
-
-        const endIdx = decoded.indexOf(this.COMMENT_SUFFIX, startIdx);
-        if (endIdx === -1) return [];
-
-        const jsonStr = decoded.substring(startIdx + this.COMMENT_PREFIX.length, endIdx);
-        try {
-            return JSON.parse(jsonStr);
-        } catch (e) {
-            console.error("[TokenBuffManager] 解析 Token Buff 数据失败:", e);
-            return [];
-        }
-    }
-
-    /**
-     * 将 Buff 列表安全保存回 Token 的 gmnotes 中
-     * @param {object} token Graphic 模型
-     * @param {Array} buffs 最新 Buff 列表
-     */
-    static saveTokenBuffs(token, buffs) {
-        if (!token) return;
-        const newNotes = this._spliceGmnotesBlock(
-            this._decodeGmnotes(token),
-            this.COMMENT_PREFIX,
-            this.COMMENT_SUFFIX,
-            JSON.stringify(buffs)
-        );
-        // 保存并自动推送到 Firebase
-        token.save({ gmnotes: encodeURIComponent(newNotes) });
-    }
-
-    /**
      * 对纯 Token 施加或刷新 Buff（同名只刷新轮数，不同名追加）
      * @param {object} token Graphic 模型
      * @param {string} buffName Buff 名称
      * @param {number|null} rounds 持续轮数
      * @param {object|null} extraAttrs 细目属性字典
+     * @param {string|null} initRounds 预置初始轮数或公式
+     * @returns {object|null} 落盘后的条目
      */
-    static applyOrRefreshBuff(token, buffName, rounds = null, extraAttrs = null) {
-        if (!token) return false;
+    static applyOrRefreshBuff(token, buffName, rounds = null, extraAttrs = null, initRounds = null) {
+        if (!token) return null;
         const cleanName = (buffName || "").trim();
-        if (!cleanName) return false;
+        if (!cleanName) return null;
 
         const buffs = this.getTokenBuffs(token);
         const existing = buffs.find(b => b.name === cleanName);
@@ -220,34 +173,47 @@ export class TokenBuffManager {
             ? Object.fromEntries(Object.entries(extraAttrs).filter(([k]) => !k.startsWith("link_") && !k.startsWith("link")))
             : null;
 
+        let entry;
         if (existing) {
             existing.rounds = (rounds !== null && !isNaN(rounds)) ? Number(rounds) : null;
+            if (initRounds !== null && initRounds !== undefined) existing.initRounds = initRounds;
             if (cleanAttrs) existing.extraAttrs = cleanAttrs;
+            existing.enabled = true;
+            entry = existing;
             console.log(`[TokenBuffManager] Token [${token.get("name")}] 刷新同名 Buff [${cleanName}], 剩余: ${rounds}轮`);
         } else {
-            buffs.push({
+            entry = {
+                rowId: Roll20Bridge.generateStandardRowId(),
                 name: cleanName,
+                enabled: true,
                 rounds: (rounds !== null && !isNaN(rounds)) ? Number(rounds) : null,
-                extraAttrs: cleanAttrs || null
-            });
+                initRounds: initRounds ?? null,
+                buffType: "spell",
+                extraAttrs: cleanAttrs || null,
+                linkHostId: null,
+                linkSourceRowId: null,
+                linkChildren: []
+            };
+            buffs.push(entry);
             console.log(`[TokenBuffManager] Token [${token.get("name")}] 新增 Buff [${cleanName}], 轮数: ${rounds}`);
         }
 
         this.saveTokenBuffs(token, buffs);
-        return true;
+        return entry;
     }
 
     /**
      * 移除纯 Token 上的某个 Buff
      * @param {object} token Graphic 模型
-     * @param {string} buffName Buff 名称
+     * @param {string} buffName Buff 名称或 rowId
      */
     static removeBuff(token, buffName) {
         if (!token) return false;
         const cleanName = (buffName || "").trim();
         let buffs = this.getTokenBuffs(token);
         const beforeLen = buffs.length;
-        buffs = buffs.filter(b => b.name !== cleanName);
+        // 兼容两种定位方式：条目名或 rowId（归一化后两者可能不同）
+        buffs = buffs.filter(b => b.name !== cleanName && b.rowId !== cleanName);
 
         if (buffs.length !== beforeLen) {
             this.saveTokenBuffs(token, buffs);
@@ -265,16 +231,17 @@ export class TokenBuffManager {
         const token = typeof tokenOrId === "string" ? Roll20Bridge.getTokenGraphic(tokenOrId) : tokenOrId;
         if (!token) return [];
 
-        const buffs = this.getTokenBuffs(token);
-        const debuffs = this.getTokenDebuffs(token);
+        const data = this._load(token);
+        const { buffs, debuffs } = data;
         if (buffs.length === 0 && debuffs.length === 0) return [];
 
         const processed = [];
 
-        // 1. 处理正面 Buff（过期条目直接从列表除名）
+        // 1. 处理正面 Buff（过期条目直接从列表除名；未激活条目跳过，与人物卡语义一致）
         if (buffs.length > 0) {
             const remainingBuffs = [];
             for (const buff of buffs) {
+                if (buff.enabled === false) { remainingBuffs.push(buff); continue; }
                 const result = BuffLifecycle.decrementEntry(buff);
                 if (!result) {
                     remainingBuffs.push(buff);
@@ -287,24 +254,23 @@ export class TokenBuffManager {
                     processed.push(result);
                 }
             }
-            this.saveTokenBuffs(token, remainingBuffs);
+            data.buffs = remainingBuffs;
         }
 
         // 2. 处理 Debuff 轮数倒计与到期关停
         if (debuffs.length > 0) {
-            let debuffsModified = false;
             for (const debuff of debuffs) {
                 const result = BuffLifecycle.decrementEntry(debuff, {
                     isDebuff: true,
                     formatName: (e) => `[Debuff] ${e.name}`
                 });
                 if (!result) continue;
-                debuffsModified = true;
                 processed.push(result);
             }
-            if (debuffsModified) {
-                this.saveTokenDebuffs(token, debuffs);
-            }
+        }
+
+        if (processed.length > 0) {
+            this._save(token, data);
         }
 
         return processed;
@@ -324,27 +290,24 @@ export class TokenBuffManager {
         const token = typeof tokenOrId === "string" ? Roll20Bridge.getTokenGraphic(tokenOrId) : tokenOrId;
         if (!token) return [];
 
-        const buffs = this.getTokenBuffs(token);
-        const debuffs = this.getTokenDebuffs(token);
+        const data = this._load(token);
+        const { buffs, debuffs } = data;
         if (buffs.length === 0 && debuffs.length === 0) return [];
 
         const processed = [];
         for (const buff of buffs) {
+            if (buff.enabled === false) continue;
             if (!BuffLifecycle.incrementEntry(buff)) continue;
             processed.push({ name: buff.name, status: "incremented", remaining: buff.rounds });
         }
-        if (buffs.length > 0) {
-            this.saveTokenBuffs(token, buffs);
-        }
 
-        let debuffsModified = false;
         for (const debuff of debuffs) {
             if (!BuffLifecycle.incrementEntry(debuff, { isDebuff: true })) continue;
             processed.push({ name: `[Debuff] ${debuff.name}`, status: "incremented", remaining: debuff.rounds });
-            debuffsModified = true;
         }
-        if (debuffsModified) {
-            this.saveTokenDebuffs(token, debuffs);
+
+        if (processed.length > 0) {
+            this._save(token, data);
         }
 
         console.log(`[TokenBuffManager] 先攻回退: 为 Token [${token.get("name")}] 加回 Buff/Debuff 轮数共 ${processed.length} 项`);

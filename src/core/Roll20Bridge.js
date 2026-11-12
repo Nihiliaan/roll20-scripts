@@ -617,4 +617,105 @@ export class Roll20Bridge {
         input.focus();
         input.select();
     }
+
+    /**
+     * 按属性全名查找 Character 的属性模型（未找到返回 null）
+     * 收敛全项目重复的 attribs.models.find(a => a.get("name") === X) 样板
+     */
+    static findAttr(character, name) {
+        return character?.attribs?.models?.find(a => a.get("name") === name) || null;
+    }
+
+    /**
+     * 大小写不敏感版本（Roll20 官方卡对 repeating 行 ID 存在大小写漂移）
+     */
+    static findAttrCI(character, name) {
+        const lower = String(name).toLowerCase();
+        return character?.attribs?.models?.find(a => {
+            const n = a.get("name") || "";
+            return n === name || n.toLowerCase() === lower;
+        }) || null;
+    }
+
+    /**
+     * 生成标准 Roll20 行 ID（人物卡 repeating 行与 Token 自定义字段条目共用）
+     */
+    static generateStandardRowId() {
+        let id = "";
+        if (typeof window !== "undefined" && typeof window.generateUUID === "function") {
+            id = window.generateUUID();
+        }
+        if (!id) {
+            // 回退实现：标准 Roll20 Push ID 生成器（严格剔除下划线 _，防止破坏 repeating_section_([^_]+) 正则分割）
+            const PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+            let now = new Date().getTime();
+            const timeStampChars = new Array(8);
+            for (let i = 7; i >= 0; i--) {
+                timeStampChars[i] = PUSH_CHARS.charAt(now % 63);
+                now = Math.floor(now / 63);
+            }
+            id = timeStampChars.join("");
+            for (let i = 0; i < 12; i++) {
+                id += PUSH_CHARS.charAt(Math.floor(Math.random() * 63));
+            }
+        }
+        // 核心工业级约束：坚决剔除下划线 _（替换为合法字母 a），防止截断 Roll20 官方 repeating_buff2_([^_]+) 正则
+        id = id.replace(/_/g, "a");
+        // 规避 Roll20 Jumpgate 坏行检测判定：
+        // Jumpgate 规则：若 ID 以 '-' 开头且全为纯小写 (le.substring(0,1)==='-' && le.toLowerCase()===le)，
+        // 则会将其判定为坏死行并注入 'repitembroken' 样式类导致弹出红字报错。
+        // 因此必须保留天然大小写，且若首字符为 '-' 时确保包含大写字母。
+        if (id.startsWith("-") && id.toLowerCase() === id) {
+            id = id.substring(0, 1) + id.charAt(1).toUpperCase() + id.substring(2);
+        }
+        return id;
+    }
+
+    /**
+     * 查找或创建/更新属性（create-or-save 样板的单行收敛）
+     * 行为与手写样板逐位一致：无则 create（可带 max），有则无条件 save
+     * @param {object} opts { max: 属性上限, bySuite: 标记 bySuite 选项 }
+     * @returns {object|null} 属性模型
+     */
+    static upsertAttr(character, name, current, opts = {}) {
+        if (!character?.attribs) return null;
+        let attr = opts.ci ? this.findAttrCI(character, name) : this.findAttr(character, name);
+        if (!attr) {
+            const data = { name, current };
+            if (opts.max !== undefined) data.max = opts.max;
+            attr = character.attribs.create(data, opts.bySuite ? { bySuite: true } : undefined);
+        } else {
+            attr.save({ current }, opts.bySuite ? { bySuite: true } : undefined);
+        }
+        return attr;
+    }
+
+    /**
+     * 读取 JSON 属性（解析失败/缺失/类型不符时返回 fallback）
+     * @param {*} [fallback] 默认 []
+     */
+    static readJsonAttr(character, name, fallback = []) {
+        const attr = this.findAttr(character, name);
+        if (!attr || !attr.get("current")) return fallback;
+        try {
+            const parsed = JSON.parse(attr.get("current"));
+            return parsed ?? fallback;
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    /**
+     * 将 JSON 值写入属性（序列化 + upsert 单行收敛）
+     * @param {object} opts { destroyIfEmpty: 值为空数组时销毁属性 }
+     */
+    static writeJsonAttr(character, name, value, opts = {}) {
+        const serialized = JSON.stringify(value);
+        if (opts.destroyIfEmpty && Array.isArray(value) && value.length === 0) {
+            const attr = this.findAttr(character, name);
+            if (attr) attr.destroy();
+            return null;
+        }
+        return this.upsertAttr(character, name, serialized);
+    }
 }

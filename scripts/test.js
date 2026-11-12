@@ -91,10 +91,7 @@ async function runAllTests() {
     const managerContext = loadModuleInContext('src/modules/pf1e-buff-tracker/Pf1eBuffManager.js', {
         window: {},
         console: console,
-        Roll20Bridge: {
-            ensureCharacterAttributes: async () => {},
-            escapeHtml: escapeHtml
-        }
+        Roll20Bridge: bridgeContext.Roll20Bridge
     });
     const { Pf1eBuffManager } = managerContext;
 
@@ -505,25 +502,27 @@ async function runAllTests() {
         RecalcService.destroy();
     });
 
-    // 8. 测试 TokenBuffManager gmnotes 编解码与回合生命周期
-    function createMockToken(initialNotes) {
-        const state = { gmnotes: initialNotes || '', saves: [] };
+    // 8. 测试 TokenBuffManager 自定义字段存取与回合生命周期
+    function createMockToken(initialField) {
+        const state = { field: initialField || '', saves: [] };
         return {
             state,
-            get: (prop) => (prop === 'gmnotes' ? state.gmnotes : '哥布林侦察兵'),
-            save: (obj) => { state.saves.push(obj); if ('gmnotes' in obj) state.gmnotes = obj.gmnotes; }
+            get: (prop) => (prop === 'r20_suite_buffs' ? state.field : '哥布林侦察兵'),
+            save: (obj) => { state.saves.push(obj); if ('r20_suite_buffs' in obj) state.field = obj.r20_suite_buffs; }
         };
     }
 
     const tokenContext = loadModuleInContext('src/modules/token-buff/TokenBuffManager.js', {
         console: console,
         BuffLifecycle: lifecycleContext.BuffLifecycle,
-        Roll20Bridge: { getTokenGraphic: () => null }
+        Roll20Bridge: bridgeContext.Roll20Bridge
     });
     const { TokenBuffManager } = tokenContext;
 
-    await test('TokenBuffManager gmnotes 数据块读写往返且不破坏原有备注', () => {
-        const token = createMockToken('GM 的普通备注文本');
+    await test('TokenBuffManager 自定义字段读写往返（不触碰 gmnotes）', () => {
+        const token = createMockToken('');
+        // 用户笔记独立存放，读写 Buff 不得触碰 gmnotes
+        token.state.gmnotes = encodeURIComponent('GM 的普通备注文本');
 
         // 注意: vm 沙箱跨 realm 数组原型不同，只能用长度/元素断言
         assert.strictEqual(TokenBuffManager.getTokenBuffs(token).length, 0);
@@ -531,10 +530,11 @@ async function runAllTests() {
         TokenBuffManager.applyOrRefreshBuff(token, '加速术 (Haste)', 3);
         TokenBuffManager.applyOrRefreshBuff(token, '常驻祝福', null);
 
-        // 注释块存在且原备注保留
-        const decoded = decodeURIComponent(token.state.gmnotes);
-        assert.ok(decoded.includes('GM 的普通备注文本'), '原备注不得被覆盖');
-        assert.ok(decoded.includes('<!--r20_buffs:'));
+        // 用户 gmnotes 不得被读写过程触碰
+        assert.strictEqual(token.state.gmnotes, encodeURIComponent('GM 的普通备注文本'), 'gmnotes 必须保持不动');
+        // 自定义字段里是结构化 JSON
+        const stored = JSON.parse(token.state.field);
+        assert.ok(Array.isArray(stored.buffs) && stored.buffs.length === 2, '自定义字段必须持久化 Buff 列表');
 
         const buffs = TokenBuffManager.getTokenBuffs(token);
         assert.strictEqual(buffs.length, 2);
@@ -549,10 +549,10 @@ async function runAllTests() {
     });
 
     await test('TokenBuffManager.decrementBuffs 回合扣减: 递减 / 过期除名 / Debuff 关停与正计轮', () => {
-        const token = createMockToken(encodeURIComponent(
-            'notes\n<!--r20_buffs:[{"name":"加速术","rounds":2},{"name":"常驻","rounds":null}]-->\n' +
-            '<!--r20_debuffs:[{"name":"流血","rounds":1,"enabled":true},{"name":"眩晕","rounds":0,"enabled":true}]-->'
-        ));
+        const token = createMockToken(JSON.stringify({
+            buffs: [{ name: '加速术', rounds: 2 }, { name: '常驻', rounds: null }],
+            debuffs: [{ name: '流血', rounds: 1, enabled: true }, { name: '眩晕', rounds: 0, enabled: true }]
+        }));
 
         const processed = TokenBuffManager.decrementBuffs(token);
         // 常驻 Buff (rounds=null) 与列表本身不产生扣减记录
@@ -578,11 +578,111 @@ async function runAllTests() {
         assert.strictEqual(debuffs.find(d => d.name === '眩晕').enabled, true);
     });
 
+    await test('TokenBuffManager 未激活 Buff 不参与扣减/回退（与人物卡语义一致）', () => {
+        const token = createMockToken(JSON.stringify({
+            buffs: [{ name: '已关停', enabled: false, rounds: 5 }, { name: '激活中', enabled: true, rounds: 3 }],
+            debuffs: []
+        }));
+
+        const processed = TokenBuffManager.decrementBuffs(token);
+        assert.strictEqual(processed.length, 1, '只有激活中的 Buff 产生扣减记录');
+        assert.strictEqual(processed[0].name, '激活中');
+        assert.strictEqual(TokenBuffManager.getTokenBuffs(token).find(b => b.name === '已关停').rounds, 5, '未激活 Buff 轮数不得被扣减');
+        assert.strictEqual(TokenBuffManager.getTokenBuffs(token).find(b => b.name === '激活中').rounds, 2, '激活中 Buff 正常扣减 3→2');
+
+        TokenBuffManager.incrementBuffsOnTurnRevert(token);
+        assert.strictEqual(TokenBuffManager.getTokenBuffs(token).find(b => b.name === '已关停').rounds, 5, '未激活 Buff 不得被回退加轮');
+        assert.strictEqual(TokenBuffManager.getTokenBuffs(token).find(b => b.name === '激活中').rounds, 3, '激活中 Buff 回退 +1（2→3）');
+    });
+
+    await test('删除主 Buff 级联: 同步清除人物卡子 Buff 与 Token 子 Buff', () => {
+        // 混合下游: 宿主 ROW → 人物卡子 Buff C1(child1) + Token 子 Buff T1(tok1)
+        const HybridBridge = Object.create(bridgeContext.Roll20Bridge);
+        const tokenMocks = {};
+        HybridBridge.getTokenGraphic = (id) => tokenMocks[id] || null;
+
+        function makeAttr(models, name, current) {
+            const attr = {
+                get(p) { return p === 'name' ? name : (p === 'current' ? current : undefined); },
+                save(o) { if ('current' in o) current = o.current; },
+                destroy() { const i = models.indexOf(attr); if (i >= 0) models.splice(i, 1); }
+            };
+            return attr;
+        }
+        function makeChar(id, models) {
+            return {
+                id,
+                get(n) { return n === 'name' ? ('角色' + id) : undefined; },
+                attribs: {
+                    models,
+                    create(d) { const a = makeAttr(models, d.name, d.current); models.push(a); return a; }
+                }
+            };
+        }
+        const charMocks = {};
+        const campaignMock = { characters: { get: (id) => charMocks[id] || null, models: [] } };
+
+        const hostModels = [];
+        const host = makeChar('host1', hostModels);
+        hostModels.push(
+            makeAttr(hostModels, 'repeating_buff2_ROW_name', '主Buff'),
+            makeAttr(hostModels, 'repeating_buff2_ROW_enable_toggle', '1'),
+            makeAttr(hostModels, 'repeating_buff2_ROW_rounds', '3'),
+            makeAttr(hostModels, 'repeating_buff2_ROW_link_children', JSON.stringify([
+                { charId: 'tok1', rowId: 'T1' },
+                { charId: 'child1', rowId: 'C1' }
+            ]))
+        );
+
+        const childModels = [];
+        const childChar = makeChar('child1', childModels);
+        childModels.push(
+            makeAttr(childModels, 'repeating_buff2_C1_name', '子Buff'),
+            makeAttr(childModels, 'repeating_buff2_C1_enable_toggle', '1'),
+            makeAttr(childModels, 'repeating_buff2_C1_rounds', '2'),
+            makeAttr(childModels, 'repeating_buff2_C1_link_host_id', 'host1'),
+            makeAttr(childModels, 'repeating_buff2_C1_link_source_row_id', 'ROW')
+        );
+
+        const tokenMock = createMockToken(JSON.stringify({
+            buffs: [{ rowId: 'T1', name: '衝鋒', enabled: true, rounds: 1, extraAttrs: { link_host_id: 'host1', link_source_row_id: 'ROW' } }],
+            debuffs: []
+        }));
+        tokenMocks['tok1'] = tokenMock;
+        charMocks['host1'] = host;
+        charMocks['child1'] = childChar;
+        campaignMock.characters.models = [host, childChar];
+
+        const managerContext2 = loadModuleInContext('src/modules/pf1e-buff-tracker/Pf1eBuffManager.js', {
+            window: { Campaign: campaignMock },
+            console: console,
+            queueMicrotask: queueMicrotask,
+            Roll20Bridge: HybridBridge,
+            TokenBuffManager: tokenContext.TokenBuffManager,
+            RecalcService: { request: () => {} }
+        });
+        const PM2 = managerContext2.Pf1eBuffManager;
+
+        return (async () => {
+            await PM2.deleteBuffRowPermanently(host, 'ROW');
+
+            // Token 子条目被移除
+            const tokenBuffs = TokenBuffManager.getTokenBuffs(tokenMock);
+            assert.strictEqual(tokenBuffs.length, 0, 'Token 子 Buff 必须随主 Buff 级联删除');
+
+            // 人物卡子 Buff 的属性被销毁
+            assert.strictEqual(childModels.filter(a => (a.get('name') || '').startsWith('repeating_buff2_C1')).length, 0, '人物卡子 Buff 属性必须被销毁');
+
+            // 宿主自身 ROW 属性被销毁，link_children 一并清除
+            assert.strictEqual(hostModels.filter(a => (a.get('name') || '').startsWith('repeating_buff2_ROW')).length, 0, '宿主主 Buff 属性必须被销毁');
+        })();
+    });
+
     await test('TokenBuffManager.incrementBuffsOnTurnRevert 先攻回退加回轮数', () => {
-        const token = createMockToken(encodeURIComponent(
-            '<!--r20_buffs:[{"name":"加速术","rounds":2},{"name":"常驻","rounds":null}]-->\n' +
-            '<!--r20_debuffs:[{"name":"流血","rounds":1,"enabled":true},{"name":"未激活","rounds":5,"enabled":false}]-->'
-        ));
+        const token = createMockToken(JSON.stringify({
+            buffs: [{ name: '加速术', rounds: 2 }, { name: '常驻', rounds: null }],
+            debuffs: [{ name: '流血', rounds: 1, enabled: true }, { name: '未激活', rounds: 5, enabled: false }]
+        }));
 
         const processed = TokenBuffManager.incrementBuffsOnTurnRevert(token);
         // 常驻与未激活 Debuff 不参与
