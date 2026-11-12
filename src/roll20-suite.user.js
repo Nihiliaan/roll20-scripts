@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 Suite - PF1e Turnorder Buff Engine
 // @namespace    https://github.com/Nihiliaan/roll20-scripts
-// @version      0.9.28
+// @version      0.9.29
 // @description  Roll20 Jumpgate 现代架构下的回合制多Buff生命周期与先攻追踪引擎，集成极简标题栏基准展开定位、Jumpgate原生选区联动、Vue响应式先攻徽章防护与原生角色卡完全同步
 // @author       Nihil & Antigravity
 // @license      MIT
@@ -35,7 +35,7 @@
         }
     }
 
-    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.28...");
+    console.log("[Roll20Suite] 启动 Roll20 Suite 外挂脚本引擎 v0.9.29...");
 
     // 致命异常浮动通知横条
     function showFatalErrorBanner(reason, details) {
@@ -46,7 +46,7 @@
         const safeReason = (typeof Roll20Bridge !== "undefined" && Roll20Bridge.escapeHtml) ? Roll20Bridge.escapeHtml(reason) : reason;
         banner.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-                <strong style="color:#ff6b6b;font-size:13px;">⚠️ Roll20 Suite (v0.9.28) 启动受阻</strong>
+                <strong style="color:#ff6b6b;font-size:13px;">⚠️ Roll20 Suite (v0.9.29) 启动受阻</strong>
                 <button id="r20-fatal-close" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;padding:0 4px;line-height:1;">&times;</button>
             </div>
             <div style="margin-bottom:8px;color:#eee;">${safeReason}</div>
@@ -61,7 +61,7 @@
         if (copyBtn) {
             copyBtn.onclick = (e) => {
                 const diag = {
-                    version: "0.9.28",
+                    version: "0.9.29",
                     time: new Date().toISOString(),
                     href: window.location.href,
                     hasCampaign: typeof window.Campaign !== "undefined",
@@ -10655,7 +10655,7 @@ class BuffFloatingPanel {
 
             // 6. 挂载命名空间供外部或开发者排查联动
             window.Roll20Suite = {
-                __version: "0.9.28",
+                __version: "0.9.29",
                 __teardown: () => {
                     console.log("[Roll20Suite] 正在执行全系统注销与资源清理...");
                     while (cleanups.length > 0) {

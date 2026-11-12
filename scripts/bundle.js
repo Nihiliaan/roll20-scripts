@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const VERSION = '0.9.28';
+const VERSION = '0.9.29';
 
 const cleanModule = (code) => code.replace(/^import .*$/gm, '').replace(/^export /gm, '');
 
