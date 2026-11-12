@@ -575,7 +575,7 @@ saveSheetValues    toggleBuff         syncedSave
          │
          ▼
 该 Token 是否关联人物卡 (token.get("represents"))?
-         ├── 否 ──> 纯图元/无卡野怪模式: 独立持久化至 Token 自身 (TokenBuffManager / gmnotes)
+         ├── 否 ──> 纯图元/无卡野怪模式: 独立持久化至 Token 自身 (TokenBuffManager / 自定义字段 r20_suite_buffs)
          └── 是
               │
               ▼
@@ -586,7 +586,7 @@ saveSheetValues    toggleBuff         syncedSave
                    ▼
 当前作战地图中代表该卡片的棋子数量 (tokenCount)?
                    ├── tokenCount === 1 (独占有名怪 / Boss) ──> 持久化至人物卡 (repeating_buff2)
-                   └── tokenCount > 1 (非独占杂兵集群 / Mooks) ──> 自动隔离持久化至各棋子自身 (TokenBuffManager / gmnotes)
+                   └── tokenCount > 1 (非独占杂兵集群 / Mooks) ──> 自动隔离持久化至各棋子自身 (TokenBuffManager / 自定义字段 r20_suite_buffs)
 ```
 
 ### 2. 架构设计不变量 (Architectural Invariants)
@@ -596,7 +596,7 @@ saveSheetValues    toggleBuff         syncedSave
 2. **怪物卡拓扑降级 (NPC Mook Demotion)**：
    若人物卡为怪物卡（`is_npc === "1"`），系统检测当前作战地图中代表该卡片的棋子数量：
    - **独占棋子 (`tokenCount === 1`)**：作为独占 Boss 记录于人物卡；
-   - **非独占多棋子 (`tokenCount > 1`)**：判定为共用模板的杂兵集群，Buff 自动隔离存储于各棋子自身（`TokenBuffManager` / `gmnotes`），杜绝状态互相污染与多重先攻扣轮雪崩；
+   - **非独占多棋子 (`tokenCount > 1`)**：判定为共用模板的杂兵集群，Buff 自动隔离存储于各棋子自身（`TokenBuffManager` / 自定义字段 `r20_suite_buffs`），杜绝状态互相污染与多重先攻扣轮雪崩；
 3. **纯图元兜底**：无对应人物卡的棋子始终由棋子自身持久化。
 
 
@@ -676,13 +676,14 @@ Roll20 官方 Pathfinder 1e 人物卡预置了 30 余种负面状态（Condition
 - **销毁生命周期**：
   - 唯有当用户显式点击卡片右侧的“✕”按钮（`deleteDebuffPermanently`）时，调用 `removeTrackedDebuff(char, condKey)` 将其从 `tracked_debuffs` 中剔除，并物理销毁其轮数与元属性，从视口中彻底注销。
 
-#### (2) 纯 Token 存储：`<!--r20_debuffs:...-->` 隐式注释块
-- **存储介质**：Token 自身的 `gmnotes` 字段；
-- **注释标记**：`<!--r20_debuffs:[{ key, name, rounds, enabled, ... }]-->`；
+#### (2) 纯 Token 存储：自定义字段 `r20_suite_buffs`
+- **存储介质**：Token Graphic 模型上的自定义字段 `r20_suite_buffs`（JSON：`{ buffs: [...], debuffs: [...] }`，经实验验证可随 Firebase 持久化并跨刷新存活）；
+  - 早期方案占用 `gmnotes`，但该字段是用户可见可编辑的笔记空间，混入结构化数据会被用户编辑冲掉，已废弃；
+- **数据契约**：条目结构与人物卡 `getAllBuffs` 输出保持同一字段语义（`rowId/name/enabled/rounds/initRounds/extraAttrs/linkHostId/linkSourceRowId/linkChildren`）；所有写入方负责按此结构落盘，读取端直读直返、不做迁移清洗；
 - **状态维护**：
   - 加入时：`TokenBuffManager.addTrackedDebuff(token, { key, name, rounds: 10, enabled: false })`，默认未激活；
   - 关停/激活时：`TokenBuffManager.toggleDebuff(token, key, enable)` 仅修改对应条目的 `enabled` 字段，绝对不从列表中删除；
-  - 彻底销毁时：`TokenBuffManager.removeTrackedDebuff(token, key)` 从数组中移除并保存回 `gmnotes`。
+  - 彻底销毁时：`TokenBuffManager.removeTrackedDebuff(token, key)` 从数组中移除并保存回自定义字段。
 
 ## 十三、Buff 副本克隆与拓扑链接彻底解耦规范 (Buff Clone Link Stripping & Name Isolation)
 
@@ -883,7 +884,7 @@ _.each(Y, le => {
 
 ### 1. 纯 Token (野怪/图元) 专属 Debuff 持久化管道
 对于无人物卡绑定的纯 Token 或多棋子怪物集群（Mook）：
-- 数据持久化统一托管于 Token 自身的 `gmnotes` 字段，以 `<!--r20_debuffs:[{ key, rowId, name, rounds, enabled, isDebuff }]-->` 注释块编码存储；
+- 数据持久化统一托管于 Token 自身的自定义字段 `r20_suite_buffs`（JSON：`{ buffs: [...], debuffs: [...] }`），条目结构与人物卡 `getAllBuffs` 输出保持同一字段语义；
 - 在获取目标 Graphic 模型时，必须统一通过 `Roll20Bridge.getTokenGraphic(tokenId)`（或在 Jumpgate 画布中通过 `thegraphics.get(tokenId)`）检索，严禁虚构不存在的查找函数；
 - 扣轮与倒先攻处理：在 `TokenBuffManager.decrementBuffs` 与 `incrementBuffsOnTurnRevert` 中，同时对正面 Buff 与已启用的 Debuff 数组进行轮数递减与到期关停（`rounds <= 0 -> enabled: false`）。
 
