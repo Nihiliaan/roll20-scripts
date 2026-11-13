@@ -291,20 +291,9 @@ export class BuffDetachedWindow {
                 tab.style.opacity = "1";
                 const ctx = BuffFloatingPanel._draggedContext;
                 BuffFloatingPanel._draggedContext = null;
-
-                if (!ctx || ctx.type !== "tab") return;
-                if (ctx._hasSpawned) return;
-
-                const targetUnderMouse = document.elementFromPoint(e.clientX, e.clientY);
-                const insidePanel = targetUnderMouse?.closest(".r20-buff-panel");
-
-                if (!insidePanel) {
-                    const dist = Math.hypot(e.clientX - ctx.startX, e.clientY - ctx.startY);
-                    if (dist > 25) {
-                        this.removeTab(ctx.id);
-                        BuffFloatingPanel.spawnDetachedWindow(e.clientX, e.clientY, ctx.id, ctx);
-                    }
-                }
+                BuffFloatingPanel.handleTabDragTearOff(e, ctx, {
+                    beforeSpawn: () => this.removeTab(ctx.id)
+                });
             });
 
             // 悬停自动切换与接收 Buff
@@ -517,19 +506,7 @@ export class BuffDetachedWindow {
                         placeholder: "永久",
                         className: "r20-input-round-inline",
                         onCommit: async (raw) => {
-                            let newRounds = "";
-                            if (raw !== "" && raw !== "永久" && raw !== "-") {
-                                if (!isNaN(Number(raw))) {
-                                    newRounds = Number(raw);
-                                } else {
-                                    try {
-                                        const evaled = await Roll20Bridge.evalNativeFormula(raw, char);
-                                        newRounds = (!isNaN(Number(evaled)) && evaled !== null) ? Number(evaled) : raw;
-                                    } catch (err) {
-                                        newRounds = raw;
-                                    }
-                                }
-                            }
+                            const newRounds = await Roll20Bridge.parseRoundsInput(raw, char, "");
                             await Pf1eBuffManager.setBuffRounds(char, b.rowId, newRounds);
                             BuffFloatingPanel.notifyBuffMutation();
                             await this.renderViewport();

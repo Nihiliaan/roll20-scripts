@@ -21,6 +21,9 @@ Roll20 Suite 的领域语言。架构讨论（模块命名、接口设计、代�
   - `Pf1eBuffManager` → 角色卡原生属性后端
   - `TokenBuffManager` → Token 自定义字段后端（`r20_suite_buffs`）
 - **DragGestures**（`src/core/DragGestures.js`）— 统一拖拽手势工具（Pointer Capture）。只提供 start/move/end 生命周期，几何语义（钳制、锚定、吸附）留在调用方。使用方：调度器标题栏/缩放手柄、独立二级窗口标题栏。新的可拖拽组件一律复用它，不得手写 mousedown/mousemove/mouseup 手势。
+- **BuffStore**（`src/core/BuffStore.js`）— **统一存取层门面**：把 Pf1eBuffManager（人物卡属性后端）与 TokenBuffManager（Token 自定义字段后端）的存取 API 合一。目标形如 `{char, token}`（经 `Roll20Bridge.resolveBuffTargetMode` 得出），方法内部按 `resolveMode` 路由，上层不再书写 char/token 双分支。条目形状双后端一致（`rowId/name/enabled/rounds/initRounds/extraAttrs/linkHostId/linkSourceRowId/linkChildren`）。整表写（`saveBuffs/saveDebuffs`）仅 Token 后端可用，对 char 目标显式抛错。已迁移的调用点：回合扣减/回退（bundle 主入口）、调度器面板的读取/开关/轮数/解绑/删除/同名关停/多选启停。
+- **就地轮数输入解析** — `Roll20Bridge.parseRoundsInput(raw, char, emptyValue)`：就地编辑 onCommit 的单一收敛点（数字直取、公式借用原生求值、空/常驻/永久/- 按 emptyValue 返回；char 惯用 `""`，Token 惯用 `null`）。
+- **Tab 撕裂手势** — `BuffFloatingPanel.handleTabDragTearOff(e, ctx, {beforeSpawn})`：动态 Tab / 钉选 Tab / 独立窗口三处共用的拖离判距（落点在面板外且位移 >25px → 撕离为二级窗口）。
 - **Roll20Bridge** — 宿主平台（window.Campaign / Jumpgate）的唯一访问通道。
 - **RecalcService** — 官方 sheet worker 重算的无头沙箱服务。
 - **SuiteConfigStore** — 用户设置的唯一托管存储。

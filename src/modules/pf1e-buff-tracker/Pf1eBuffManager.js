@@ -31,6 +31,65 @@ export class Pf1eBuffManager {
     }
 
     /**
+     * 纯同步：提取角色身上所有已登记/被追踪的负面状态 (Debuff / Condition)，包括已激活与已关停
+     * （存储层职责从 Pf1eBuffUI 下沉至此，UI 与 BuffStore 共用同一份读取逻辑）
+     */
+    static getAllDebuffsSync(character) {
+        if (!character || !character.attribs || !character.attribs.models) return [];
+        const models = character.attribs.models;
+        const debuffs = [];
+
+        // 优先读取人物卡上的 tracked_debuffs 明确登记列表
+        let trackedKeys = Roll20Bridge.readJsonAttr(character, "tracked_debuffs");
+        if (!Array.isArray(trackedKeys)) trackedKeys = [];
+        const trackedSet = new Set(trackedKeys);
+
+        for (let i = 0; i < this.PF1E_DEBUFF_DEFINITIONS.length; i++) {
+            const def = this.PF1E_DEBUFF_DEFINITIONS[i];
+            const attr = models.find(a => a.get("name") === def.key);
+            const val = attr ? attr.get("current") : null;
+            const isActive = this.isConditionValueActive(val);
+
+            // 影子链接与轮数元属性提取
+            const hostAttr = models.find(a => a.get("name") === `${def.key}_link_host_id`);
+            const srcAttr = models.find(a => a.get("name") === `${def.key}_link_source_row_id`);
+            const childrenAttr = models.find(a => a.get("name") === `${def.key}_link_children`);
+            const roundsAttr = models.find(a => a.get("name") === `${def.key}_rounds`);
+
+            const linkHostId = hostAttr ? hostAttr.get("current") : null;
+            const linkSourceRowId = srcAttr ? srcAttr.get("current") : null;
+            let linkChildren = [];
+            if (childrenAttr && childrenAttr.get("current")) {
+                try { linkChildren = JSON.parse(childrenAttr.get("current")); } catch (e) { linkChildren = []; }
+            }
+
+            // 判定是否属于已登记追踪状态：
+            // 只要在 tracked_debuffs 属性中登记、或者处于激活状态、或者存在 rounds 属性、或者持有上/下游链接关系，均代表该 Debuff 属于该角色
+            const isTracked = trackedSet.has(def.key) || isActive || roundsAttr || linkHostId || (Array.isArray(linkChildren) && linkChildren.length > 0);
+            if (isTracked) {
+                let rounds = null;
+                if (roundsAttr && roundsAttr.get("current") !== "" && roundsAttr.get("current") !== null) {
+                    const r = Number(roundsAttr.get("current"));
+                    if (!isNaN(r)) rounds = r;
+                }
+                debuffs.push({
+                    rowId: def.key,
+                    key: def.key,
+                    name: def.name,
+                    enabled: !!isActive,
+                    rounds,
+                    initRounds: null,
+                    isDebuff: true,
+                    linkHostId,
+                    linkSourceRowId,
+                    linkChildren
+                });
+            }
+        }
+        return debuffs;
+    }
+
+    /**
      * 获取指定角色卡上所有当前处于勾选激活状态的 Buff
      * @param {object} character Character Backbone 模型
      * @returns {Promise<Array>} 激活的 Buff 列表

@@ -1,6 +1,7 @@
 import { Roll20Bridge } from "../../core/Roll20Bridge.js";
 import { SuiteConfigStore } from "../../core/SuiteConfigStore.js";
 import { RecalcService } from "../../core/RecalcService.js";
+import { BuffStore } from "../../core/BuffStore.js";
 import { Pf1eBuffManager } from "../pf1e-buff-tracker/Pf1eBuffManager.js";
 import { Pf1eBuffUI } from "../pf1e-buff-tracker/Pf1eBuffUI.js";
 import { TokenBuffManager } from "../token-buff/TokenBuffManager.js";
@@ -616,19 +617,7 @@ export class BuffFloatingPanel {
                 tab.style.opacity = "1";
                 const ctx = this._draggedContext;
                 this._draggedContext = null;
-
-                if (!ctx || ctx.type !== "tab") return;
-                if (ctx._hasSpawned) return; // 单次防重锁拦截
-
-                const targetUnderMouse = document.elementFromPoint(e.clientX, e.clientY);
-                const insidePanel = targetUnderMouse?.closest(".r20-buff-panel");
-
-                if (!insidePanel) {
-                    const dist = Math.hypot(e.clientX - ctx.startX, e.clientY - ctx.startY);
-                    if (dist > 25) {
-                        this.spawnDetachedWindow(e.clientX, e.clientY, ctx.id, ctx);
-                    }
-                }
+                this.handleTabDragTearOff(e, ctx);
             });
 
             this.bindTabBuffHover(tab, { type, id, name });
@@ -695,19 +684,7 @@ export class BuffFloatingPanel {
                 tab.style.opacity = "1";
                 const ctx = this._draggedContext;
                 this._draggedContext = null;
-
-                if (!ctx || ctx.type !== "tab") return;
-                if (ctx._hasSpawned) return; // 单次防重锁拦截
-
-                const targetUnderMouse = document.elementFromPoint(e.clientX, e.clientY);
-                const insidePanel = targetUnderMouse?.closest(".r20-buff-panel");
-
-                if (!insidePanel) {
-                    const dist = Math.hypot(e.clientX - ctx.startX, e.clientY - ctx.startY);
-                    if (dist > 25) {
-                        this.spawnDetachedWindow(e.clientX, e.clientY, ctx.id, ctx);
-                    }
-                }
+                this.handleTabDragTearOff(e, ctx);
             });
 
             tab.addEventListener("dragover", (e) => {
@@ -913,28 +890,10 @@ export class BuffFloatingPanel {
             token = Roll20Bridge.getTokenGraphic(id);
         }
 
-        // 读取 Buff 列表与 Debuff 列表（内存数据直接读取）
-        let buffs = [];
-        let debuffs = [];
-        if (char) {
-            buffs = await Pf1eBuffManager.getAllBuffs(char);
-            debuffs = await Pf1eBuffUI.getAllDebuffs(char);
-        } else if (token) {
-            // Token 数据已在 TokenBuffManager 读取时归一化（结构与人物卡一致），此处直接使用
-            buffs = TokenBuffManager.getTokenBuffs(token).filter(b => !b.isDebuff);
-            debuffs = TokenBuffManager.getTokenDebuffs(token).map(b => ({
-                rowId: b.rowId || b.key || b.name,
-                key: b.key || b.name,
-                name: b.name,
-                enabled: b.enabled === true,
-                rounds: (b.rounds !== undefined && b.rounds !== null) ? b.rounds : null,
-                initRounds: b.initRounds || null,
-                isDebuff: true,
-                linkHostId: b.linkHostId || null,
-                linkSourceRowId: b.linkSourceRowId || null,
-                linkChildren: b.linkChildren || []
-            }));
-        }
+        // 读取 Buff 列表与 Debuff 列表（BuffStore 统一存取层按后端路由，形状双后端一致）
+        const storeTarget = { char, token };
+        const buffs = await BuffStore.getBuffs(storeTarget);
+        const debuffs = await BuffStore.getDebuffs(storeTarget);
 
         // 事务版本守卫：如果在读取等待期间已有更新的渲染事务触发，本次作废退出，绝不碰触 DOM！
         if (currentEpoch !== this._renderEpoch) {
@@ -967,25 +926,10 @@ export class BuffFloatingPanel {
 
         // 一键全关当前主体身上的所有 Buff 与 Debuff
         toolbar.querySelector(".btn-deactivate-all")?.addEventListener("click", async () => {
-            if (char) {
-                const activeBuffs = await Pf1eBuffManager.getActiveBuffs(char);
-                for (const b of activeBuffs) {
-                    await Pf1eBuffManager.toggleBuff(char, b.rowId, false);
-                }
-                const activeDebuffs = Pf1eBuffUI.getActiveDebuffsSync(char);
-                for (const d of activeDebuffs) {
-                    await Pf1eBuffManager.toggleCondition(char, d.key, false);
-                }
-                this.showNotice(`已取消激活 [${name}] 的全部 Buff 与状态`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
-            } else if (token) {
-                TokenBuffManager.saveTokenBuffs(token, []);
-                TokenBuffManager.saveTokenDebuffs(token, []);
-                this.showNotice(`已清空 [${name}] 的全部 Buff 与状态`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
-            }
+            await BuffStore.clearAll(storeTarget);
+            this.showNotice(`已清空 [${name}] 的全部 Buff 与状态`);
+            await Pf1eBuffUI.refreshAllBadges();
+            await this.renderViewport();
         });
 
         toolbar.querySelector(".btn-add-buff-to-active")?.addEventListener("click", () => {
@@ -1050,11 +994,7 @@ export class BuffFloatingPanel {
                 // 绑定复选框启停
                 item.querySelector(".r20-buff-toggle")?.addEventListener("click", async (e) => {
                     e.stopPropagation();
-                    if (char) {
-                        await Pf1eBuffManager.toggleCondition(char, d.key, e.target.checked);
-                    } else if (token) {
-                        TokenBuffManager.toggleDebuff(token, d.key, e.target.checked);
-                    }
+                    await BuffStore.toggleDebuff(storeTarget, d.key, e.target.checked);
                     await Pf1eBuffUI.refreshAllBadges();
                     await this.renderViewport();
                 });
@@ -1071,34 +1011,9 @@ export class BuffFloatingPanel {
                         placeholder: "常驻",
                         className: "r20-input-round-inline",
                         onCommit: async (raw) => {
-                            let newRounds = null;
-                            if (raw !== "" && raw !== "常驻" && raw !== "永久" && raw !== "-") {
-                                if (!isNaN(Number(raw))) {
-                                    newRounds = Number(raw);
-                                } else {
-                                    try {
-                                        const evaled = await Roll20Bridge.evalNativeFormula(raw, char);
-                                        newRounds = (!isNaN(Number(evaled)) && evaled !== null) ? Number(evaled) : raw;
-                                    } catch (err) {
-                                        newRounds = raw;
-                                    }
-                                }
-                            }
-                            if (char) {
-                                const roundsKey = `${d.key}_rounds`;
-                                let roundsAttr = Roll20Bridge.findAttr(char, roundsKey);
-                                const roundVal = newRounds !== null ? newRounds : "";
-                                if (roundsAttr) roundsAttr.save({ current: roundVal });
-                                else char.attribs.create({ name: roundsKey, current: roundVal });
-                            } else if (token) {
-                                const list = TokenBuffManager.getTokenDebuffs(token);
-                                const target = list.find(b => (b.key || b.name) === d.key);
-                                if (target) {
-                                    target.rounds = newRounds;
-                                    TokenBuffManager.saveTokenDebuffs(token, list);
-                                }
-                            }
-                                        await Pf1eBuffUI.refreshAllBadges();
+                            const newRounds = await Roll20Bridge.parseRoundsInput(raw, char, null);
+                            await BuffStore.setDebuffRounds(storeTarget, d.key, newRounds);
+                            await Pf1eBuffUI.refreshAllBadges();
                             await this.renderViewport();
                         }
                     });
@@ -1117,14 +1032,9 @@ export class BuffFloatingPanel {
                 // 点击 ✕ 按钮彻底解除/删除
                 item.querySelector(".btn-remove-debuff")?.addEventListener("click", async (e) => {
                     e.stopPropagation();
-                    if (char) {
-                        await Pf1eBuffManager.deleteDebuffPermanently(char, d.key);
-                        this.showNotice(`已彻底解除/删除 [${d.name}] 状态`);
-                    } else if (token) {
-                        TokenBuffManager.removeTrackedDebuff(token, d.key);
-                        this.showNotice(`已彻底解除/删除 [${d.name}] 状态`);
-                    }
-                        await Pf1eBuffUI.refreshAllBadges();
+                    await BuffStore.deleteDebuffPermanently(storeTarget, d.key);
+                    this.showNotice(`已彻底解除/删除 [${d.name}] 状态`);
+                    await Pf1eBuffUI.refreshAllBadges();
                     await this.renderViewport();
                 });
 
@@ -1153,12 +1063,8 @@ export class BuffFloatingPanel {
                 // 双击条目快速切换激活/关停
                 item.addEventListener("dblclick", async (e) => {
                     if (e.target.closest("button, .btn-unlink, .r20-input-round-inline")) return;
-                    if (char) {
-                        await Pf1eBuffManager.toggleCondition(char, d.key, !isEnabled);
-                    } else if (token) {
-                        TokenBuffManager.toggleDebuff(token, d.key, !isEnabled);
-                    }
-                        await Pf1eBuffUI.refreshAllBadges();
+                    await BuffStore.toggleDebuff(storeTarget, d.key, !isEnabled);
+                    await Pf1eBuffUI.refreshAllBadges();
                     await this.renderViewport();
                 });
 
@@ -1267,15 +1173,9 @@ export class BuffFloatingPanel {
                 // 快速启停复选框
                 item.querySelector(".r20-buff-toggle")?.addEventListener("click", async (e) => {
                     e.stopPropagation();
-                    if (char) {
-                        await Pf1eBuffManager.toggleBuff(char, b.rowId, e.target.checked);
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await this.renderViewport();
-                    } else if (token) {
-                        TokenBuffManager.toggleBuff(token, b.name, e.target.checked);
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await this.renderViewport();
-                    }
+                    await BuffStore.toggleBuff(storeTarget, b, e.target.checked);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    await this.renderViewport();
                 });
 
                 // 点击当前轮数：在原本数字所在位置就地渲染输入框快速编辑
@@ -1293,12 +1193,7 @@ export class BuffFloatingPanel {
                             className: "r20-input-round-inline",
                             onCommit: async (raw) => {
                                 const newRounds = (raw !== "" && !isNaN(Number(raw))) ? Number(raw) : null;
-                                const list = TokenBuffManager.getTokenBuffs(token);
-                                const target = list.find(x => x.name === b.name);
-                                if (target) {
-                                    target.rounds = newRounds;
-                                    TokenBuffManager.saveTokenBuffs(token, list);
-                                }
+                                await BuffStore.setBuffRounds(storeTarget, b, newRounds);
                                 await Pf1eBuffUI.refreshAllBadges();
                                 await this.renderViewport();
                             }
@@ -1311,20 +1206,8 @@ export class BuffFloatingPanel {
                         placeholder: "永久",
                         className: "r20-input-round-inline",
                         onCommit: async (raw) => {
-                            let newRounds = "";
-                            if (raw !== "" && raw !== "永久" && raw !== "-") {
-                                if (!isNaN(Number(raw))) {
-                                    newRounds = Number(raw);
-                                } else {
-                                    try {
-                                        const evaled = await Roll20Bridge.evalNativeFormula(raw, char);
-                                        newRounds = (!isNaN(Number(evaled)) && evaled !== null) ? Number(evaled) : raw;
-                                    } catch (err) {
-                                        newRounds = raw;
-                                    }
-                                }
-                            }
-                            await Pf1eBuffManager.setBuffRounds(char, b.rowId, newRounds);
+                            const newRounds = await Roll20Bridge.parseRoundsInput(raw, char, "");
+                            await BuffStore.setBuffRounds(storeTarget, b, newRounds);
                             await this.renderViewport();
                         }
                     });
@@ -1345,12 +1228,7 @@ export class BuffFloatingPanel {
                             className: "r20-input-round-inline",
                             onCommit: async (raw) => {
                                 const newInit = (raw !== "" && !isNaN(Number(raw))) ? Number(raw) : null;
-                                const list = TokenBuffManager.getTokenBuffs(token);
-                                const target = list.find(x => x.name === b.name);
-                                if (target) {
-                                    target.initRounds = newInit;
-                                    TokenBuffManager.saveTokenBuffs(token, list);
-                                }
+                                await BuffStore.setBuffInitRounds(storeTarget, b, newInit);
                                 await this.renderViewport();
                             }
                         });
@@ -1362,7 +1240,7 @@ export class BuffFloatingPanel {
                         placeholder: "-",
                         className: "r20-input-round-inline",
                         onCommit: async (raw) => {
-                            await Pf1eBuffManager.setBuffInitRounds(char, b.rowId, raw);
+                            await BuffStore.setBuffInitRounds(storeTarget, b, raw);
                             await this.renderViewport();
                         }
                     });
@@ -1371,28 +1249,9 @@ export class BuffFloatingPanel {
                 // 点击 🔗 图标解绑（直接断开，无需二次确认）
                 item.querySelector(".btn-unlink")?.addEventListener("click", async (e) => {
                     e.stopPropagation();
-                    if (char) {
-                        await Pf1eBuffManager.unlinkBuff(char, b.rowId);
-                        this.showNotice(`已断开 [${b.name}] 链接，转为独立副本`);
-                        await this.renderViewport();
-                    } else if (token && b.linkHostId) {
-                        // 纯 Token：清顶层链接字段，并向宿主除名
-                        const list = TokenBuffManager.getTokenBuffs(token);
-                        const target = list.find(x => x.rowId === b.rowId);
-                        if (target) {
-                            const srcRowId = target.linkSourceRowId;
-                            const hostId = target.linkHostId;
-                            target.linkHostId = null;
-                            target.linkSourceRowId = null;
-                            TokenBuffManager.saveTokenBuffs(token, list);
-                            const hostChar = window.Campaign?.characters?.get(hostId);
-                            if (hostChar && srcRowId) {
-                                await Pf1eBuffManager.removeDownstreamLink(hostChar, srcRowId, token.id, b.rowId);
-                            }
-                        }
-                        this.showNotice(`已断开 [${b.name}] 链接，转为独立副本`);
-                        await this.renderViewport();
-                    }
+                    await BuffStore.unlinkBuff(storeTarget, b);
+                    this.showNotice(`已断开 [${b.name}] 链接，转为独立副本`);
+                    await this.renderViewport();
                 });
 
                 // 编辑细目
@@ -1450,15 +1309,9 @@ export class BuffFloatingPanel {
                 // 双击条目快速切换激活/关停
                 item.addEventListener("dblclick", async (e) => {
                     if (e.target.closest("button, .btn-unlink, .r20-buff-toggle, input, select, textarea")) return;
-                    if (char) {
-                        await Pf1eBuffManager.toggleBuff(char, b.rowId, !isEnabled);
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await this.renderViewport();
-                    } else if (token) {
-                        TokenBuffManager.toggleBuff(token, b.name, !isEnabled);
-                        await Pf1eBuffUI.refreshAllBadges();
-                        await this.renderViewport();
-                    }
+                    await BuffStore.toggleBuff(storeTarget, b, !isEnabled);
+                    await Pf1eBuffUI.refreshAllBadges();
+                    await this.renderViewport();
                 });
 
                 // 右键上下文菜单
@@ -1617,49 +1470,23 @@ export class BuffFloatingPanel {
         // 激活选中Buff / Debuff
         menu.querySelector(".btn-ctx-activate-selected").addEventListener("click", async () => {
             cleanup();
-            if (char) {
-                for (const rId of selIds) {
-                    if (typeof rId === "string" && rId.startsWith("condition-")) {
-                        await Pf1eBuffManager.toggleCondition(char, rId, true);
-                    } else {
-                        await Pf1eBuffManager.toggleBuff(char, rId, true);
-                    }
-                }
-                this.showNotice(`已激活 ${selIds.length} 个选中项`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
-            } else if (token) {
-                for (const rId of selIds) {
-                    TokenBuffManager.toggleDebuff(token, rId, true);
-                }
-                this.showNotice(`已激活 ${selIds.length} 个选中项`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
+            for (const rId of selIds) {
+                await BuffStore.toggleById({ char, token }, rId, true);
             }
+            this.showNotice(`已激活 ${selIds.length} 个选中项`);
+            await Pf1eBuffUI.refreshAllBadges();
+            await this.renderViewport();
         });
 
         // 关停选中Buff / Debuff
         menu.querySelector(".btn-ctx-deactivate-selected").addEventListener("click", async () => {
             cleanup();
-            if (char) {
-                for (const rId of selIds) {
-                    if (typeof rId === "string" && rId.startsWith("condition-")) {
-                        await Pf1eBuffManager.toggleCondition(char, rId, false);
-                    } else {
-                        await Pf1eBuffManager.toggleBuff(char, rId, false);
-                    }
-                }
-                this.showNotice(`已关停 ${selIds.length} 个选中项`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
-            } else if (token) {
-                for (const rId of selIds) {
-                    TokenBuffManager.toggleDebuff(token, rId, false);
-                }
-                this.showNotice(`已关停 ${selIds.length} 个选中项`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
+            for (const rId of selIds) {
+                await BuffStore.toggleById({ char, token }, rId, false);
             }
+            this.showNotice(`已关停 ${selIds.length} 个选中项`);
+            await Pf1eBuffUI.refreshAllBadges();
+            await this.renderViewport();
         });
 
         // 关停所有选中单位同名Buff / Debuff (仅 GM 独占操作)
@@ -1671,37 +1498,10 @@ export class BuffFloatingPanel {
                 return;
             }
             let count = 0;
-            const targetBuffName = buff.name.trim().toLowerCase();
             for (const t of selected) {
-                let affected = false;
-                if (t.char) {
-                    if (isDebuff) {
-                        const def = Pf1eBuffUI.PF1E_DEBUFF_DEFINITIONS.find(d => d.name.trim().toLowerCase() === targetBuffName || d.key === buff.rowId);
-                        if (def) {
-                            await Pf1eBuffManager.toggleCondition(t.char, def.key, false);
-                            count++;
-                            affected = true;
-                        }
-                    } else {
-                        const allB = await Pf1eBuffManager.getAllBuffs(t.char);
-                        for (const cb of allB) {
-                            if (cb.name.trim().toLowerCase() === targetBuffName && cb.enabled) {
-                                await Pf1eBuffManager.toggleBuff(t.char, cb.rowId, false);
-                                count++;
-                                affected = true;
-                            }
-                        }
-                    }
-                    if (affected && typeof Pf1eBuffUI !== "undefined") {
-                        Pf1eBuffUI.requestTokenRefresh(t.char.id);
-                    }
-                } else if (t.token) {
-                    TokenBuffManager.removeBuff(t.token, buff.name);
-                    count++;
-                    if (typeof Pf1eBuffUI !== "undefined") {
-                        Pf1eBuffUI.requestTokenRefresh(t.token.id);
-                    }
-                }
+                const n = await BuffStore.deactivateHomonym(t, buff, isDebuff);
+                count += n;
+                if (n > 0) BuffStore.notifyRefresh(t);
             }
             this.showNotice(`已关停 ${count} 个选中单位的 [${buff.name}]`);
             await this.renderAllPanes();
@@ -1868,37 +1668,13 @@ export class BuffFloatingPanel {
         // 彻底删除 / 解除（支持多选批量删除）
         menu.querySelector(".btn-ctx-delete").addEventListener("click", async () => {
             cleanup();
-            if (char) {
-                for (const rId of delIds) {
-                    if (typeof rId === "string" && rId.startsWith("condition-")) {
-                        await Pf1eBuffManager.deleteDebuffPermanently(char, rId);
-                    } else {
-                        await Pf1eBuffManager.deleteBuffRowPermanently(char, rId);
-                    }
-                    this.selectedBuffRowIds.delete(rId);
-                }
-                this.showNotice(`已彻底解除/删除 ${delIds.length} 项`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
-            } else if (token) {
-                for (const rId of delIds) {
-                    // 若条目是链接副本，先向宿主除名（否则宿主子计数残留幽灵）
-                    const list = TokenBuffManager.getTokenBuffs(token);
-                    const victim = list.find(e => e.rowId === rId || e.name === rId);
-                    if (victim && victim.linkHostId) {
-                        const hostChar = window.Campaign?.characters?.get(victim.linkHostId);
-                        if (hostChar && victim.linkSourceRowId) {
-                            await Pf1eBuffManager.removeDownstreamLink(hostChar, victim.linkSourceRowId, token.id, victim.rowId);
-                        }
-                    }
-                    TokenBuffManager.removeTrackedDebuff(token, rId);
-                    TokenBuffManager.removeBuff(token, rId);
-                    this.selectedBuffRowIds.delete(rId);
-                }
-                this.showNotice(`已彻底解除/删除 ${delIds.length} 项`);
-                await Pf1eBuffUI.refreshAllBadges();
-                await this.renderViewport();
+            for (const rId of delIds) {
+                await BuffStore.deleteById({ char, token }, rId);
+                this.selectedBuffRowIds.delete(rId);
             }
+            this.showNotice(`已彻底解除/删除 ${delIds.length} 项`);
+            await Pf1eBuffUI.refreshAllBadges();
+            await this.renderViewport();
         });
 
         document.body.appendChild(menu);
@@ -2004,9 +1780,8 @@ export class BuffFloatingPanel {
     static async resolveBuffsForBatchApply(buff, char, token, selectedRowIds) {
         const sel = new Set(selectedRowIds || []);
         if (!sel.has(buff.rowId) || sel.size <= 1) return [buff];
-        const all = char
-            ? [...(await Pf1eBuffManager.getAllBuffs(char)), ...Pf1eBuffUI.getAllDebuffsSync(char)]
-            : [...TokenBuffManager.getTokenBuffs(token), ...TokenBuffManager.getTokenDebuffs(token)];
+        const storeTarget = { char, token };
+        const all = [...(await BuffStore.getBuffs(storeTarget)), ...(await BuffStore.getDebuffs(storeTarget))];
         const matched = all.filter(b => sel.has(b.rowId));
         return matched.length > 0 ? matched : [buff];
     }
@@ -2223,6 +1998,27 @@ export class BuffFloatingPanel {
         setTimeout(() => document.addEventListener("mousedown", closeHandler), 10);
 
         document.body.appendChild(menu);
+    }
+
+    /**
+     * Tab 拖拽结束的撕裂判距（统一手势收敛）：鼠标落点在 Buff 面板之外
+     * 且拖拽位移超过阈值 → 将该 Tab 撕离为独立二级窗口。
+     * @param {DragEvent} e dragend 事件
+     * @param {object|null} ctx 拖拽上下文（type === "tab" 才参与判定）
+     * @param {object} [opts]
+     * @param {Function} [opts.beforeSpawn] 撕离确认后、生成二级窗口前的回调（如先移除源 Tab）
+     * @returns {boolean} 是否触发了撕裂
+     */
+    static handleTabDragTearOff(e, ctx, opts = {}) {
+        if (!ctx || ctx.type !== "tab") return false;
+        if (ctx._hasSpawned) return false; // 单次防重锁拦截
+        const targetUnderMouse = document.elementFromPoint(e.clientX, e.clientY);
+        if (targetUnderMouse?.closest(".r20-buff-panel")) return false;
+        const dist = Math.hypot(e.clientX - ctx.startX, e.clientY - ctx.startY);
+        if (dist <= 25) return false;
+        if (typeof opts.beforeSpawn === "function") opts.beforeSpawn();
+        this.spawnDetachedWindow(e.clientX, e.clientY, ctx.id, ctx);
+        return true;
     }
 
     /**

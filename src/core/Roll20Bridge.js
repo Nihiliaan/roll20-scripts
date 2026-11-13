@@ -682,4 +682,23 @@ export class Roll20Bridge {
         }
         return this.upsertAttr(character, name, serialized);
     }
+
+    /**
+     * 解析就地轮数输入（就地编辑 onCommit 样板的单行收敛）：
+     * 数字直取；非常量字符串借用原生引擎求值（失败回退原文）；
+     * 空输入 / 常驻 / 永久 / - 一律按 emptyValue 返回（char 轮数惯用 ""，Token 惯用 null）
+     * @param {string} raw 用户输入原文
+     * @param {object|null} character 求值上下文角色（可空）
+     * @param {*} [emptyValue=""] 空语义值
+     */
+    static async parseRoundsInput(raw, character = null, emptyValue = "") {
+        if (raw === "" || raw === "常驻" || raw === "永久" || raw === "-") return emptyValue;
+        if (!isNaN(Number(raw))) return Number(raw);
+        try {
+            const evaled = await this.evalNativeFormula(raw, character);
+            return (evaled !== null && !isNaN(Number(evaled))) ? Number(evaled) : raw;
+        } catch (err) {
+            return raw;
+        }
+    }
 }

@@ -41,6 +41,7 @@ function loadModuleInContext(filePath, sandbox = {}) {
             try { if (typeof Roll20Bridge !== 'undefined') ctx.Roll20Bridge = Roll20Bridge; } catch(e){}
             try { if (typeof RecalcService !== 'undefined') ctx.RecalcService = RecalcService; } catch(e){}
             try { if (typeof BuffLifecycle !== 'undefined') ctx.BuffLifecycle = BuffLifecycle; } catch(e){}
+            try { if (typeof BuffStore !== 'undefined') ctx.BuffStore = BuffStore; } catch(e){}
             try { if (typeof Pf1eBuffManager !== 'undefined') ctx.Pf1eBuffManager = Pf1eBuffManager; } catch(e){}
             try { if (typeof TokenBuffManager !== 'undefined') ctx.TokenBuffManager = TokenBuffManager; } catch(e){}
             try { if (typeof TurnOrderObserver !== 'undefined') ctx.TurnOrderObserver = TurnOrderObserver; } catch(e){}
@@ -577,6 +578,62 @@ async function runAllTests() {
         assert.strictEqual(debuffs.find(d => d.name === '流血').rounds, 0);
         assert.strictEqual(debuffs.find(d => d.name === '眩晕').rounds, -1);
         assert.strictEqual(debuffs.find(d => d.name === '眩晕').enabled, true);
+    });
+
+    // 7.5 测试 BuffStore 统一存取层路由
+    const buffStoreCtx = loadModuleInContext('src/core/BuffStore.js', {
+        window: {},
+        console: console,
+        Roll20Bridge: bridgeContext.Roll20Bridge,
+        Pf1eBuffManager: managerContext.Pf1eBuffManager,
+        TokenBuffManager: tokenContext.TokenBuffManager
+    });
+    const { BuffStore } = buffStoreCtx;
+
+    await test('BuffStore 模式路由: resolveMode / bulk save 后端守卫 / Token 后端 toggleById 与 setBuffRounds', async () => {
+        // resolveMode 纯判定
+        assert.strictEqual(BuffStore.resolveMode({ char: {}, token: null }), 'char');
+        assert.strictEqual(BuffStore.resolveMode({ char: null, token: {} }), 'token');
+        assert.strictEqual(BuffStore.resolveMode(null), null);
+        assert.strictEqual(BuffStore.resolveMode({ char: null, token: null }), null);
+
+        // 整表写仅 Token 后端可用，char 目标必须显式抛错防误用
+        assert.throws(() => BuffStore.saveBuffs({ char: {} }, []), /仅支持 Token 后端/);
+        assert.throws(() => BuffStore.saveDebuffs({ char: {} }, []), /仅支持 Token 后端/);
+
+        // Token 后端 toggleById：按 rowId 命中 Buff 条目并落盘
+        const token = createMockToken(JSON.stringify({
+            buffs: [{ rowId: 'r1', name: '祝福', enabled: true }],
+            debuffs: []
+        }));
+        const target = { char: null, token };
+
+        assert.strictEqual(await BuffStore.toggleById(target, 'r1', false), true);
+        assert.strictEqual(JSON.parse(token.state.field).buffs[0].enabled, false);
+
+        // toggleById 未命中 Buff 时兜底进 Debuff 通道
+        const token2 = createMockToken(JSON.stringify({
+            buffs: [],
+            debuffs: [{ key: 'condition-Bleed', rowId: 'condition-Bleed', name: '流血', enabled: false }]
+        }));
+        assert.strictEqual(await BuffStore.toggleById({ char: null, token: token2 }, 'condition-Bleed', true), true);
+        assert.strictEqual(JSON.parse(token2.state.field).debuffs[0].enabled, true);
+
+        // setBuffRounds Token 路径：按 rowId/name 定位并整表落盘
+        const token3 = createMockToken(JSON.stringify({
+            buffs: [{ rowId: 'r2', name: '加速', rounds: 3 }],
+            debuffs: []
+        }));
+        assert.strictEqual(await BuffStore.setBuffRounds({ char: null, token: token3 }, { rowId: 'r2', name: '加速' }, 1), true);
+        assert.strictEqual(JSON.parse(token3.state.field).buffs[0].rounds, 1);
+
+        // toggleBuff 条目对象语义：char 按 rowId 通道不在此测（无卡环境），token 按 name 兜底
+        const token4 = createMockToken(JSON.stringify({
+            buffs: [{ rowId: 'r3', name: '盾牌', enabled: false }],
+            debuffs: []
+        }));
+        assert.strictEqual(await BuffStore.toggleBuff({ char: null, token: token4 }, { rowId: 'r3', name: '盾牌' }, true), true);
+        assert.strictEqual(JSON.parse(token4.state.field).buffs[0].enabled, true);
     });
 
     await test('TokenBuffManager 未激活 Buff 不参与扣减/回退（与人物卡语义一致）', () => {
