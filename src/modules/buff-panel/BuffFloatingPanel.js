@@ -1439,32 +1439,32 @@ export class BuffFloatingPanel {
 
         menu.innerHTML = `
             <div class="r20-context-menu-item btn-ctx-activate-selected" style="color:#60a5fa;">
-                <span>⚡</span><span>激活选中${isDebuff ? "状态" : "Buff"}${countLabel}</span>
+                <span>⚡</span><span>激活选中</span>
             </div>
             <div class="r20-context-menu-item btn-ctx-deactivate-selected" style="color:#94a3b8;">
-                <span>⛔</span><span>关停选中${isDebuff ? "状态" : "Buff"}${countLabel}</span>
+                <span>⛔</span><span>关停选中</span>
             </div>
             ${isGM ? `
             <div class="r20-context-menu-item btn-ctx-deactivate-all-homonym" style="color:#f87171;">
-                <span>🛑</span><span>关停所有选中单位同名${isDebuff ? "状态" : "Buff"} [${Roll20Bridge.escapeHtml(buff.name)}]</span>
+                <span>🛑</span><span>关停选中单位同名Buff</span>
             </div>` : ""}
             <div class="r20-context-menu-divider"></div>
             ${!isLinkedChild ? `
-            <div class="r20-context-menu-item btn-ctx-link-selected"><span>🔗</span><span>施加给所有选中单位 (创建链接)</span></div>` : ""}
-            <div class="r20-context-menu-item btn-ctx-apply-selected"><span>✨</span><span>施加给所有选中单位 (普通副本)</span></div>
+            <div class="r20-context-menu-item btn-ctx-link-selected"><span>🔗</span><span>链接给选中单位</span></div>` : ""}
+            <div class="r20-context-menu-item btn-ctx-apply-selected"><span>📋</span><span>复制给选中单位</span></div>
             <div class="r20-context-menu-divider"></div>
             ${!isDebuff ? `
-            <div class="r20-context-menu-item btn-ctx-edit"><span>✏️</span><span>编辑细目</span></div>
-            <div class="r20-context-menu-item btn-ctx-clone"><span>📋</span><span>复制为独立副本</span></div>` : ""}
+            <div class="r20-context-menu-item btn-ctx-edit"><span>✏️</span><span>编辑</span></div>
+            <div class="r20-context-menu-item btn-ctx-clone"><span>📋</span><span>创建副本</span></div>` : ""}
             ${isLinkedChild ? `
-            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-host" style="color:#64b5f6;"><span>🔄</span><span>从宿主同步最新细目</span></div>` : ""}
-            <div class="r20-context-menu-item btn-ctx-unlink" style="color:#f59e0b;"><span>🔗</span><span>断开链接转为独立副本</span></div>` : ""}
+            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-host" style="color:#64b5f6;"><span>🔄</span><span>从原Buff同步</span></div>` : ""}
+            <div class="r20-context-menu-item btn-ctx-unlink" style="color:#f59e0b;"><span>🔗</span><span>断开链接</span></div>` : ""}
             ${!isLinkedChild && hasDownstream ? `
-            <div class="r20-context-menu-item btn-ctx-deactivate-downstream" style="color:#fb7185;"><span>🛑</span><span>关停当前及所有下游${isDebuff ? "状态" : "Buff"} (${buff.linkChildren.length})</span></div>
-            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>同步更新所有下游链接副本 (${buff.linkChildren.length})</span></div>` : ""}
-            <div class="r20-context-menu-item btn-ctx-delete-downstream" style="color:#ef5350;"><span>🧹</span><span>删除所有下游链接副本 (宿主保留) (${buff.linkChildren.length})</span></div>` : ""}
+            <div class="r20-context-menu-item btn-ctx-deactivate-downstream" style="color:#fb7185;"><span>🛑</span><span>关停当前及所有下属Buff (${buff.linkChildren.length})</span></div>
+            ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>更新所有下属Buff (${buff.linkChildren.length})</span></div>` : ""}
+            <div class="r20-context-menu-item btn-ctx-delete-downstream" style="color:#ef5350;"><span>🧹</span><span>删除所有下属Buff (${buff.linkChildren.length})</span></div>` : ""}
             <div class="r20-context-menu-divider"></div>
-            <div class="r20-context-menu-item btn-ctx-delete" style="color:#ef5350;"><span>🗑️</span><span>彻底解除/删除${delCountLabel}</span></div>
+            <div class="r20-context-menu-item btn-ctx-delete" style="color:#ef5350;"><span>🗑️</span><span>删除${delCountLabel}</span></div>
         `;
 
         // 激活选中Buff / Debuff
