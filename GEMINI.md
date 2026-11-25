@@ -78,6 +78,16 @@ Roll20 官方人物卡系统在底层维护着所有角色卡共享的单例模�
    - **非独占多棋子 (`tokenCount > 1`)**：判定为共用模板的杂兵集群，Buff 自动隔离存储于各棋子自身（`TokenBuffManager` / 自定义字段 `r20_suite_buffs`），杜绝状态互相污染与多重先攻扣轮雪崩；
 3. **纯图元兜底**：无对应人物卡的棋子始终由棋子自身持久化。
 
+## 十二、回合目标互斥构建规范 (Strict Target-Mode Mutex)
+`Roll20Bridge.resolveBuffTargetMode` 的返回值（杂兵集群模式下 `char` 与 `token` 字段同时非空）**严禁原样**传入 `BuffStore`：`BuffStore.resolveMode` 以 char 字段优先短路，双字段同传会把杂兵误路由到人物卡后端（杂兵的 Token Buff 将永远不被回合扣减）。所有调用方必须按 `resolved.mode` 严格构建 `{ char }` 或 `{ token }` 单字段互斥目标。
+
+## 十三、玩家端自理扣减原则 (Player Proxy Tick)
+GM 端未运行插件而玩家端运行时，玩家端须自理先攻轮的 Buff 扣减/回退，统一遵循以下准则：
+1. **插件公告依附原生 presence（GM 旗 + 玩家旗同域分角色）**：所有端上线时在自己的 Firebase presence 节点（`{campaign}/players/{playerId}`，路径取自 `fbauthinfo.auth.currentcampaign`）写入 `r20suite = {role: "gm"|"player", pid, at}` 并注册 `onDisconnect().remove()`——上线写入、掉线自动销毁、`.info/connected` 重连自动重写，严禁自建心跳/TTL/在线监控。`role="gm"` = GM 插件在场，玩家端整体让位 GM 主路径；`role="player"` = 玩家插件在跑（共卡选举候选资格旗，旗即在线+运行双信号，该节点规则允许玩家写自己的节点，真机已验证）；
+2. **写权限即自理边界，共卡仲裁靠旗选举**：仅当回合单位在我写权内才扣自身 Buff；多玩家共有同一棋子权限时，候选 = 有权控制（controlledby 显式列表 / "all" 全员名册）∧ 持玩家旗，显式列表按列表序、"all" 按玩家 ID 字典序取首个当选者——所有客户端对同一数据解析结果一致，仅当选者扣减，当选者掉线自动失格由次候选接管。跨权链接副本在玩家自治部署中不可能存在——副本落盘写在目标单位数据上，宿主写规则天然阻断玩家跨权创建，施加入口（`applyBuffToTarget`）的目标写权准入另从源头杜绝「宿主索引已登记、副本服务端不存在」的幽灵索引；隐藏 NPC 数据玩家不可写，永远不在自理范围内；
+3. **即时执行对齐 GM 语义**：自理与 GM 主路径同构——回合转变到达即执行，无延迟决策、无挂起队列、无判重账本（双扣由 GM 公告的存在性单点阻断）；
+4. **驱动扣减单一业务入口**：下游子副本扣减/回退一律走 `drivenDecrement/drivenIncrement`，decrementBuffs/incrementBuffsOnTurnRevert 的下游循环共用；玩家向无权副本发起的写入由宿主 Firebase 规则拒绝且不落库，严禁在存储层重复实现权限判定。
+
 
 
 

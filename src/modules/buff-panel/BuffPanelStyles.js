@@ -95,6 +95,11 @@ export class BuffPanelStyles {
                 border-color: #b5b5b5 !important;
                 color: #111111 !important;
             }
+            .r20-btn-icon:disabled, .r20-btn:disabled {
+                opacity: 0.45 !important;
+                cursor: not-allowed !important;
+                background: #ffffff !important;
+            }
             .r20-btn-icon.pinned {
                 color: #b45309 !important;
                 background: #fef3c7 !important;

@@ -836,6 +836,119 @@ export class Pf1eBuffManager {
     }
 
     /**
+     * 激活指定宿主 Buff/Debuff 的全部下游受术者副本（宿主自身不动，宿主用通用 ⚡ 激活操作）。
+     * 与面板手动 ⚡ 激活完全同语义：char 子副本 toggleBuff/toggleCondition(true)（正面 Buff
+     * 自动重置为初始满轮数），纯 Token 子副本按 rowId 置 enabled=true。
+     * 循环结构镜像 deactivateBuffAndDownstream 的 char/Token 双后端遍历。
+     * @param {object} hostChar 宿主角色卡
+     * @param {string} hostRowId 宿主 Buff 行唯一标识或 Condition Key (如 condition-Blind)
+     * @returns {Promise<number>} 实际激活的子副本数量
+     */
+    static async activateDownstreamChildren(hostChar, hostRowId) {
+        if (!hostChar || !hostRowId) return 0;
+        await Roll20Bridge.ensureCharacterAttributes(hostChar);
+
+        const isDebuff = hostRowId.startsWith("condition-");
+        const attrName = isDebuff ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
+        const children = Roll20Bridge.readJsonAttr(hostChar, attrName);
+
+        let count = 0;
+        if (Array.isArray(children)) {
+            for (const item of children) {
+                const targetChar = window.Campaign?.characters?.get(item.charId);
+                if (targetChar) {
+                    if (isDebuff || (typeof item.rowId === "string" && item.rowId.startsWith("condition-"))) {
+                        await this.toggleCondition(targetChar, item.rowId, true);
+                    } else {
+                        await this.toggleBuff(targetChar, item.rowId, true);
+                    }
+                    this.notifyTokenRefresh(targetChar);
+                    count++;
+                    continue;
+                }
+
+                // 下游为纯 Token：按 rowId 定位自定义字段条目置激活
+                const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+                if (!targetToken) continue;
+                if (this._activateTokenChildEntry(targetToken, item.rowId)) count++;
+            }
+        }
+        console.log(`[Pf1eBuffManager] 已激活 [${hostChar.get("name")}] 主 ${isDebuff ? "Debuff" : "Buff"} (${hostRowId}) 的 ${count} 个下游受术者副本`);
+        return count;
+    }
+
+    /**
+     * 激活纯 Token 自定义字段中的指定子副本条目（Buff 与 Debuff 两个列表都查，按 rowId/key 匹配）
+     * @returns {boolean} 是否命中并激活
+     */
+    static _activateTokenChildEntry(token, rowId) {
+        if (!token || !rowId) return false;
+        const buffs = TokenBuffManager.getTokenBuffs(token);
+        const buffEntry = buffs.find(e => e.rowId === rowId);
+        if (buffEntry) {
+            buffEntry.enabled = true;
+            TokenBuffManager.saveTokenBuffs(token, buffs);
+            this.notifyTokenRefresh(token);
+            return true;
+        }
+        const debuffs = TokenBuffManager.getTokenDebuffs(token);
+        const debuffEntry = debuffs.find(e => (e.rowId || e.key) === rowId);
+        if (debuffEntry) {
+            debuffEntry.enabled = true;
+            TokenBuffManager.saveTokenDebuffs(token, debuffs);
+            this.notifyTokenRefresh(token);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 宿主驱动的单个下游子副本扣减（decrementBuffs 步骤 2/2.2 与玩家端自理路径的同一业务入口）：
+     * 生命周期判定 → 落盘/过期副作用 → 刷新。写权限由调用方路由与宿主 Firebase 规则共同保障：
+     * 玩家向无权副本发起的写入会被服务端拒绝且不落库，副本属主的自理驱动才是权威值。
+     * @param {{charId: string, rowId: string}} childRef 下游子副本引用（charId 可为人物卡或纯 Token id）
+     * @param {object} opts { isDebuff, conditionKey, buffName, hostCharacter, hostRowId }
+     * @returns {Promise<object|null>} 与 BuffLifecycle.decrementEntry 同形的结果；不参与时 null
+     */
+    static async drivenDecrement(childRef, { isDebuff = false, conditionKey = null, buffName = "", hostCharacter = null, hostRowId = null } = {}) {
+        if (!childRef || !childRef.charId) return null;
+
+        const child = await this._downstreamChildView(childRef, { isDebuff, conditionKey, buffName, hostCharacter, hostRowId });
+        if (!child) return null;
+
+        const result = BuffLifecycle.decrementEntry(child.view, isDebuff ? { isDebuff: true } : undefined);
+        if (!result) return null;
+
+        if (result.status === "expired") {
+            await child.onExpire();
+        } else {
+            await child.persist();
+        }
+        child.notify();
+
+        return { name: child.view.name, status: result.status, remaining: result.status === "expired" ? 0 : result.remaining };
+    }
+
+    /**
+     * 宿主驱动的单个下游子副本回退加回（incrementBuffsOnTurnRevert 步骤 2 与玩家端自理路径的同一业务入口）：
+     * 生命周期判定 → 落盘 → 刷新。写权限边界同 drivenDecrement。
+     */
+    static async drivenIncrement(childRef, { isDebuff = false, conditionKey = null, buffName = "", hostCharacter = null, hostRowId = null } = {}) {
+        if (!childRef || !childRef.charId) return null;
+
+        const child = await this._downstreamChildView(childRef, { isDebuff, conditionKey, buffName, hostCharacter, hostRowId });
+        if (!child) return null;
+
+        const result = BuffLifecycle.incrementEntry(child.view, isDebuff ? { isDebuff: true } : undefined);
+        if (!result) return null;
+
+        await child.persist();
+        child.notify();
+
+        return { name: child.view.name, status: "incremented", remaining: result.remaining };
+    }
+
+    /**
      * 删除主 Buff / Debuff 的全部下游链接子副本，但保留宿主自身行（与彻底删除的区别：老大不随之销毁）
      * 遵循与 deleteBuffRowPermanently 相同的自下而上注销规范：
      * 人物卡子副本走其自身的级联自毁（deleteBuffRowPermanently / deleteDebuffPermanently，可顺带清理孙辈）；
@@ -1744,25 +1857,14 @@ export class Pf1eBuffManager {
 
             // 2. 施法者主 Buff 驱动下游受术者扣轮
             // 无论主 Buff 自身是否开启，名下所有已建立链接的受术者副本统一扣减 1 轮
+            // （驱动扣减统一走 drivenDecrement 单一业务入口）
             for (const buff of allBuffs) {
                 if (buff.linkHostId && buff.linkSourceRowId) continue;
                 if (!buff.linkChildren || buff.linkChildren.length === 0) continue;
 
                 for (const childRef of buff.linkChildren) {
-                    const child = await this._downstreamChildView(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
-                    if (!child) continue;
-
-                    const result = BuffLifecycle.decrementEntry(child.view);
-                    if (!result) continue;
-
-                    if (result.status === "expired") {
-                        await child.onExpire();
-                        processed.push({ name: child.view.name, status: "expired", remaining: 0 });
-                    } else {
-                        await child.persist();
-                        processed.push(result);
-                    }
-                    child.notify();
+                    const result = await this.drivenDecrement(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
+                    if (result) processed.push(result);
                 }
             }
 
@@ -1773,20 +1875,8 @@ export class Pf1eBuffManager {
                 if (!Array.isArray(children) || children.length === 0) continue;
 
                 for (const childRef of children) {
-                    const child = await this._downstreamChildView(childRef, { isDebuff: true, conditionKey: def.key, buffName: def.name });
-                    if (!child) continue;
-
-                    const result = BuffLifecycle.decrementEntry(child.view, { isDebuff: true });
-                    if (!result) continue;
-
-                    if (result.status === "expired") {
-                        await child.onExpire();
-                        processed.push({ name: child.view.name, status: "expired", remaining: 0 });
-                    } else {
-                        await child.persist();
-                        processed.push(result);
-                    }
-                    child.notify();
+                    const result = await this.drivenDecrement(childRef, { isDebuff: true, conditionKey: def.key, buffName: def.name });
+                    if (result) processed.push(result);
                 }
             }
 
@@ -1881,20 +1971,14 @@ export class Pf1eBuffManager {
             }
 
             // 2. 施法者主 Buff 驱动下游受术者加回 1 轮
+            // （驱动回退统一走 drivenIncrement 单一业务入口）
             for (const buff of allBuffs) {
                 if (buff.linkHostId && buff.linkSourceRowId) continue;
                 if (!buff.linkChildren || buff.linkChildren.length === 0) continue;
 
                 for (const childRef of buff.linkChildren) {
-                    const child = await this._downstreamChildView(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
-                    if (!child) continue;
-
-                    const result = BuffLifecycle.incrementEntry(child.view);
-                    if (!result) continue;
-
-                    await child.persist();
-                    child.notify();
-                    processed.push({ name: child.view.name, status: "incremented", remaining: result.remaining });
+                    const result = await this.drivenIncrement(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
+                    if (result) processed.push(result);
                 }
             }
 

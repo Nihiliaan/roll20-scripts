@@ -718,14 +718,21 @@ export class BuffFloatingPanel {
         });
 
         // ➕ 钉选角色搜索按钮（常驻栏末尾；renderTabs 每次清空容器后需重建）
+        // 权限守卫：角色搜索菜单会列举全量角色卡（含玩家无权查看的 NPC 名单），非 GM 禁用功能；
+        // 按钮保留渲染（disabled 占位）以维持常驻区与拖拽钉选 drop zone 的空间不变
         const addPinnedBtn = document.createElement("button");
         addPinnedBtn.className = "r20-btn-icon btn-add-pinned-char";
-        addPinnedBtn.title = "钉选指定角色到常驻标签栏";
         addPinnedBtn.textContent = "➕";
-        addPinnedBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            this.showAddPinnedCharMenu(addPinnedBtn);
-        });
+        if (Roll20Bridge.isGM()) {
+            addPinnedBtn.title = "钉选指定角色到常驻标签栏";
+            addPinnedBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                this.showAddPinnedCharMenu(addPinnedBtn);
+            });
+        } else {
+            addPinnedBtn.disabled = true;
+            addPinnedBtn.title = "钉选角色为 GM 专属功能（可将标签拖入常驻区钉选）";
+        }
         pinnedContainer.appendChild(addPinnedBtn);
 
         // 3. 自动调和与回退当前激活的 Tab 目标
@@ -857,10 +864,13 @@ export class BuffFloatingPanel {
         const currentEpoch = ++this._renderEpoch;
 
         if (!this.activeTarget) {
+            const emptyHint = Roll20Bridge.isGM()
+                ? "在地图点击棋子展示 Buff，或点击右上角 ➕ 钉选常驻角色"
+                : "在地图点击棋子展示 Buff，或拖拽标签至常驻区钉选";
             viewport.innerHTML = `
                 <div class="r20-empty-view">
                     🕹️ 画布未选中任何单位<br>
-                    在地图点击棋子展示 Buff，或点击右上角 ➕ 钉选常驻角色
+                    ${emptyHint}
                 </div>
             `;
             return;
@@ -1460,6 +1470,7 @@ export class BuffFloatingPanel {
             ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-host" style="color:#64b5f6;"><span>🔄</span><span>从原Buff同步</span></div>` : ""}
             <div class="r20-context-menu-item btn-ctx-unlink" style="color:#f59e0b;"><span>🔗</span><span>断开链接</span></div>` : ""}
             ${!isLinkedChild && hasDownstream ? `
+            <div class="r20-context-menu-item btn-ctx-activate-downstream" style="color:#4ade80;"><span>⚡</span><span>激活所有下属Buff (${buff.linkChildren.length})</span></div>
             <div class="r20-context-menu-item btn-ctx-deactivate-downstream" style="color:#fb7185;"><span>🛑</span><span>关停当前及所有下属Buff (${buff.linkChildren.length})</span></div>
             ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>更新所有下属Buff (${buff.linkChildren.length})</span></div>` : ""}
             <div class="r20-context-menu-item btn-ctx-delete-downstream" style="color:#ef5350;"><span>🧹</span><span>删除所有下属Buff (${buff.linkChildren.length})</span></div>` : ""}
@@ -1537,8 +1548,7 @@ export class BuffFloatingPanel {
                     }
                 } else {
                     for (const b of buffsToApply) {
-                        await this.applyBuffToTarget(b, target, char.id);
-                        count++;
+                        if (await this.applyBuffToTarget(b, target, char.id)) count++;
                     }
                 }
             }
@@ -1579,8 +1589,7 @@ export class BuffFloatingPanel {
                     }
                 } else {
                     for (const b of buffsToApply) {
-                        await this.applyBuffToTarget(b, target, null);
-                        count++;
+                        if (await this.applyBuffToTarget(b, target, null)) count++;
                     }
                 }
             }
@@ -1638,6 +1647,16 @@ export class BuffFloatingPanel {
             }
         });
 
+        // 激活所有下属（下游受术者）链接副本（宿主自身不动；子副本与手动 ⚡ 激活同语义）
+        menu.querySelector(".btn-ctx-activate-downstream")?.addEventListener("click", async () => {
+            cleanup();
+            if (!char) return;
+            const n = await Pf1eBuffManager.activateDownstreamChildren(char, buff.rowId);
+            this.showNotice(`已激活 [${buff.name}] 的 ${n} 个下属链接副本`);
+            await Pf1eBuffUI.refreshAllBadges();
+            await this.renderAllPanes();
+        });
+
         // 关停当前及所有下游Buff / Debuff
         menu.querySelector(".btn-ctx-deactivate-downstream")?.addEventListener("click", async () => {
             cleanup();
@@ -1683,11 +1702,26 @@ export class BuffFloatingPanel {
     /**
      * 将 Buff / Debuff 施加至目标（支持传入 sourceHostId 自动打上影子链接）
      * 根本约束：施法者严禁向自身创建链接/副本
+     * @returns {Promise<boolean>} 是否实际施加成功（无目标写权/参数非法时拒绝并返回 false）
      */
     static async applyBuffToTarget(buff, target, sourceHostId = null) {
-        if (!buff || !target || (sourceHostId && target.id === sourceHostId)) return;
+        if (!buff || !target || (sourceHostId && target.id === sourceHostId)) return false;
         const targetChar = target.type === "char" ? window.Campaign?.characters?.get(target.id) : null;
         const targetToken = target.type === "token" ? Roll20Bridge.getTokenGraphic(target.id) : null;
+
+        // 目标写权准入：副本与链接登记均落盘在目标单位的数据上（目标卡属性 / 目标棋子
+        // 自定义字段），且宿主索引写在施法者自己卡上必然成功——无写权者施加会产生
+        // "索引已登记、副本服务端不存在"的幽灵索引（拓扑自愈仅在 GM 端运行）。
+        // 故无目标控制权者一律在入口拒绝，GM 全域放行。
+        if (!Roll20Bridge.isGM()) {
+            const controllable = target.type === "char"
+                ? Roll20Bridge.canControlCharacter(target.id)
+                : Roll20Bridge.canControlToken(target.id);
+            if (!controllable) {
+                this.showNotice(`无权向 [${target.name || "未命名单位"}] 施加：目标单位不受你控制`);
+                return false;
+            }
+        }
 
         const isDebuff = !!buff.isDebuff || (typeof buff.rowId === "string" && buff.rowId.startsWith("condition-"));
 
@@ -1718,7 +1752,7 @@ export class BuffFloatingPanel {
                 if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
                 await this.renderViewport();
             }
-            return;
+            return true;
         }
 
         let extraAttrs = { ...(buff.extraAttrs || {}) };
@@ -1749,6 +1783,7 @@ export class BuffFloatingPanel {
             this.showNotice(`已为 [${target.name}] 施加 ${sourceHostId ? "链接" : ""} Buff [${buff.name}]`);
             if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
             await this.renderViewport();
+            return true;
         } else if (targetToken) {
             // 纯 Token：链接 Buff 记录影子链接元数据并向宿主登记下游；普通副本彻底独立
             const entry = TokenBuffManager.applyOrRefreshBuff(targetToken, buff.name, buff.rounds, null, buff.initRounds);
@@ -1771,7 +1806,9 @@ export class BuffFloatingPanel {
             this.showNotice(`已为 [${target.name}] 施加 ${sourceHostId ? "链接" : ""} Buff [${buff.name}]`);
             if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
             await this.renderViewport();
+            return true;
         }
+        return false;
     }
 
     /**
@@ -1915,6 +1952,8 @@ export class BuffFloatingPanel {
      * 恢复自 v0.9.26：下方空间不足时自动向上翻转展开
      */
     static showAddPinnedCharMenu(anchorBtn) {
+        // 权限守卫（纵深防御）：搜索菜单会列举全量角色卡（含玩家无权查看的 NPC），仅 GM 可用
+        if (!Roll20Bridge.isGM()) return;
         document.querySelector(".r20-pinned-char-picker")?.remove();
 
         const characters = window.Campaign?.characters?.models || [];

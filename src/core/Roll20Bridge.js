@@ -273,6 +273,156 @@ export class Roll20Bridge {
     }
 
     /**
+     * 解析单位（人物卡或棋子）的控制器 ID 列表：人物卡取 controlledby；
+     * 棋子优先取其代表人物卡的 controlledby（与 canControlToken 判定次序一致），
+     * 纯棋子取自身 controlledby。
+     * @param {object|string} modelOrId 人物卡模型 / 棋子模型 / 任一 ID
+     * @returns {string[]} ["all"] 或玩家 ID 列表（空数组 = 无主单位）
+     */
+    static getControllerIds(modelOrId) {
+        let model = null;
+        if (typeof modelOrId === "string") {
+            const campaign = this.getCampaign();
+            model = (campaign && campaign.characters) ? campaign.characters.get(modelOrId) : null;
+            if (!model) model = this.getTokenGraphic(modelOrId);
+        } else {
+            model = modelOrId;
+        }
+        if (!model) return [];
+        // 棋子优先其代表人物卡的控制权
+        if (typeof model.get === "function" && model.get("represents")) {
+            const campaign = this.getCampaign();
+            const char = (campaign && campaign.characters) ? campaign.characters.get(model.get("represents")) : null;
+            if (char) model = char;
+        }
+        const raw = model.get ? model.get("controlledby") : model.controlledby;
+        if (!raw || typeof raw !== "string") return [];
+        return raw.split(",").map(s => s.trim()).filter(Boolean);
+    }
+
+    // ==========================================
+    // 插件 presence 公告（GM 让位判据 + 玩家共卡选举的候选资格旗）
+    // 载体 = Firebase presence 节点 players/{playerId} 上的 r20suite 字段：
+    // 该节点是 Roll20 原生的账户级在线状态域（online/lastActive 及各客户端偏好字段
+    // 均由客户端自写，安全规则允许玩家写自己的节点）。公告跟随玩家账号——上线写入、
+    // 掉线由 Firebase 原生 onDisconnect 钩子自动销毁、重连后自动重写，零自建监控。
+    // 字段角色：role = "gm"（GM 插件在场，玩家端整体让位）| "player"（玩家插件在跑，
+    // 作为共卡选举的候选资格旗，旗即在线+运行双信号）。
+    // ==========================================
+
+    /** presence 公告字段名（写在各自账号的 presence 节点上） */
+    static SUITE_PRESENCE_FIELD = "r20suite";
+
+    /**
+     * 解析当前战役与本人玩家节点定位（源自登录时 Firebase auth 声明）
+     * @param {"self"|"players"} which self = 本人 presence 节点；players = 全员 presence 集合
+     */
+    static _presenceRef(which) {
+        const auth = window.Campaign && window.Campaign.fbauthinfo && window.Campaign.fbauthinfo.auth;
+        const campaignNode = auth && auth.currentcampaign;
+        if (!campaignNode || typeof firebase === "undefined" || !firebase.database) return null;
+        if (which === "self") {
+            const myPid = this.getCurrentPlayerId();
+            if (!myPid) return null;
+            return firebase.database().ref(`${campaignNode}/players/${myPid}`);
+        }
+        return firebase.database().ref(`${campaignNode}/players`);
+    }
+
+    /**
+     * 插件公告广播（GM / 玩家通用，依附 Firebase 原生生命周期）：
+     * 立即写入本端公告 + 注册 onDisconnect 自动销毁 + 监听 .info/connected 在重连时自动重写。
+     */
+    static async startSuitePresenceBroadcast() {
+        const role = this.isGM() ? "gm" : "player";
+        // fbauthinfo 由登录流程异步写入：启动早于其就绪时短暂轮询，防止公告静默挂载失败
+        let ref = null;
+        for (let attempt = 0; attempt < 30 && !ref; attempt++) {
+            ref = this._presenceRef("self");
+            if (!ref) await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        if (!ref) {
+            console.error("[Roll20Suite] presence 节点定位失败（fbauthinfo 未就绪），插件公告未挂载");
+            return false;
+        }
+
+        const writeAnnouncement = async () => {
+            const fieldRef = ref.child(this.SUITE_PRESENCE_FIELD);
+            await fieldRef.set({
+                role,
+                pid: this.getCurrentPlayerId() || "",
+                at: Date.now(),
+                version: 1
+            });
+            await fieldRef.onDisconnect().remove();
+        };
+
+        try {
+            await writeAnnouncement();
+        } catch (e) {
+            console.error("[Roll20Suite] 插件公告写入失败:", e);
+            return false;
+        }
+
+        // 原生连接生命周期挂钩：断线重连后自动重写公告（闪断自愈，无需自建心跳）
+        if (this._suitePresenceConnectedHandler) {
+            firebase.database().ref(".info/connected").off("value", this._suitePresenceConnectedHandler);
+        }
+        this._suitePresenceConnectedHandler = async (snap) => {
+            if (snap.val() === true) {
+                writeAnnouncement().catch(e => console.error("[Roll20Suite] 插件公告重连重写失败:", e));
+            }
+        };
+        firebase.database().ref(".info/connected").on("value", this._suitePresenceConnectedHandler);
+        return true;
+    }
+
+    /**
+     * 停止公告（teardown / 热重载清理）：取消 onDisconnect 挂载并立即移除公告
+     */
+    static async stopSuitePresenceBroadcast() {
+        if (this._suitePresenceConnectedHandler) {
+            try { firebase.database().ref(".info/connected").off("value", this._suitePresenceConnectedHandler); } catch (e) {}
+            this._suitePresenceConnectedHandler = null;
+        }
+        const ref = this._presenceRef("self");
+        if (!ref) return;
+        try {
+            await ref.child(this.SUITE_PRESENCE_FIELD).onDisconnect().cancel();
+        } catch (e) {}
+        try {
+            await ref.child(this.SUITE_PRESENCE_FIELD).remove();
+        } catch (e) {}
+    }
+
+    /**
+     * 一次定点读全员 presence（每个回合转变仅此一次读取）：
+     * @returns {Promise<{gmPresent: boolean, playerPids: string[], allPlayerIds: string[]}>}
+     *   gmPresent  — 任一节点 role="gm"：GM 插件在场，玩家端整体让位；
+     *   playerPids — role="player" 的玩家集合（共卡选举的候选资格）；
+     *   allPlayerIds — 战役全员玩家 ID（controlledby="all" 时的选举名册）。
+     */
+    static async readSuitePresence() {
+        const ref = this._presenceRef("players");
+        if (!ref) return { gmPresent: false, playerPids: [], allPlayerIds: [] };
+        try {
+            const snap = await ref.once("value");
+            const players = snap.val();
+            const out = { gmPresent: false, playerPids: [], allPlayerIds: [] };
+            if (!players || typeof players !== "object") return out;
+            for (const [pid, node] of Object.entries(players)) {
+                if (!node || typeof node !== "object" || !node.r20suite) continue;
+                if (node.r20suite.role === "gm") out.gmPresent = true;
+                else if (node.r20suite.role === "player") out.playerPids.push(pid);
+            }
+            out.allPlayerIds = Object.keys(players);
+            return out;
+        } catch (e) {
+            return { gmPresent: false, playerPids: [], allPlayerIds: [] };
+        }
+    }
+
+    /**
      * 判断特定对象（角色卡/Token）是否被标记为队伍成员（隊員，即 inParty === true）
      * 对应角色卡设置中的 .character-party-toggle 复选框
      * @param {string|object} target

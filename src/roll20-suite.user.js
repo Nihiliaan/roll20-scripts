@@ -358,6 +358,156 @@ class Roll20Bridge {
     }
 
     /**
+     * 解析单位（人物卡或棋子）的控制器 ID 列表：人物卡取 controlledby；
+     * 棋子优先取其代表人物卡的 controlledby（与 canControlToken 判定次序一致），
+     * 纯棋子取自身 controlledby。
+     * @param {object|string} modelOrId 人物卡模型 / 棋子模型 / 任一 ID
+     * @returns {string[]} ["all"] 或玩家 ID 列表（空数组 = 无主单位）
+     */
+    static getControllerIds(modelOrId) {
+        let model = null;
+        if (typeof modelOrId === "string") {
+            const campaign = this.getCampaign();
+            model = (campaign && campaign.characters) ? campaign.characters.get(modelOrId) : null;
+            if (!model) model = this.getTokenGraphic(modelOrId);
+        } else {
+            model = modelOrId;
+        }
+        if (!model) return [];
+        // 棋子优先其代表人物卡的控制权
+        if (typeof model.get === "function" && model.get("represents")) {
+            const campaign = this.getCampaign();
+            const char = (campaign && campaign.characters) ? campaign.characters.get(model.get("represents")) : null;
+            if (char) model = char;
+        }
+        const raw = model.get ? model.get("controlledby") : model.controlledby;
+        if (!raw || typeof raw !== "string") return [];
+        return raw.split(",").map(s => s.trim()).filter(Boolean);
+    }
+
+    // ==========================================
+    // 插件 presence 公告（GM 让位判据 + 玩家共卡选举的候选资格旗）
+    // 载体 = Firebase presence 节点 players/{playerId} 上的 r20suite 字段：
+    // 该节点是 Roll20 原生的账户级在线状态域（online/lastActive 及各客户端偏好字段
+    // 均由客户端自写，安全规则允许玩家写自己的节点）。公告跟随玩家账号——上线写入、
+    // 掉线由 Firebase 原生 onDisconnect 钩子自动销毁、重连后自动重写，零自建监控。
+    // 字段角色：role = "gm"（GM 插件在场，玩家端整体让位）| "player"（玩家插件在跑，
+    // 作为共卡选举的候选资格旗，旗即在线+运行双信号）。
+    // ==========================================
+
+    /** presence 公告字段名（写在各自账号的 presence 节点上） */
+    static SUITE_PRESENCE_FIELD = "r20suite";
+
+    /**
+     * 解析当前战役与本人玩家节点定位（源自登录时 Firebase auth 声明）
+     * @param {"self"|"players"} which self = 本人 presence 节点；players = 全员 presence 集合
+     */
+    static _presenceRef(which) {
+        const auth = window.Campaign && window.Campaign.fbauthinfo && window.Campaign.fbauthinfo.auth;
+        const campaignNode = auth && auth.currentcampaign;
+        if (!campaignNode || typeof firebase === "undefined" || !firebase.database) return null;
+        if (which === "self") {
+            const myPid = this.getCurrentPlayerId();
+            if (!myPid) return null;
+            return firebase.database().ref(`${campaignNode}/players/${myPid}`);
+        }
+        return firebase.database().ref(`${campaignNode}/players`);
+    }
+
+    /**
+     * 插件公告广播（GM / 玩家通用，依附 Firebase 原生生命周期）：
+     * 立即写入本端公告 + 注册 onDisconnect 自动销毁 + 监听 .info/connected 在重连时自动重写。
+     */
+    static async startSuitePresenceBroadcast() {
+        const role = this.isGM() ? "gm" : "player";
+        // fbauthinfo 由登录流程异步写入：启动早于其就绪时短暂轮询，防止公告静默挂载失败
+        let ref = null;
+        for (let attempt = 0; attempt < 30 && !ref; attempt++) {
+            ref = this._presenceRef("self");
+            if (!ref) await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        if (!ref) {
+            console.error("[Roll20Suite] presence 节点定位失败（fbauthinfo 未就绪），插件公告未挂载");
+            return false;
+        }
+
+        const writeAnnouncement = async () => {
+            const fieldRef = ref.child(this.SUITE_PRESENCE_FIELD);
+            await fieldRef.set({
+                role,
+                pid: this.getCurrentPlayerId() || "",
+                at: Date.now(),
+                version: 1
+            });
+            await fieldRef.onDisconnect().remove();
+        };
+
+        try {
+            await writeAnnouncement();
+        } catch (e) {
+            console.error("[Roll20Suite] 插件公告写入失败:", e);
+            return false;
+        }
+
+        // 原生连接生命周期挂钩：断线重连后自动重写公告（闪断自愈，无需自建心跳）
+        if (this._suitePresenceConnectedHandler) {
+            firebase.database().ref(".info/connected").off("value", this._suitePresenceConnectedHandler);
+        }
+        this._suitePresenceConnectedHandler = async (snap) => {
+            if (snap.val() === true) {
+                writeAnnouncement().catch(e => console.error("[Roll20Suite] 插件公告重连重写失败:", e));
+            }
+        };
+        firebase.database().ref(".info/connected").on("value", this._suitePresenceConnectedHandler);
+        return true;
+    }
+
+    /**
+     * 停止公告（teardown / 热重载清理）：取消 onDisconnect 挂载并立即移除公告
+     */
+    static async stopSuitePresenceBroadcast() {
+        if (this._suitePresenceConnectedHandler) {
+            try { firebase.database().ref(".info/connected").off("value", this._suitePresenceConnectedHandler); } catch (e) {}
+            this._suitePresenceConnectedHandler = null;
+        }
+        const ref = this._presenceRef("self");
+        if (!ref) return;
+        try {
+            await ref.child(this.SUITE_PRESENCE_FIELD).onDisconnect().cancel();
+        } catch (e) {}
+        try {
+            await ref.child(this.SUITE_PRESENCE_FIELD).remove();
+        } catch (e) {}
+    }
+
+    /**
+     * 一次定点读全员 presence（每个回合转变仅此一次读取）：
+     * @returns {Promise<{gmPresent: boolean, playerPids: string[], allPlayerIds: string[]}>}
+     *   gmPresent  — 任一节点 role="gm"：GM 插件在场，玩家端整体让位；
+     *   playerPids — role="player" 的玩家集合（共卡选举的候选资格）；
+     *   allPlayerIds — 战役全员玩家 ID（controlledby="all" 时的选举名册）。
+     */
+    static async readSuitePresence() {
+        const ref = this._presenceRef("players");
+        if (!ref) return { gmPresent: false, playerPids: [], allPlayerIds: [] };
+        try {
+            const snap = await ref.once("value");
+            const players = snap.val();
+            const out = { gmPresent: false, playerPids: [], allPlayerIds: [] };
+            if (!players || typeof players !== "object") return out;
+            for (const [pid, node] of Object.entries(players)) {
+                if (!node || typeof node !== "object" || !node.r20suite) continue;
+                if (node.r20suite.role === "gm") out.gmPresent = true;
+                else if (node.r20suite.role === "player") out.playerPids.push(pid);
+            }
+            out.allPlayerIds = Object.keys(players);
+            return out;
+        } catch (e) {
+            return { gmPresent: false, playerPids: [], allPlayerIds: [] };
+        }
+    }
+
+    /**
      * 判断特定对象（角色卡/Token）是否被标记为队伍成员（隊員，即 inParty === true）
      * 对应角色卡设置中的 .character-party-toggle 复选框
      * @param {string|object} target
@@ -2653,6 +2803,119 @@ class Pf1eBuffManager {
     }
 
     /**
+     * 激活指定宿主 Buff/Debuff 的全部下游受术者副本（宿主自身不动，宿主用通用 ⚡ 激活操作）。
+     * 与面板手动 ⚡ 激活完全同语义：char 子副本 toggleBuff/toggleCondition(true)（正面 Buff
+     * 自动重置为初始满轮数），纯 Token 子副本按 rowId 置 enabled=true。
+     * 循环结构镜像 deactivateBuffAndDownstream 的 char/Token 双后端遍历。
+     * @param {object} hostChar 宿主角色卡
+     * @param {string} hostRowId 宿主 Buff 行唯一标识或 Condition Key (如 condition-Blind)
+     * @returns {Promise<number>} 实际激活的子副本数量
+     */
+    static async activateDownstreamChildren(hostChar, hostRowId) {
+        if (!hostChar || !hostRowId) return 0;
+        await Roll20Bridge.ensureCharacterAttributes(hostChar);
+
+        const isDebuff = hostRowId.startsWith("condition-");
+        const attrName = isDebuff ? `${hostRowId}_link_children` : `repeating_buff2_${hostRowId}_link_children`;
+        const children = Roll20Bridge.readJsonAttr(hostChar, attrName);
+
+        let count = 0;
+        if (Array.isArray(children)) {
+            for (const item of children) {
+                const targetChar = window.Campaign?.characters?.get(item.charId);
+                if (targetChar) {
+                    if (isDebuff || (typeof item.rowId === "string" && item.rowId.startsWith("condition-"))) {
+                        await this.toggleCondition(targetChar, item.rowId, true);
+                    } else {
+                        await this.toggleBuff(targetChar, item.rowId, true);
+                    }
+                    this.notifyTokenRefresh(targetChar);
+                    count++;
+                    continue;
+                }
+
+                // 下游为纯 Token：按 rowId 定位自定义字段条目置激活
+                const targetToken = Roll20Bridge.getTokenGraphic(item.charId);
+                if (!targetToken) continue;
+                if (this._activateTokenChildEntry(targetToken, item.rowId)) count++;
+            }
+        }
+        console.log(`[Pf1eBuffManager] 已激活 [${hostChar.get("name")}] 主 ${isDebuff ? "Debuff" : "Buff"} (${hostRowId}) 的 ${count} 个下游受术者副本`);
+        return count;
+    }
+
+    /**
+     * 激活纯 Token 自定义字段中的指定子副本条目（Buff 与 Debuff 两个列表都查，按 rowId/key 匹配）
+     * @returns {boolean} 是否命中并激活
+     */
+    static _activateTokenChildEntry(token, rowId) {
+        if (!token || !rowId) return false;
+        const buffs = TokenBuffManager.getTokenBuffs(token);
+        const buffEntry = buffs.find(e => e.rowId === rowId);
+        if (buffEntry) {
+            buffEntry.enabled = true;
+            TokenBuffManager.saveTokenBuffs(token, buffs);
+            this.notifyTokenRefresh(token);
+            return true;
+        }
+        const debuffs = TokenBuffManager.getTokenDebuffs(token);
+        const debuffEntry = debuffs.find(e => (e.rowId || e.key) === rowId);
+        if (debuffEntry) {
+            debuffEntry.enabled = true;
+            TokenBuffManager.saveTokenDebuffs(token, debuffs);
+            this.notifyTokenRefresh(token);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 宿主驱动的单个下游子副本扣减（decrementBuffs 步骤 2/2.2 与玩家端自理路径的同一业务入口）：
+     * 生命周期判定 → 落盘/过期副作用 → 刷新。写权限由调用方路由与宿主 Firebase 规则共同保障：
+     * 玩家向无权副本发起的写入会被服务端拒绝且不落库，副本属主的自理驱动才是权威值。
+     * @param {{charId: string, rowId: string}} childRef 下游子副本引用（charId 可为人物卡或纯 Token id）
+     * @param {object} opts { isDebuff, conditionKey, buffName, hostCharacter, hostRowId }
+     * @returns {Promise<object|null>} 与 BuffLifecycle.decrementEntry 同形的结果；不参与时 null
+     */
+    static async drivenDecrement(childRef, { isDebuff = false, conditionKey = null, buffName = "", hostCharacter = null, hostRowId = null } = {}) {
+        if (!childRef || !childRef.charId) return null;
+
+        const child = await this._downstreamChildView(childRef, { isDebuff, conditionKey, buffName, hostCharacter, hostRowId });
+        if (!child) return null;
+
+        const result = BuffLifecycle.decrementEntry(child.view, isDebuff ? { isDebuff: true } : undefined);
+        if (!result) return null;
+
+        if (result.status === "expired") {
+            await child.onExpire();
+        } else {
+            await child.persist();
+        }
+        child.notify();
+
+        return { name: child.view.name, status: result.status, remaining: result.status === "expired" ? 0 : result.remaining };
+    }
+
+    /**
+     * 宿主驱动的单个下游子副本回退加回（incrementBuffsOnTurnRevert 步骤 2 与玩家端自理路径的同一业务入口）：
+     * 生命周期判定 → 落盘 → 刷新。写权限边界同 drivenDecrement。
+     */
+    static async drivenIncrement(childRef, { isDebuff = false, conditionKey = null, buffName = "", hostCharacter = null, hostRowId = null } = {}) {
+        if (!childRef || !childRef.charId) return null;
+
+        const child = await this._downstreamChildView(childRef, { isDebuff, conditionKey, buffName, hostCharacter, hostRowId });
+        if (!child) return null;
+
+        const result = BuffLifecycle.incrementEntry(child.view, isDebuff ? { isDebuff: true } : undefined);
+        if (!result) return null;
+
+        await child.persist();
+        child.notify();
+
+        return { name: child.view.name, status: "incremented", remaining: result.remaining };
+    }
+
+    /**
      * 删除主 Buff / Debuff 的全部下游链接子副本，但保留宿主自身行（与彻底删除的区别：老大不随之销毁）
      * 遵循与 deleteBuffRowPermanently 相同的自下而上注销规范：
      * 人物卡子副本走其自身的级联自毁（deleteBuffRowPermanently / deleteDebuffPermanently，可顺带清理孙辈）；
@@ -3561,25 +3824,14 @@ class Pf1eBuffManager {
 
             // 2. 施法者主 Buff 驱动下游受术者扣轮
             // 无论主 Buff 自身是否开启，名下所有已建立链接的受术者副本统一扣减 1 轮
+            // （驱动扣减统一走 drivenDecrement 单一业务入口）
             for (const buff of allBuffs) {
                 if (buff.linkHostId && buff.linkSourceRowId) continue;
                 if (!buff.linkChildren || buff.linkChildren.length === 0) continue;
 
                 for (const childRef of buff.linkChildren) {
-                    const child = await this._downstreamChildView(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
-                    if (!child) continue;
-
-                    const result = BuffLifecycle.decrementEntry(child.view);
-                    if (!result) continue;
-
-                    if (result.status === "expired") {
-                        await child.onExpire();
-                        processed.push({ name: child.view.name, status: "expired", remaining: 0 });
-                    } else {
-                        await child.persist();
-                        processed.push(result);
-                    }
-                    child.notify();
+                    const result = await this.drivenDecrement(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
+                    if (result) processed.push(result);
                 }
             }
 
@@ -3590,20 +3842,8 @@ class Pf1eBuffManager {
                 if (!Array.isArray(children) || children.length === 0) continue;
 
                 for (const childRef of children) {
-                    const child = await this._downstreamChildView(childRef, { isDebuff: true, conditionKey: def.key, buffName: def.name });
-                    if (!child) continue;
-
-                    const result = BuffLifecycle.decrementEntry(child.view, { isDebuff: true });
-                    if (!result) continue;
-
-                    if (result.status === "expired") {
-                        await child.onExpire();
-                        processed.push({ name: child.view.name, status: "expired", remaining: 0 });
-                    } else {
-                        await child.persist();
-                        processed.push(result);
-                    }
-                    child.notify();
+                    const result = await this.drivenDecrement(childRef, { isDebuff: true, conditionKey: def.key, buffName: def.name });
+                    if (result) processed.push(result);
                 }
             }
 
@@ -3698,20 +3938,14 @@ class Pf1eBuffManager {
             }
 
             // 2. 施法者主 Buff 驱动下游受术者加回 1 轮
+            // （驱动回退统一走 drivenIncrement 单一业务入口）
             for (const buff of allBuffs) {
                 if (buff.linkHostId && buff.linkSourceRowId) continue;
                 if (!buff.linkChildren || buff.linkChildren.length === 0) continue;
 
                 for (const childRef of buff.linkChildren) {
-                    const child = await this._downstreamChildView(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
-                    if (!child) continue;
-
-                    const result = BuffLifecycle.incrementEntry(child.view);
-                    if (!result) continue;
-
-                    await child.persist();
-                    child.notify();
-                    processed.push({ name: child.view.name, status: "incremented", remaining: result.remaining });
+                    const result = await this.drivenIncrement(childRef, { buffName: buff.name, hostCharacter: character, hostRowId: buff.rowId });
+                    if (result) processed.push(result);
                 }
             }
 
@@ -4307,6 +4541,97 @@ class TokenBuffManager {
 
         console.log(`[TokenBuffManager] 先攻回退: 为 Token [${token.get("name")}] 加回 Buff/Debuff 轮数共 ${processed.length} 项`);
         return processed;
+    }
+}
+
+    // ==========================================
+    // 8.5 PlayerProxyTicker 玩家端自理扣减编排器 (GM 插件缺席时自理扣轮)
+    // ==========================================
+/**
+ * PlayerProxyTicker.js
+ * 玩家端自理扣减（GM 端插件缺席时的自理路径）。
+ *
+ * 让位判据 = GM 插件公告（presence 旗 role="gm"）：GM 上线在自己的 presence 节点
+ * 插旗、掉线由 Firebase onDisconnect 原生销毁。旗在 = 玩家端整体让位 GM 主路径；
+ * 旗不在 = 先攻条轮到我控制的棋子时，我自己扣。
+ *
+ * 共卡仲裁 = presence 旗选举：多玩家共有同一棋子权限时，「有权控制 ∧ 插件在跑
+ * （持有 role="player" 旗）」的玩家按确定性顺序选出唯一执行者——显式 controlledby
+ * 列表按列表序、"all" 按玩家 ID 字典序——只有当选者扣减。旗即在线+运行双信号，
+ * 当选者掉线自动失格，下一候选自动接管。
+ *
+ * 自理边界 = 写权限；跨权副本不可能存在于玩家自治部署中（副本落盘写在目标单位
+ * 数据上，宿主规则天然阻断玩家跨权创建，applyBuffToTarget 另有目标写权准入）。
+ *
+ * 明示限制：隐藏 NPC 的自身 Buff 玩家无法代扣（写权限硬边界）；presence 在各端
+ * 的传播存在亚秒级时差，极端时序窗口内极端情况下可能双扣一次。
+ */
+class PlayerProxyTicker {
+    /**
+     * 回合开始入口（bundle 主入口接线；GM 端直接忽略，走 GM 主路径）
+     */
+    static onTurnStarted({ startedTokenId } = {}) {
+        if (Roll20Bridge.isGM() || !startedTokenId) return;
+        this._processTurn(startedTokenId, "tick").catch(err => {
+            console.error("[Roll20Suite][PlayerProxy] 自理扣减编排异常:", err);
+        });
+    }
+
+    /**
+     * 先攻回退入口。affectedTokenId = 被拉回单位（原排头，其回合开始的扣减需被加回）
+     */
+    static onTurnReverted({ affectedTokenId } = {}) {
+        if (Roll20Bridge.isGM() || !affectedTokenId) return;
+        this._processTurn(affectedTokenId, "revert").catch(err => {
+            console.error("[Roll20Suite][PlayerProxy] 自理回退编排异常:", err);
+        });
+    }
+
+    /**
+     * 自理执行主体：GM 旗判定 → 轮到我控制的棋子就扣/回退（共卡经旗选举唯一执行者）
+     */
+    static async _processTurn(affectedTokenId, kind) {
+        // GM 旗在 → 我不管了
+        const presence = await Roll20Bridge.readSuitePresence();
+        if (presence.gmPresent) return;
+
+        const tokenGraphic = Roll20Bridge.getTokenGraphic(affectedTokenId);
+        if (!tokenGraphic) return;
+
+        const resolved = Roll20Bridge.resolveBuffTargetMode(tokenGraphic);
+        // 严格按 mode 构建互斥目标：杂兵集群 (mook) 的 resolved.char 非空，
+        // 双字段同传会被 BuffStore.resolveMode 误路由到人物卡后端
+        const selfTarget = resolved.mode === "char" ? { char: resolved.char } : { token: resolved.token };
+
+        if ((selfTarget.char || selfTarget.token) && this._isSelfWritable(selfTarget, presence)) {
+            if (selfTarget.char) await Roll20Bridge.ensureCharacterAttributes(selfTarget.char);
+            try {
+                if (kind === "tick") {
+                    await BuffStore.tick(selfTarget);
+                } else {
+                    await BuffStore.revert(selfTarget);
+                }
+            } catch (err) {
+                console.error(`[Roll20Suite][PlayerProxy] 自理${kind === "tick" ? "扣减" : "回退"}执行异常:`, err);
+            }
+        }
+    }
+
+    /**
+     * 自理准入 + 共卡唯一执行者选举：
+     * 候选 = 有权控制该单位（controlledby 显式列表 / "all" 全员名册）∧ 插件在跑
+     * （持有 role="player" presence 旗，旗即在线+运行双信号，掉线自动失格）。
+     * 当选序：显式列表按列表序、"all" 按玩家 ID 字典序，取首个候选——所有客户端
+     * 对同一份数据解析结果一致，仅当选者扣减。
+     */
+    static _isSelfWritable(target, presence) {
+        const ids = Roll20Bridge.getControllerIds(target.char || target.token);
+        if (ids.length === 0) return false;
+        const roster = ids.includes("all")
+            ? presence.allPlayerIds.slice().sort()
+            : ids.filter(id => id !== "all");
+        const leader = roster.find(pid => presence.playerPids.includes(pid));
+        return leader === Roll20Bridge.getCurrentPlayerId();
     }
 }
 
@@ -6151,6 +6476,11 @@ class BuffPanelStyles {
                 background: #f5f5f5 !important;
                 border-color: #b5b5b5 !important;
                 color: #111111 !important;
+            }
+            .r20-btn-icon:disabled, .r20-btn:disabled {
+                opacity: 0.45 !important;
+                cursor: not-allowed !important;
+                background: #ffffff !important;
             }
             .r20-btn-icon.pinned {
                 color: #b45309 !important;
@@ -8626,14 +8956,21 @@ class BuffFloatingPanel {
         });
 
         // ➕ 钉选角色搜索按钮（常驻栏末尾；renderTabs 每次清空容器后需重建）
+        // 权限守卫：角色搜索菜单会列举全量角色卡（含玩家无权查看的 NPC 名单），非 GM 禁用功能；
+        // 按钮保留渲染（disabled 占位）以维持常驻区与拖拽钉选 drop zone 的空间不变
         const addPinnedBtn = document.createElement("button");
         addPinnedBtn.className = "r20-btn-icon btn-add-pinned-char";
-        addPinnedBtn.title = "钉选指定角色到常驻标签栏";
         addPinnedBtn.textContent = "➕";
-        addPinnedBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            this.showAddPinnedCharMenu(addPinnedBtn);
-        });
+        if (Roll20Bridge.isGM()) {
+            addPinnedBtn.title = "钉选指定角色到常驻标签栏";
+            addPinnedBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                this.showAddPinnedCharMenu(addPinnedBtn);
+            });
+        } else {
+            addPinnedBtn.disabled = true;
+            addPinnedBtn.title = "钉选角色为 GM 专属功能（可将标签拖入常驻区钉选）";
+        }
         pinnedContainer.appendChild(addPinnedBtn);
 
         // 3. 自动调和与回退当前激活的 Tab 目标
@@ -8765,10 +9102,13 @@ class BuffFloatingPanel {
         const currentEpoch = ++this._renderEpoch;
 
         if (!this.activeTarget) {
+            const emptyHint = Roll20Bridge.isGM()
+                ? "在地图点击棋子展示 Buff，或点击右上角 ➕ 钉选常驻角色"
+                : "在地图点击棋子展示 Buff，或拖拽标签至常驻区钉选";
             viewport.innerHTML = `
                 <div class="r20-empty-view">
                     🕹️ 画布未选中任何单位<br>
-                    在地图点击棋子展示 Buff，或点击右上角 ➕ 钉选常驻角色
+                    ${emptyHint}
                 </div>
             `;
             return;
@@ -9368,6 +9708,7 @@ class BuffFloatingPanel {
             ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-host" style="color:#64b5f6;"><span>🔄</span><span>从原Buff同步</span></div>` : ""}
             <div class="r20-context-menu-item btn-ctx-unlink" style="color:#f59e0b;"><span>🔗</span><span>断开链接</span></div>` : ""}
             ${!isLinkedChild && hasDownstream ? `
+            <div class="r20-context-menu-item btn-ctx-activate-downstream" style="color:#4ade80;"><span>⚡</span><span>激活所有下属Buff (${buff.linkChildren.length})</span></div>
             <div class="r20-context-menu-item btn-ctx-deactivate-downstream" style="color:#fb7185;"><span>🛑</span><span>关停当前及所有下属Buff (${buff.linkChildren.length})</span></div>
             ${!isDebuff ? `<div class="r20-context-menu-item btn-ctx-sync-downstream" style="color:#81c784;"><span>🔄</span><span>更新所有下属Buff (${buff.linkChildren.length})</span></div>` : ""}
             <div class="r20-context-menu-item btn-ctx-delete-downstream" style="color:#ef5350;"><span>🧹</span><span>删除所有下属Buff (${buff.linkChildren.length})</span></div>` : ""}
@@ -9445,8 +9786,7 @@ class BuffFloatingPanel {
                     }
                 } else {
                     for (const b of buffsToApply) {
-                        await this.applyBuffToTarget(b, target, char.id);
-                        count++;
+                        if (await this.applyBuffToTarget(b, target, char.id)) count++;
                     }
                 }
             }
@@ -9487,8 +9827,7 @@ class BuffFloatingPanel {
                     }
                 } else {
                     for (const b of buffsToApply) {
-                        await this.applyBuffToTarget(b, target, null);
-                        count++;
+                        if (await this.applyBuffToTarget(b, target, null)) count++;
                     }
                 }
             }
@@ -9546,6 +9885,16 @@ class BuffFloatingPanel {
             }
         });
 
+        // 激活所有下属（下游受术者）链接副本（宿主自身不动；子副本与手动 ⚡ 激活同语义）
+        menu.querySelector(".btn-ctx-activate-downstream")?.addEventListener("click", async () => {
+            cleanup();
+            if (!char) return;
+            const n = await Pf1eBuffManager.activateDownstreamChildren(char, buff.rowId);
+            this.showNotice(`已激活 [${buff.name}] 的 ${n} 个下属链接副本`);
+            await Pf1eBuffUI.refreshAllBadges();
+            await this.renderAllPanes();
+        });
+
         // 关停当前及所有下游Buff / Debuff
         menu.querySelector(".btn-ctx-deactivate-downstream")?.addEventListener("click", async () => {
             cleanup();
@@ -9591,11 +9940,26 @@ class BuffFloatingPanel {
     /**
      * 将 Buff / Debuff 施加至目标（支持传入 sourceHostId 自动打上影子链接）
      * 根本约束：施法者严禁向自身创建链接/副本
+     * @returns {Promise<boolean>} 是否实际施加成功（无目标写权/参数非法时拒绝并返回 false）
      */
     static async applyBuffToTarget(buff, target, sourceHostId = null) {
-        if (!buff || !target || (sourceHostId && target.id === sourceHostId)) return;
+        if (!buff || !target || (sourceHostId && target.id === sourceHostId)) return false;
         const targetChar = target.type === "char" ? window.Campaign?.characters?.get(target.id) : null;
         const targetToken = target.type === "token" ? Roll20Bridge.getTokenGraphic(target.id) : null;
+
+        // 目标写权准入：副本与链接登记均落盘在目标单位的数据上（目标卡属性 / 目标棋子
+        // 自定义字段），且宿主索引写在施法者自己卡上必然成功——无写权者施加会产生
+        // "索引已登记、副本服务端不存在"的幽灵索引（拓扑自愈仅在 GM 端运行）。
+        // 故无目标控制权者一律在入口拒绝，GM 全域放行。
+        if (!Roll20Bridge.isGM()) {
+            const controllable = target.type === "char"
+                ? Roll20Bridge.canControlCharacter(target.id)
+                : Roll20Bridge.canControlToken(target.id);
+            if (!controllable) {
+                this.showNotice(`无权向 [${target.name || "未命名单位"}] 施加：目标单位不受你控制`);
+                return false;
+            }
+        }
 
         const isDebuff = !!buff.isDebuff || (typeof buff.rowId === "string" && buff.rowId.startsWith("condition-"));
 
@@ -9626,7 +9990,7 @@ class BuffFloatingPanel {
                 if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
                 await this.renderViewport();
             }
-            return;
+            return true;
         }
 
         let extraAttrs = { ...(buff.extraAttrs || {}) };
@@ -9657,6 +10021,7 @@ class BuffFloatingPanel {
             this.showNotice(`已为 [${target.name}] 施加 ${sourceHostId ? "链接" : ""} Buff [${buff.name}]`);
             if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetChar.id);
             await this.renderViewport();
+            return true;
         } else if (targetToken) {
             // 纯 Token：链接 Buff 记录影子链接元数据并向宿主登记下游；普通副本彻底独立
             const entry = TokenBuffManager.applyOrRefreshBuff(targetToken, buff.name, buff.rounds, null, buff.initRounds);
@@ -9679,7 +10044,9 @@ class BuffFloatingPanel {
             this.showNotice(`已为 [${target.name}] 施加 ${sourceHostId ? "链接" : ""} Buff [${buff.name}]`);
             if (typeof Pf1eBuffUI !== "undefined") Pf1eBuffUI.requestTokenRefresh(targetToken.id);
             await this.renderViewport();
+            return true;
         }
+        return false;
     }
 
     /**
@@ -9823,6 +10190,8 @@ class BuffFloatingPanel {
      * 恢复自 v0.9.26：下方空间不足时自动向上翻转展开
      */
     static showAddPinnedCharMenu(anchorBtn) {
+        // 权限守卫（纵深防御）：搜索菜单会列举全量角色卡（含玩家无权查看的 NPC），仅 GM 可用
+        if (!Roll20Bridge.isGM()) return;
         document.querySelector(".r20-pinned-char-picker")?.remove();
 
         const characters = window.Campaign?.characters?.models || [];
@@ -10569,19 +10938,39 @@ class BuffFloatingPanel {
                 console.error("[Roll20Suite] RecalcService 初始化异常:", recalcErr);
             }
 
+            // 0.5 插件 presence 公告：GM 插 GM 旗（玩家端让位判据），玩家插玩家旗（共卡选举候选资格）。
+            //     依附 Firebase 原生生命周期——上线写入、掉线 onDisconnect 自动销毁、重连自动重写。
+            try {
+                await Roll20Bridge.startSuitePresenceBroadcast();
+                registerCleanup(() => Roll20Bridge.stopSuitePresenceBroadcast());
+                console.log("[Roll20Suite] 插件 presence 公告已挂载（角色: " + (Roll20Bridge.isGM() ? "gm" : "player") + "）");
+            } catch (presenceErr) {
+                console.error("[Roll20Suite] 插件公告挂载异常:", presenceErr);
+            }
+
             // 1. 初始化并挂载先攻追踪器
             try {
                 const observer = new TurnOrderObserver();
                 observer.on("turnStarted", async ({ startedTokenId, endedTokenId, isLocalUserAction }) => {
-                    if (Roll20Bridge.isGM() && isLocalUserAction) {
-                        try {
-                            const tokenGraphic = Roll20Bridge.getTokenGraphic(startedTokenId);
-                            if (tokenGraphic) {
-                                await BuffStore.tick(Roll20Bridge.resolveBuffTargetMode(tokenGraphic));
+                    try {
+                        const tokenGraphic = Roll20Bridge.getTokenGraphic(startedTokenId);
+                        if (tokenGraphic) {
+                            if (Roll20Bridge.isGM()) {
+                                // GM 主路径：GM 本人点击推进时权威扣减
+                                if (isLocalUserAction) {
+                                    const resolved = Roll20Bridge.resolveBuffTargetMode(tokenGraphic);
+                                    // 严格按 mode 构建互斥目标：杂兵集群 (mook) 的 char 字段非空，
+                                    // 双字段同传会被 BuffStore.resolveMode 误路由到人物卡后端
+                                    const tickTarget = resolved.mode === "char" ? { char: resolved.char } : { token: resolved.token };
+                                    await BuffStore.tick(tickTarget);
+                                }
+                            } else {
+                                // 玩家端：GM 插件公告在场则让位，否则按写权限自理扣减
+                                PlayerProxyTicker.onTurnStarted({ startedTokenId });
                             }
-                        } catch (err) {
-                            console.error("[Roll20Suite] 先攻回合开始扣减异常:", err);
                         }
+                    } catch (err) {
+                        console.error("[Roll20Suite] 先攻回合开始扣减异常:", err);
                     }
                     await Pf1eBuffUI.refreshAllBadges();
                     await BuffFloatingPanel.renderAllPanes();
@@ -10589,15 +10978,21 @@ class BuffFloatingPanel {
 
                 observer.on("turnReverted", async ({ revertedTokenId, oldList, isLocalUserAction }) => {
                     const targetTokenId = (oldList && oldList.length > 0) ? oldList[0].id : revertedTokenId;
-                    if (Roll20Bridge.isGM() && isLocalUserAction) {
-                        try {
-                            const tokenGraphic = Roll20Bridge.getTokenGraphic(targetTokenId);
-                            if (tokenGraphic) {
-                                await BuffStore.revert(Roll20Bridge.resolveBuffTargetMode(tokenGraphic));
+                    try {
+                        const tokenGraphic = Roll20Bridge.getTokenGraphic(targetTokenId);
+                        if (tokenGraphic) {
+                            if (Roll20Bridge.isGM()) {
+                                if (isLocalUserAction) {
+                                    const resolved = Roll20Bridge.resolveBuffTargetMode(tokenGraphic);
+                                    const revertTarget = resolved.mode === "char" ? { char: resolved.char } : { token: resolved.token };
+                                    await BuffStore.revert(revertTarget);
+                                }
+                            } else {
+                                PlayerProxyTicker.onTurnReverted({ affectedTokenId: targetTokenId });
                             }
-                        } catch (err) {
-                            console.error("[Roll20Suite] 先攻回退加回轮数异常:", err);
                         }
+                    } catch (err) {
+                        console.error("[Roll20Suite] 先攻回退加回轮数异常:", err);
                     }
                     await Pf1eBuffUI.refreshAllBadges();
                     await BuffFloatingPanel.renderAllPanes();
@@ -10682,6 +11077,7 @@ class BuffFloatingPanel {
                 SuiteConfigStore,
                 TurnOrderObserver,
                 TokenBuffManager,
+                PlayerProxyTicker,
                 Pf1eBuffUI,
                 CharacterSheetTitleCopier,
                 CharacterSheetBuffEnhancer,
